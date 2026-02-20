@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { Ticket } from "@shared/schema";
+import type { Ticket, Service } from "@shared/schema";
 import {
   Plus,
   Search,
@@ -12,6 +12,10 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  BarChart3,
+  ShieldAlert,
+  Activity,
+  Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,8 +56,191 @@ const STATUS_ICONS: Record<string, any> = {
   closed: CheckCircle2,
 };
 
-function TicketCard({ ticket, isMSS, onStatusChange }: { ticket: Ticket; isMSS: boolean; onStatusChange: (id: number, status: string) => void }) {
+function timeAgo(date: Date | string): string {
+  const now = new Date();
+  const past = new Date(date);
+  const diffMs = now.getTime() - past.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return "just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
+function PriorityDonutChart({ tickets }: { tickets: Ticket[] }) {
+  const counts = useMemo(() => {
+    const c = { urgent: 0, high: 0, medium: 0, low: 0 };
+    tickets.forEach((t) => {
+      if (t.priority in c) c[t.priority as keyof typeof c]++;
+    });
+    return c;
+  }, [tickets]);
+
+  const total = tickets.length || 1;
+  const segments = [
+    { key: "urgent", color: "hsl(var(--destructive))", count: counts.urgent },
+    { key: "high", color: "hsl(var(--chart-4))", count: counts.high },
+    { key: "medium", color: "hsl(var(--chart-1))", count: counts.medium },
+    { key: "low", color: "hsl(var(--chart-2))", count: counts.low },
+  ];
+
+  let cumulative = 0;
+  const gradientParts: string[] = [];
+  segments.forEach((seg) => {
+    const pct = (seg.count / total) * 100;
+    if (pct > 0) {
+      gradientParts.push(`${seg.color} ${cumulative}% ${cumulative + pct}%`);
+      cumulative += pct;
+    }
+  });
+
+  const gradient = gradientParts.length > 0
+    ? `conic-gradient(${gradientParts.join(", ")})`
+    : "conic-gradient(hsl(var(--muted)) 0% 100%)";
+
+  return (
+    <div className="flex items-center gap-4" data-testid="chart-priority-donut">
+      <div
+        className="w-16 h-16 rounded-full shrink-0"
+        style={{
+          background: gradient,
+          mask: "radial-gradient(farthest-side, transparent 60%, black 61%)",
+          WebkitMask: "radial-gradient(farthest-side, transparent 60%, black 61%)",
+        }}
+      />
+      <div className="space-y-1">
+        {segments.map((seg) => (
+          <div key={seg.key} className="flex items-center gap-2 text-xs">
+            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: seg.color }} />
+            <span className="capitalize text-muted-foreground">{seg.key}</span>
+            <span className="font-medium">{seg.count}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ActivityDashboard({ tickets, services }: { tickets: Ticket[]; services: Service[] }) {
+  const stats = useMemo(() => {
+    const total = tickets.length;
+    const open = tickets.filter((t) => t.status === "open").length;
+    const inProgress = tickets.filter((t) => t.status === "in_progress").length;
+    const waiting = tickets.filter((t) => t.status === "waiting").length;
+    const resolved = tickets.filter((t) => t.status === "resolved" || t.status === "closed").length;
+
+    const respondedTickets = tickets.filter((t) => t.firstResponseAt && t.createdAt);
+    let avgResponseMs = 0;
+    if (respondedTickets.length > 0) {
+      const totalMs = respondedTickets.reduce((sum, t) => {
+        return sum + (new Date(t.firstResponseAt!).getTime() - new Date(t.createdAt).getTime());
+      }, 0);
+      avgResponseMs = totalMs / respondedTickets.length;
+    }
+    const avgResponseHours = Math.round(avgResponseMs / 3600000 * 10) / 10;
+
+    const ticketsWithSlaData = tickets.filter((t) => t.slaBreached !== null && t.slaBreached !== undefined);
+    const slaCompliant = ticketsWithSlaData.filter((t) => !t.slaBreached).length;
+    const slaTotal = ticketsWithSlaData.length;
+    const slaPct = slaTotal > 0 ? Math.round((slaCompliant / slaTotal) * 100) : 100;
+
+    return { total, open, inProgress, waiting, resolved, avgResponseHours, slaPct, slaTotal };
+  }, [tickets]);
+
+  const statCards = [
+    { label: "Total Tickets", value: stats.total, icon: BarChart3, color: "text-foreground" },
+    { label: "Open", value: stats.open, icon: AlertCircle, color: "text-destructive" },
+    { label: "In Progress", value: stats.inProgress, icon: Loader2, color: "text-chart-4" },
+    { label: "Waiting", value: stats.waiting, icon: Clock, color: "text-chart-1" },
+    { label: "Resolved", value: stats.resolved, icon: CheckCircle2, color: "text-chart-2" },
+    { label: "Avg Response", value: `${stats.avgResponseHours}h`, icon: Timer, color: "text-muted-foreground" },
+  ];
+
+  return (
+    <div className="space-y-4" data-testid="section-activity-dashboard">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        {statCards.map((stat) => {
+          const Icon = stat.icon;
+          return (
+            <Card key={stat.label} data-testid={`stat-card-${stat.label.toLowerCase().replace(/\s+/g, "-")}`}>
+              <CardContent className="p-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-wide">{stat.label}</span>
+                  <Icon className={`w-3.5 h-3.5 ${stat.color}`} />
+                </div>
+                <p className="text-lg font-semibold mt-1">{stat.value}</p>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Card data-testid="card-priority-distribution">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-3 uppercase tracking-wide">Priority Distribution</p>
+            <PriorityDonutChart tickets={tickets} />
+          </CardContent>
+        </Card>
+        <Card data-testid="card-sla-compliance">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-3 uppercase tracking-wide">SLA Compliance</p>
+            <div className="flex items-center gap-4">
+              <div className="relative w-16 h-16 shrink-0">
+                <svg viewBox="0 0 36 36" className="w-16 h-16 -rotate-90">
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke="hsl(var(--muted))"
+                    strokeWidth="3"
+                  />
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke={stats.slaPct >= 90 ? "hsl(var(--chart-2))" : stats.slaPct >= 70 ? "hsl(var(--chart-1))" : "hsl(var(--destructive))"}
+                    strokeWidth="3"
+                    strokeDasharray={`${stats.slaPct}, 100`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-sm font-semibold">{stats.slaPct}%</span>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  {stats.slaPct >= 90 ? "On Track" : stats.slaPct >= 70 ? "Needs Attention" : "Critical"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.slaTotal > 0
+                    ? `${stats.slaTotal - Math.round((stats.slaPct / 100) * stats.slaTotal)} of ${stats.slaTotal} tickets breached SLA`
+                    : "No SLA data available"}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function TicketCard({
+  ticket,
+  isMSS,
+  onStatusChange,
+  services,
+}: {
+  ticket: Ticket;
+  isMSS: boolean;
+  onStatusChange: (id: number, status: string) => void;
+  services: Service[];
+}) {
   const Icon = STATUS_ICONS[ticket.status] || AlertCircle;
+  const serviceName = ticket.serviceId
+    ? services.find((s) => s.id === ticket.serviceId)?.name
+    : null;
 
   return (
     <Card className="hover-elevate" data-testid={`card-ticket-${ticket.id}`}>
@@ -77,17 +264,33 @@ function TicketCard({ ticket, isMSS, onStatusChange }: { ticket: Ticket; isMSS: 
                 <Badge variant="outline" className={`text-[10px] ${PRIORITY_STYLES[ticket.priority]}`}>
                   {ticket.priority}
                 </Badge>
+                {ticket.slaBreached && (
+                  <Badge variant="destructive" className="text-[10px]" data-testid={`badge-sla-breached-${ticket.id}`}>
+                    <ShieldAlert className="w-3 h-3 mr-1" />
+                    SLA Breached
+                  </Badge>
+                )}
+                {serviceName && (
+                  <Badge variant="secondary" className="text-[10px]" data-testid={`badge-service-${ticket.id}`}>
+                    {serviceName}
+                  </Badge>
+                )}
               </div>
               <h3 className="text-sm font-medium truncate">{ticket.title}</h3>
               {ticket.description && (
                 <p className="text-xs text-muted-foreground line-clamp-2">{ticket.description}</p>
               )}
-              <div className="flex items-center gap-3 pt-1">
+              <div className="flex items-center gap-3 pt-1 flex-wrap">
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(ticket.createdAt).toLocaleDateString()}
                 </span>
                 {ticket.category && (
                   <Badge variant="secondary" className="text-[10px]">{ticket.category}</Badge>
+                )}
+                {ticket.firstResponseAt && (
+                  <span className="text-[10px] text-muted-foreground" data-testid={`text-first-response-${ticket.id}`}>
+                    First Response: {timeAgo(ticket.firstResponseAt)}
+                  </span>
                 )}
               </div>
             </div>
@@ -121,11 +324,18 @@ export default function TicketsPage() {
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("open");
+  const [serviceFilter, setServiceFilter] = useState<string>("all");
+  const [createServiceId, setCreateServiceId] = useState<string>("");
 
   const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   const { data: tickets = [], isLoading } = useQuery<Ticket[]>({
     queryKey: ["/api/tickets", currentTenant?.id],
+    enabled: !!currentTenant,
+  });
+
+  const { data: services = [] } = useQuery<Service[]>({
+    queryKey: ["/api/services", currentTenant?.id],
     enabled: !!currentTenant,
   });
 
@@ -137,6 +347,7 @@ export default function TicketsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/tickets"] });
       setDialogOpen(false);
+      setCreateServiceId("");
       toast({ title: "Ticket created", description: "Your support ticket has been submitted." });
     },
   });
@@ -151,7 +362,11 @@ export default function TicketsPage() {
     },
   });
 
-  const filteredByTab = tickets.filter((t) => {
+  const filteredByService = serviceFilter === "all"
+    ? tickets
+    : tickets.filter((t) => t.serviceId === parseInt(serviceFilter));
+
+  const filteredByTab = filteredByService.filter((t) => {
     if (activeTab === "open") return t.status === "open" || t.status === "in_progress";
     if (activeTab === "waiting") return t.status === "waiting";
     if (activeTab === "resolved") return t.status === "resolved" || t.status === "closed";
@@ -162,19 +377,23 @@ export default function TicketsPage() {
     !search || t.title.toLowerCase().includes(search.toLowerCase())
   );
 
-  const openCount = tickets.filter(t => t.status === "open" || t.status === "in_progress").length;
-  const waitingCount = tickets.filter(t => t.status === "waiting").length;
-  const resolvedCount = tickets.filter(t => t.status === "resolved" || t.status === "closed").length;
+  const openCount = filteredByService.filter(t => t.status === "open" || t.status === "in_progress").length;
+  const waitingCount = filteredByService.filter(t => t.status === "waiting").length;
+  const resolvedCount = filteredByService.filter(t => t.status === "resolved" || t.status === "closed").length;
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    createMutation.mutate({
+    const payload: any = {
       title: formData.get("title"),
       description: formData.get("description"),
       priority: formData.get("priority"),
       category: formData.get("category"),
-    });
+    };
+    if (createServiceId && createServiceId !== "none") {
+      payload.serviceId = parseInt(createServiceId);
+    }
+    createMutation.mutate(payload);
   };
 
   return (
@@ -233,6 +452,22 @@ export default function TicketsPage() {
                   </Select>
                 </div>
               </div>
+              <div className="space-y-2">
+                <Label>Service (Optional)</Label>
+                <Select value={createServiceId} onValueChange={setCreateServiceId}>
+                  <SelectTrigger data-testid="select-ticket-service">
+                    <SelectValue placeholder="No service linked" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No service linked</SelectItem>
+                    {services.map((svc) => (
+                      <SelectItem key={svc.id} value={String(svc.id)}>
+                        {svc.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <Button type="submit" className="w-full" disabled={createMutation.isPending} data-testid="button-submit-ticket">
                 {createMutation.isPending ? "Submitting..." : "Submit Ticket"}
               </Button>
@@ -240,6 +475,8 @@ export default function TicketsPage() {
           </DialogContent>
         </Dialog>
       </div>
+
+      <ActivityDashboard tickets={tickets} services={services} />
 
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
@@ -252,6 +489,19 @@ export default function TicketsPage() {
             data-testid="input-search-tickets"
           />
         </div>
+        <Select value={serviceFilter} onValueChange={setServiceFilter}>
+          <SelectTrigger className="w-[180px]" data-testid="select-service-filter">
+            <SelectValue placeholder="All Services" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Services</SelectItem>
+            {services.map((svc) => (
+              <SelectItem key={svc.id} value={String(svc.id)}>
+                {svc.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
@@ -292,6 +542,7 @@ export default function TicketsPage() {
                   ticket={ticket}
                   isMSS={isMSS}
                   onStatusChange={(id, status) => updateMutation.mutate({ id, status })}
+                  services={services}
                 />
               ))}
             </div>

@@ -9,6 +9,10 @@ import {
   insertTaskSchema,
   insertTicketCommentSchema,
   insertSecurityEventSchema,
+  insertServiceSchema,
+  insertSlaDefinitionSchema,
+  insertTeamMemberSchema,
+  insertShiftRosterSchema,
 } from "@shared/schema";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -98,12 +102,27 @@ export async function registerRoutes(
         const existingUsers = await storage.getAllTenantUsers();
         const mssps = await storage.getMSSPs();
 
-        if (existingUsers.length === 0 && mssps.length > 0) {
-          tenantUser = await storage.createTenantUser({
-            userId,
-            tenantId: mssps[0].id,
-            role: "mss_admin",
-          });
+        if (existingUsers.length === 0) {
+          if (mssps.length === 0) {
+            const mssp = await storage.createTenant({
+              name: "SecureOps MSSP",
+              slug: "secureops-mssp",
+              type: "mssp",
+              industry: "Cybersecurity",
+              contactEmail: req.user.claims.email || "",
+            });
+            tenantUser = await storage.createTenantUser({
+              userId,
+              tenantId: mssp.id,
+              role: "mss_admin",
+            });
+          } else {
+            tenantUser = await storage.createTenantUser({
+              userId,
+              tenantId: mssps[0].id,
+              role: "mss_admin",
+            });
+          }
         } else if (mssps.length > 0) {
           tenantUser = await storage.createTenantUser({
             userId,
@@ -165,6 +184,21 @@ export async function registerRoutes(
       return res.json([{ ...userTenant, children: [] }]);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch tenant hierarchy" });
+    }
+  });
+
+  app.post("/api/tenants", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { name, slug, type, parentId, industry, contactEmail } = req.body;
+      if (!name || !slug) return res.status(400).json({ message: "Name and slug are required" });
+      const tenant = await storage.createTenant({
+        name, slug, type: type || "customer", parentId: parentId || access.tenantId, industry, contactEmail,
+      });
+      res.status(201).json(tenant);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to create tenant" });
     }
   });
 
@@ -579,6 +613,187 @@ Be specific and professional. Reference actual data patterns and threats.`;
       res.json(events);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch security events" });
+    }
+  });
+
+  // Services & SLA routes
+  app.get("/api/services/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const servicesList = await storage.getServices(tenantId);
+      res.json(servicesList);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch services" });
+    }
+  });
+
+  app.post("/api/services", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const validated = insertServiceSchema.parse(req.body);
+      await assertTenantAccess(req, validated.tenantId);
+      const service = await storage.createService(validated);
+      res.status(201).json(service);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Validation error", errors: error.errors });
+      res.status(error.status || 500).json({ message: error.message || "Failed to create service" });
+    }
+  });
+
+  app.patch("/api/services/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getService(id);
+      if (!existing) return res.status(404).json({ message: "Service not found" });
+      const access = await assertTenantAccess(req, existing.tenantId);
+      assertMSSRole(access);
+      const service = await storage.updateService(id, req.body);
+      res.json(service);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update service" });
+    }
+  });
+
+  app.get("/api/sla-definitions/:serviceId", isAuthenticated, async (req: any, res) => {
+    try {
+      const serviceId = parseInt(req.params.serviceId);
+      const service = await storage.getService(serviceId);
+      if (!service) return res.status(404).json({ message: "Service not found" });
+      await assertTenantAccess(req, service.tenantId);
+      const slas = await storage.getSlaDefinitions(serviceId);
+      res.json(slas);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch SLA definitions" });
+    }
+  });
+
+  app.post("/api/sla-definitions", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const validated = insertSlaDefinitionSchema.parse(req.body);
+      const service = await storage.getService(validated.serviceId);
+      if (!service) return res.status(404).json({ message: "Service not found" });
+      await assertTenantAccess(req, service.tenantId);
+      const sla = await storage.createSlaDefinition(validated);
+      res.status(201).json(sla);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Validation error", errors: error.errors });
+      res.status(error.status || 500).json({ message: error.message || "Failed to create SLA definition" });
+    }
+  });
+
+  app.delete("/api/sla-definitions/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const id = parseInt(req.params.id);
+      const sla = await storage.getSlaDefinition(id);
+      if (!sla) return res.status(404).json({ message: "SLA definition not found" });
+      const service = await storage.getService(sla.serviceId);
+      if (service) await assertTenantAccess(req, service.tenantId);
+      await storage.deleteSlaDefinition(id);
+      res.json({ message: "Deleted" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to delete SLA definition" });
+    }
+  });
+
+  // Team Members routes
+  app.get("/api/team-members/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const teamType = req.query.teamType as string | undefined;
+      const members = teamType
+        ? await storage.getTeamMembersByType(tenantId, teamType)
+        : await storage.getTeamMembers(tenantId);
+      res.json(members);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch team members" });
+    }
+  });
+
+  app.post("/api/team-members", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const validated = insertTeamMemberSchema.parse(req.body);
+      await assertTenantAccess(req, validated.tenantId);
+      const member = await storage.createTeamMember(validated);
+      res.status(201).json(member);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Validation error", errors: error.errors });
+      res.status(error.status || 500).json({ message: error.message || "Failed to create team member" });
+    }
+  });
+
+  app.patch("/api/team-members/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getTeamMember(id);
+      if (!existing) return res.status(404).json({ message: "Team member not found" });
+      const access = await assertTenantAccess(req, existing.tenantId);
+      assertMSSRole(access);
+      const member = await storage.updateTeamMember(id, req.body);
+      res.json(member);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update team member" });
+    }
+  });
+
+  // Shift Roster routes
+  app.get("/api/shift-rosters/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const { startDate, endDate } = req.query;
+      const shifts = startDate && endDate
+        ? await storage.getShiftRostersByDate(tenantId, new Date(startDate), new Date(endDate))
+        : await storage.getShiftRosters(tenantId);
+      res.json(shifts);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch shift rosters" });
+    }
+  });
+
+  app.post("/api/shift-rosters", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const validated = insertShiftRosterSchema.parse(req.body);
+      await assertTenantAccess(req, validated.tenantId);
+      const shift = await storage.createShiftRoster(validated);
+      res.status(201).json(shift);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Validation error", errors: error.errors });
+      res.status(error.status || 500).json({ message: error.message || "Failed to create shift roster" });
+    }
+  });
+
+  app.patch("/api/shift-rosters/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getShiftRosters(0);
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const shift = await storage.updateShiftRoster(id, req.body);
+      res.json(shift);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update shift roster" });
+    }
+  });
+
+  app.delete("/api/shift-rosters/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      await storage.deleteShiftRoster(parseInt(req.params.id));
+      res.json({ message: "Deleted" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to delete shift roster" });
     }
   });
 

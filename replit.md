@@ -1,7 +1,7 @@
 # SecureOps - MSSP Reporting Platform
 
 ## Overview
-Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for managing security operations across client organizations. Features hierarchical tenant architecture (MSSP → Customers), incident orchestration, AI-powered report generation, support ticketing, project management with Kanban boards, and enterprise-grade CISO-level security dashboards.
+Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for managing security operations across client organizations. Features hierarchical tenant architecture (MSSP → Customers), incident orchestration, AI-powered report generation, support ticketing with SLA tracking, project management with Kanban boards, enterprise-grade CISO-level security dashboards, Solutions & Services management with MSA/SLA tracking, shift roster management for Implementation and MSS teams, and automated project reporting.
 
 ## Architecture
 - **Frontend**: React + Vite + TailwindCSS + shadcn/ui + Recharts + wouter routing
@@ -11,21 +11,24 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 - **Auth**: Replit OIDC Auth with role-based access control
 
 ## Key Files
-- `shared/schema.ts` - Database schema (tenants with hierarchy, incidents, tickets, projects, tasks, reports, security_events)
+- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters)
 - `server/routes.ts` - API routes with tenant access control middleware
-- `server/storage.ts` - Database storage layer (IStorage interface) with enhanced dashboard stats
-- `server/seed.ts` - Seed data: 3 MSSPs, 7 customer orgs, 680+ security events across 10 event types
+- `server/storage.ts` - Database storage layer (IStorage interface) with CRUD for all entities
+- `server/seed.ts` - Disabled (production-ready, no seed data)
 - `client/src/App.tsx` - Main app with routing and auth flow
 - `client/src/components/app-sidebar.tsx` - Sidebar navigation with hierarchical tenant selector
 - `client/src/lib/tenant-context.tsx` - Multi-tenant context provider with hierarchy support
-- `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 8 tabs (SOC, Threats, Email, Endpoint, Cloud/WAF, Network/Identity, Logs, Vulnerabilities)
-- `client/src/pages/reports.tsx` - AI-powered report generation with 8 report types and file download
-- `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF) with drag-and-drop
+- `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 8 tabs
+- `client/src/pages/tickets.tsx` - Ticketing with SLA indicators and activity dashboard
+- `client/src/pages/projects.tsx` - Project management with activity dashboard and report generation
+- `client/src/pages/services.tsx` - Solutions & Services management with SLA tracking
+- `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
+- `client/src/pages/reports.tsx` - AI-powered report generation with 8 report types
+- `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF)
 
 ## Security Events Architecture
 10 event types: email, endpoint, vulnerability, casb, waf, dlp, sse, network, identity, cloud
 Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType, logSource, sender, recipient, protocol, country, riskScore
-Log sources: CrowdStrike, Palo Alto, SentinelOne, Netskope, Proofpoint, Microsoft Defender, Splunk, QRadar, etc.
 
 ## Dashboard Tabs
 1. **SOC Overview** - Risk/compliance gauges, incident trends, severity breakdown, recent incidents
@@ -37,17 +40,55 @@ Log sources: CrowdStrike, Palo Alto, SentinelOne, Netskope, Proofpoint, Microsof
 7. **Log Sources** - Event ingestion trends, log source health, source type distribution, EPS
 8. **Vulnerabilities** - Vulnerable apps, severity distribution, event severity
 
+## New Features (Feb 2026)
+### Solutions & Services Management
+- Service definitions with MSA tracking (start/end dates, contract value)
+- SLA definitions per service (response time, resolution time, uptime targets)
+- SLA Dashboard with compliance indicators (green/yellow/red)
+- Service types: managed_soc, vulnerability_management, email_security, endpoint_protection, cloud_security, compliance_advisory, incident_response, penetration_testing
+
+### Shift Roster Management
+- Two team types: Implementation (Ticketing & Projects) and MSS (Incidents & Dashboards)
+- Team member management with active/inactive status
+- Shift scheduling: day, night, swing, on-call shifts
+- Visual shift type indicators with color coding
+
+### Enhanced Ticketing
+- Activity dashboard with stats (total, open, in progress, waiting, resolved)
+- SLA compliance indicator with visual percentage
+- Priority distribution donut chart
+- Service linkage for SLA tracking
+- SLA breach indicators on ticket cards
+- Service filter dropdown
+
+### Enhanced Project Management
+- Activity dashboard with cross-project stats
+- Per-project progress bars (tasks done/total)
+- AI-powered report generation (Daily Project Status, Weekly Project Summary)
+- Enhanced task cards with assignee, due dates, overdue indicators
+
+## Database Tables
+- `tenants` - Organizations (MSSP/customer hierarchy)
+- `tenant_users` - User-tenant-role mappings
+- `incidents` - Security incidents
+- `tickets` - Support tickets with SLA fields (serviceId, firstResponseAt, slaBreached)
+- `ticket_comments` - Ticket discussion threads
+- `projects` - Project management
+- `tasks` - Kanban tasks with assignee and due dates
+- `reports` - Generated reports
+- `security_events` - Security event telemetry
+- `services` - Solutions & services with MSA tracking
+- `sla_definitions` - SLA targets per service per priority
+- `team_members` - Team member profiles (implementation/mss teams)
+- `shift_rosters` - Shift schedule entries
+
 ## Report Types
 executive_summary, endpoint, email, vulnerability, compliance, threat_intelligence, incident_response, cloud_security
 
 ## Multi-Level Tenant Hierarchy
-MSSPs (top-level service providers):
-1. **Vinca Cyber** (Cybersecurity) → Fedfina, P99 Software, Nineleaves, Maantic Global, Claim Power
-2. **Cibervest** (Financial Services) → PKF Africa
-3. **HitaskIT** (Technology) → RTIX Surgical
-
 Tenants table has `type` field (mssp/customer) and `parentId` (nullable, references parent MSSP).
-Security events are seeded for customer tenants only (MSSPs have incidents but no security events).
+First user auto-provisions as mss_admin with auto-created MSSP tenant.
+Customer tenants can be created via POST /api/tenants by MSS admins.
 
 ## Roles
 - `mss_admin` - Full platform access, can manage MSSP and all child customer tenants
@@ -55,16 +96,22 @@ Security events are seeded for customer tenants only (MSSPs have incidents but n
 - `customer` - Dashboard-only view with ticket submission, limited to own tenant
 
 ## API Routes
-- `GET /api/tenants` - List accessible tenants (MSSP + children for MSS users)
-- `GET /api/tenants/hierarchy` - Hierarchical tenant structure [{mssp, children: [...]}]
-- `GET /api/user/profile` - User role and tenant info
-- `GET /api/dashboard/:tenantId` - Enhanced dashboard statistics with all event breakdowns
-- `GET/POST/PATCH /api/incidents` - Incident CRUD (MSS role required for create/update)
-- `GET/POST/PATCH /api/tickets` - Ticket CRUD
-- `GET/POST/PATCH /api/projects` - Project CRUD (MSS role required)
-- `GET/POST/PATCH /api/tasks` - Task CRUD (MSS role required)
+- `GET /api/tenants` - List accessible tenants
+- `POST /api/tenants` - Create customer tenant (MSS role)
+- `GET /api/tenants/hierarchy` - Hierarchical tenant structure
+- `GET /api/user/profile` - User role and tenant info (auto-provisions first user)
+- `GET /api/dashboard/:tenantId` - Enhanced dashboard statistics
+- `GET/POST/PATCH /api/incidents` - Incident CRUD
+- `GET/POST/PATCH /api/tickets` - Ticket CRUD with SLA fields
+- `GET/POST/PATCH /api/projects` - Project CRUD
+- `GET/POST/PATCH /api/tasks` - Task CRUD
+- `GET/POST/PATCH /api/services` - Service CRUD (MSS role)
+- `GET/POST /api/sla-definitions` - SLA definition management
+- `DELETE /api/sla-definitions/:id` - Delete SLA definition
+- `GET/POST/PATCH /api/team-members` - Team member CRUD
+- `GET/POST/PATCH/DELETE /api/shift-rosters` - Shift roster CRUD
 - `GET /api/reports/:tenantId` - List reports
-- `POST /api/reports/generate` - AI-powered report generation (MSS role required)
+- `POST /api/reports/generate` - AI-powered report generation
 - `POST /api/import` - File import (CSV/Excel/PDF)
 - `GET /api/reports/download/:id` - Download report file
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -10,6 +10,14 @@ import {
   FolderKanban,
   CalendarDays,
   MoreVertical,
+  FileText,
+  Loader2,
+  User,
+  Clock,
+  CheckCircle2,
+  PauseCircle,
+  BarChart3,
+  ListChecks,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,7 +57,21 @@ const PRIORITY_COLORS: Record<string, string> = {
   low: "bg-chart-2",
 };
 
+function getDaysAgo(dateStr: string | Date): number {
+  const created = new Date(dateStr);
+  const now = new Date();
+  return Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function isOverdue(dateStr: string | Date | null | undefined): boolean {
+  if (!dateStr) return false;
+  return new Date(dateStr) < new Date();
+}
+
 function TaskCard({ task, onMove }: { task: ProjectTask; onMove: (id: number, status: string) => void }) {
+  const daysAgo = getDaysAgo(task.createdAt);
+  const overdue = task.status !== "done" && isOverdue(task.dueDate);
+
   return (
     <Card className="hover-elevate" data-testid={`card-task-${task.id}`}>
       <CardContent className="p-3 space-y-2">
@@ -60,14 +82,28 @@ function TaskCard({ task, onMove }: { task: ProjectTask; onMove: (id: number, st
         {task.description && (
           <p className="text-[10px] text-muted-foreground line-clamp-2">{task.description}</p>
         )}
-        <div className="flex items-center justify-between gap-2">
+        {task.assignedTo && (
+          <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid={`text-task-assignee-${task.id}`}>
+            <User className="w-2.5 h-2.5" />
+            <span>{task.assignedTo}</span>
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <Badge variant="secondary" className="text-[10px]">{task.priority}</Badge>
           {task.dueDate && (
-            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+            <span
+              className={`text-[10px] flex items-center gap-1 ${overdue ? "text-destructive font-medium" : "text-muted-foreground"}`}
+              data-testid={`text-task-duedate-${task.id}`}
+            >
               <CalendarDays className="w-2.5 h-2.5" />
               {new Date(task.dueDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+              {overdue && " (overdue)"}
             </span>
           )}
+        </div>
+        <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid={`text-task-age-${task.id}`}>
+          <Clock className="w-2.5 h-2.5" />
+          <span>Created {daysAgo === 0 ? "today" : `${daysAgo}d ago`}</span>
         </div>
         <Select
           value={task.status}
@@ -87,12 +123,80 @@ function TaskCard({ task, onMove }: { task: ProjectTask; onMove: (id: number, st
   );
 }
 
+function ActivityDashboard({ projects, allTasksByProject }: { projects: Project[]; allTasksByProject: Record<number, ProjectTask[]> }) {
+  const totalProjects = projects.length;
+  const activeProjects = projects.filter(p => p.status === "active").length;
+  const onHoldProjects = projects.filter(p => p.status === "on_hold").length;
+  const completedProjects = projects.filter(p => p.status === "completed").length;
+
+  const allTasks = Object.values(allTasksByProject).flat();
+  const totalTasks = allTasks.length;
+  const doneTasks = allTasks.filter(t => t.status === "done").length;
+  const donePercent = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
+  const stats = [
+    { label: "Total Projects", value: totalProjects, icon: FolderKanban },
+    { label: "Active", value: activeProjects, icon: BarChart3 },
+    { label: "On Hold", value: onHoldProjects, icon: PauseCircle },
+    { label: "Completed", value: completedProjects, icon: CheckCircle2 },
+    { label: "Total Tasks", value: totalTasks, icon: ListChecks },
+    { label: "Tasks Done", value: `${donePercent}%`, icon: CheckCircle2 },
+  ];
+
+  return (
+    <div className="px-6 pb-3 space-y-3" data-testid="section-activity-dashboard">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {stats.map((stat) => (
+          <Card key={stat.label} data-testid={`card-stat-${stat.label.toLowerCase().replace(/\s+/g, "-")}`}>
+            <CardContent className="p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-muted-foreground">{stat.label}</span>
+                <stat.icon className="w-3.5 h-3.5 text-muted-foreground" />
+              </div>
+              <p className="text-lg font-semibold mt-1">{stat.value}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {projects.length > 0 && (
+        <Card data-testid="card-project-progress-overview">
+          <CardContent className="p-3 space-y-2">
+            <span className="text-xs font-medium">Project Progress</span>
+            <div className="space-y-2">
+              {projects.map((project) => {
+                const projectTasks = allTasksByProject[project.id] || [];
+                const total = projectTasks.length;
+                const done = projectTasks.filter(t => t.status === "done").length;
+                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+                return (
+                  <div key={project.id} className="flex items-center gap-3" data-testid={`progress-project-${project.id}`}>
+                    <span className="text-[10px] text-muted-foreground w-28 shrink-0 truncate">{project.name}</span>
+                    <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-muted-foreground w-16 text-right shrink-0">{done}/{total} ({pct}%)</span>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 export default function ProjectsPage() {
   const { currentTenant, userRole } = useTenant();
   const { toast } = useToast();
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
 
   const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
@@ -104,6 +208,18 @@ export default function ProjectsPage() {
   const { data: tasks = [], isLoading: tasksLoading } = useQuery<ProjectTask[]>({
     queryKey: ["/api/tasks", selectedProject],
     enabled: !!selectedProject,
+  });
+
+  const allTasksQueries = useQueries({
+    queries: projects.map((project) => ({
+      queryKey: ["/api/tasks", project.id],
+      enabled: !!project.id,
+    })),
+  });
+
+  const allTasksByProject: Record<number, ProjectTask[]> = {};
+  projects.forEach((project, idx) => {
+    allTasksByProject[project.id] = (allTasksQueries[idx]?.data as ProjectTask[]) || [];
   });
 
   const activeProject = projects.find(p => p.id === selectedProject) || projects[0];
@@ -142,6 +258,31 @@ export default function ProjectsPage() {
     },
   });
 
+  const generateReportMutation = useMutation({
+    mutationFn: async (reportType: "daily" | "weekly") => {
+      const now = new Date();
+      const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      const title = reportType === "daily"
+        ? `Daily Project Status - ${dateStr}`
+        : `Weekly Project Summary - ${dateStr}`;
+      const res = await apiRequest("POST", "/api/reports/generate", {
+        tenantId: currentTenant?.id,
+        title,
+        reportType: "executive_summary",
+        period: reportType,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      setReportDialogOpen(false);
+      toast({ title: "Report generated successfully" });
+    },
+    onError: () => {
+      toast({ title: "Failed to generate report", variant: "destructive" });
+    },
+  });
+
   if (!selectedProject && projects.length > 0 && !projectsLoading) {
     setSelectedProject(projects[0].id);
   }
@@ -159,11 +300,15 @@ export default function ProjectsPage() {
   const handleTaskSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
+    const dueDate = formData.get("dueDate") as string;
+    const assignedTo = formData.get("assignedTo") as string;
     createTaskMutation.mutate({
       title: formData.get("title"),
       description: formData.get("description"),
       priority: formData.get("priority"),
       status: formData.get("status"),
+      ...(assignedTo ? { assignedTo } : {}),
+      ...(dueDate ? { dueDate: new Date(dueDate).toISOString() } : {}),
     });
   };
 
@@ -176,9 +321,56 @@ export default function ProjectsPage() {
             {currentTenant?.name} -- Kanban board
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {isMSS && (
             <>
+              <Dialog open={reportDialogOpen} onOpenChange={setReportDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button size="sm" variant="secondary" data-testid="button-generate-report">
+                    <FileText className="w-3.5 h-3.5 mr-1.5" />
+                    Generate Report
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Generate Project Report</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3">
+                    <p className="text-sm text-muted-foreground">Select a report type to generate:</p>
+                    <div className="flex flex-col gap-2">
+                      <Button
+                        variant="secondary"
+                        className="justify-start"
+                        disabled={generateReportMutation.isPending}
+                        onClick={() => generateReportMutation.mutate("daily")}
+                        data-testid="button-report-daily"
+                      >
+                        {generateReportMutation.isPending ? (
+                          <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                        ) : (
+                          <CalendarDays className="w-3.5 h-3.5 mr-2" />
+                        )}
+                        Daily Project Status
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        className="justify-start"
+                        disabled={generateReportMutation.isPending}
+                        onClick={() => generateReportMutation.mutate("weekly")}
+                        data-testid="button-report-weekly"
+                      >
+                        {generateReportMutation.isPending ? (
+                          <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                        ) : (
+                          <BarChart3 className="w-3.5 h-3.5 mr-2" />
+                        )}
+                        Weekly Project Summary
+                      </Button>
+                    </div>
+                  </div>
+                </DialogContent>
+              </Dialog>
+
               <Dialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen}>
                 <DialogTrigger asChild>
                   <Button size="sm" variant="secondary" disabled={!activeProject} data-testid="button-create-task">
@@ -223,6 +415,14 @@ export default function ProjectsPage() {
                           </SelectContent>
                         </Select>
                       </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="task-assigned">Assigned To</Label>
+                      <Input id="task-assigned" name="assignedTo" placeholder="e.g. John Doe" data-testid="input-task-assigned-to" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="task-due-date">Due Date</Label>
+                      <Input id="task-due-date" name="dueDate" type="date" data-testid="input-task-due-date" />
                     </div>
                     <Button type="submit" className="w-full" disabled={createTaskMutation.isPending} data-testid="button-submit-task">
                       {createTaskMutation.isPending ? "Creating..." : "Create Task"}
@@ -272,6 +472,10 @@ export default function ProjectsPage() {
           )}
         </div>
       </div>
+
+      {!projectsLoading && projects.length > 0 && (
+        <ActivityDashboard projects={projects} allTasksByProject={allTasksByProject} />
+      )}
 
       {projects.length > 1 && (
         <div className="px-6 pb-3">

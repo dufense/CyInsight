@@ -1,6 +1,7 @@
 import {
   tenants, tenantUsers, incidents, tickets, ticketComments,
   projects, tasks, reports, securityEvents,
+  services, slaDefinitions, teamMembers, shiftRosters,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -10,9 +11,13 @@ import {
   type Task, type InsertTask,
   type Report, type InsertReport,
   type SecurityEvent, type InsertSecurityEvent,
+  type Service, type InsertService,
+  type SlaDefinition, type InsertSlaDefinition,
+  type TeamMember, type InsertTeamMember,
+  type ShiftRoster, type InsertShiftRoster,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and, count, sql } from "drizzle-orm";
+import { eq, desc, and, count, sql, gte, lte } from "drizzle-orm";
 
 export interface IStorage {
   getTenants(): Promise<Tenant[]>;
@@ -62,6 +67,29 @@ export interface IStorage {
 
   getDashboardStats(tenantId: number): Promise<any>;
   getEnhancedDashboardStats(tenantId: number): Promise<any>;
+
+  getServices(tenantId: number): Promise<Service[]>;
+  getService(id: number): Promise<Service | undefined>;
+  createService(data: InsertService): Promise<Service>;
+  updateService(id: number, data: Partial<InsertService>): Promise<Service>;
+
+  getSlaDefinitions(serviceId: number): Promise<SlaDefinition[]>;
+  getSlaDefinition(id: number): Promise<SlaDefinition | undefined>;
+  createSlaDefinition(data: InsertSlaDefinition): Promise<SlaDefinition>;
+  updateSlaDefinition(id: number, data: Partial<InsertSlaDefinition>): Promise<SlaDefinition>;
+  deleteSlaDefinition(id: number): Promise<void>;
+
+  getTeamMembers(tenantId: number): Promise<TeamMember[]>;
+  getTeamMembersByType(tenantId: number, teamType: string): Promise<TeamMember[]>;
+  getTeamMember(id: number): Promise<TeamMember | undefined>;
+  createTeamMember(data: InsertTeamMember): Promise<TeamMember>;
+  updateTeamMember(id: number, data: Partial<InsertTeamMember>): Promise<TeamMember>;
+
+  getShiftRosters(tenantId: number): Promise<ShiftRoster[]>;
+  getShiftRostersByDate(tenantId: number, startDate: Date, endDate: Date): Promise<ShiftRoster[]>;
+  createShiftRoster(data: InsertShiftRoster): Promise<ShiftRoster>;
+  updateShiftRoster(id: number, data: Partial<InsertShiftRoster>): Promise<ShiftRoster>;
+  deleteShiftRoster(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -493,6 +521,121 @@ export class DatabaseStorage implements IStorage {
       cloudByThreat, cloudApps, cloudTotal: cloudEvents.length,
       topLogSources, sourceTypes, logIngestionTrend, topCountries,
     };
+  }
+
+  async getServices(tenantId: number): Promise<Service[]> {
+    return db.select().from(services)
+      .where(eq(services.tenantId, tenantId))
+      .orderBy(desc(services.createdAt));
+  }
+
+  async getService(id: number): Promise<Service | undefined> {
+    const [service] = await db.select().from(services).where(eq(services.id, id));
+    return service;
+  }
+
+  async createService(data: InsertService): Promise<Service> {
+    const [service] = await db.insert(services).values(data).returning();
+    return service;
+  }
+
+  async updateService(id: number, data: Partial<InsertService>): Promise<Service> {
+    const [service] = await db.update(services)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(services.id, id))
+      .returning();
+    return service;
+  }
+
+  async getSlaDefinitions(serviceId: number): Promise<SlaDefinition[]> {
+    return db.select().from(slaDefinitions)
+      .where(eq(slaDefinitions.serviceId, serviceId))
+      .orderBy(slaDefinitions.priority);
+  }
+
+  async getSlaDefinition(id: number): Promise<SlaDefinition | undefined> {
+    const [sla] = await db.select().from(slaDefinitions).where(eq(slaDefinitions.id, id));
+    return sla;
+  }
+
+  async createSlaDefinition(data: InsertSlaDefinition): Promise<SlaDefinition> {
+    const [sla] = await db.insert(slaDefinitions).values(data).returning();
+    return sla;
+  }
+
+  async updateSlaDefinition(id: number, data: Partial<InsertSlaDefinition>): Promise<SlaDefinition> {
+    const [sla] = await db.update(slaDefinitions)
+      .set(data)
+      .where(eq(slaDefinitions.id, id))
+      .returning();
+    return sla;
+  }
+
+  async deleteSlaDefinition(id: number): Promise<void> {
+    await db.delete(slaDefinitions).where(eq(slaDefinitions.id, id));
+  }
+
+  async getTeamMembers(tenantId: number): Promise<TeamMember[]> {
+    return db.select().from(teamMembers)
+      .where(eq(teamMembers.tenantId, tenantId))
+      .orderBy(teamMembers.name);
+  }
+
+  async getTeamMembersByType(tenantId: number, teamType: string): Promise<TeamMember[]> {
+    return db.select().from(teamMembers)
+      .where(and(eq(teamMembers.tenantId, tenantId), eq(teamMembers.teamType, teamType as any)))
+      .orderBy(teamMembers.name);
+  }
+
+  async getTeamMember(id: number): Promise<TeamMember | undefined> {
+    const [member] = await db.select().from(teamMembers).where(eq(teamMembers.id, id));
+    return member;
+  }
+
+  async createTeamMember(data: InsertTeamMember): Promise<TeamMember> {
+    const [member] = await db.insert(teamMembers).values(data).returning();
+    return member;
+  }
+
+  async updateTeamMember(id: number, data: Partial<InsertTeamMember>): Promise<TeamMember> {
+    const [member] = await db.update(teamMembers)
+      .set(data)
+      .where(eq(teamMembers.id, id))
+      .returning();
+    return member;
+  }
+
+  async getShiftRosters(tenantId: number): Promise<ShiftRoster[]> {
+    return db.select().from(shiftRosters)
+      .where(eq(shiftRosters.tenantId, tenantId))
+      .orderBy(desc(shiftRosters.shiftDate));
+  }
+
+  async getShiftRostersByDate(tenantId: number, startDate: Date, endDate: Date): Promise<ShiftRoster[]> {
+    return db.select().from(shiftRosters)
+      .where(and(
+        eq(shiftRosters.tenantId, tenantId),
+        gte(shiftRosters.shiftDate, startDate),
+        lte(shiftRosters.shiftDate, endDate)
+      ))
+      .orderBy(shiftRosters.shiftDate);
+  }
+
+  async createShiftRoster(data: InsertShiftRoster): Promise<ShiftRoster> {
+    const [shift] = await db.insert(shiftRosters).values(data).returning();
+    return shift;
+  }
+
+  async updateShiftRoster(id: number, data: Partial<InsertShiftRoster>): Promise<ShiftRoster> {
+    const [shift] = await db.update(shiftRosters)
+      .set(data)
+      .where(eq(shiftRosters.id, id))
+      .returning();
+    return shift;
+  }
+
+  async deleteShiftRoster(id: number): Promise<void> {
+    await db.delete(shiftRosters).where(eq(shiftRosters.id, id));
   }
 }
 

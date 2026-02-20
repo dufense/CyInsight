@@ -12,6 +12,8 @@ import {
   LogOut,
   Users,
   ChevronRight,
+  Briefcase,
+  CalendarClock,
 } from "lucide-react";
 import {
   Sidebar,
@@ -43,6 +45,8 @@ const mssNavItems = [
   { title: "Incidents", url: "/incidents", icon: AlertTriangle },
   { title: "Tickets", url: "/tickets", icon: Ticket },
   { title: "Projects", url: "/projects", icon: FolderKanban },
+  { title: "Services & SLA", url: "/services", icon: Briefcase },
+  { title: "Shift Roster", url: "/shift-roster", icon: CalendarClock },
   { title: "Reports", url: "/reports", icon: FileText },
   { title: "Import Data", url: "/import", icon: Upload },
 ];

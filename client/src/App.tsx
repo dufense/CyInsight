@@ -17,6 +17,8 @@ import DashboardPage from "@/pages/dashboard";
 import IncidentsPage from "@/pages/incidents";
 import TicketsPage from "@/pages/tickets";
 import ProjectsPage from "@/pages/projects";
+import ServicesPage from "@/pages/services";
+import ShiftRosterPage from "@/pages/shift-roster";
 import ReportsPage from "@/pages/reports";
 import ImportPage from "@/pages/import";
 
@@ -37,6 +39,8 @@ function AuthenticatedRouter() {
       <Route path="/incidents" component={IncidentsPage} />
       <Route path="/tickets" component={TicketsPage} />
       <Route path="/projects" component={ProjectsPage} />
+      <Route path="/services" component={ServicesPage} />
+      <Route path="/shift-roster" component={ShiftRosterPage} />
       <Route path="/reports" component={ReportsPage} />
       <Route path="/import" component={ImportPage} />
       <Route component={NotFound} />

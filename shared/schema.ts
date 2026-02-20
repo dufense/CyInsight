@@ -58,6 +58,7 @@ export const incidents = pgTable("incidents", {
 export const tickets = pgTable("tickets", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  serviceId: integer("service_id").references(() => services.id),
   title: varchar("title", { length: 500 }).notNull(),
   description: text("description"),
   priority: ticketPriorityEnum("priority").default("medium").notNull(),
@@ -65,6 +66,8 @@ export const tickets = pgTable("tickets", {
   category: varchar("category", { length: 100 }),
   assignedTo: varchar("assigned_to"),
   createdBy: varchar("created_by"),
+  firstResponseAt: timestamp("first_response_at"),
+  slaBreached: boolean("sla_breached").default(false),
   resolvedAt: timestamp("resolved_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -150,6 +153,59 @@ export const reports = pgTable("reports", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const teamTypeEnum = pgEnum("team_type", ["implementation", "mss"]);
+
+export const services = pgTable("services", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  serviceType: varchar("service_type", { length: 100 }),
+  status: varchar("status", { length: 50 }).default("active").notNull(),
+  msaStartDate: timestamp("msa_start_date"),
+  msaEndDate: timestamp("msa_end_date"),
+  msaDocument: text("msa_document"),
+  contractValue: varchar("contract_value", { length: 50 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const slaDefinitions = pgTable("sla_definitions", {
+  id: serial("id").primaryKey(),
+  serviceId: integer("service_id").notNull().references(() => services.id),
+  name: varchar("name", { length: 255 }).notNull(),
+  priority: ticketPriorityEnum("priority").default("medium").notNull(),
+  responseTimeMinutes: integer("response_time_minutes").notNull(),
+  resolutionTimeMinutes: integer("resolution_time_minutes").notNull(),
+  uptimePercentage: varchar("uptime_percentage", { length: 10 }),
+  penaltyClause: text("penalty_clause"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const teamMembers = pgTable("team_members", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  name: varchar("name", { length: 255 }).notNull(),
+  email: varchar("email", { length: 255 }).notNull(),
+  role: varchar("role", { length: 100 }),
+  teamType: teamTypeEnum("team_type").notNull(),
+  phone: varchar("phone", { length: 50 }),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const shiftRosters = pgTable("shift_rosters", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  teamMemberId: integer("team_member_id").notNull().references(() => teamMembers.id),
+  shiftDate: timestamp("shift_date").notNull(),
+  startTime: varchar("start_time", { length: 10 }).notNull(),
+  endTime: varchar("end_time", { length: 10 }).notNull(),
+  shiftType: varchar("shift_type", { length: 50 }).default("day").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const securityEventsRelations = relations(securityEvents, ({ one }) => ({
   tenant: one(tenants, { fields: [securityEvents.tenantId], references: [tenants.id] }),
 }));
@@ -163,6 +219,9 @@ export const tenantsRelations = relations(tenants, ({ one, many }) => ({
   projects: many(projects),
   reports: many(reports),
   securityEvents: many(securityEvents),
+  services: many(services),
+  teamMembers: many(teamMembers),
+  shiftRosters: many(shiftRosters),
 }));
 
 export const tenantUsersRelations = relations(tenantUsers, ({ one }) => ({
@@ -176,6 +235,7 @@ export const incidentsRelations = relations(incidents, ({ one }) => ({
 export const ticketsRelations = relations(tickets, ({ one, many }) => ({
   tenant: one(tenants, { fields: [tickets.tenantId], references: [tenants.id] }),
   comments: many(ticketComments),
+  service: one(services, { fields: [tickets.serviceId], references: [services.id] }),
 }));
 
 export const ticketCommentsRelations = relations(ticketComments, ({ one }) => ({
@@ -195,6 +255,26 @@ export const reportsRelations = relations(reports, ({ one }) => ({
   tenant: one(tenants, { fields: [reports.tenantId], references: [tenants.id] }),
 }));
 
+export const servicesRelations = relations(services, ({ one, many }) => ({
+  tenant: one(tenants, { fields: [services.tenantId], references: [tenants.id] }),
+  slaDefinitions: many(slaDefinitions),
+  tickets: many(tickets),
+}));
+
+export const slaDefinitionsRelations = relations(slaDefinitions, ({ one }) => ({
+  service: one(services, { fields: [slaDefinitions.serviceId], references: [services.id] }),
+}));
+
+export const teamMembersRelations = relations(teamMembers, ({ one, many }) => ({
+  tenant: one(tenants, { fields: [teamMembers.tenantId], references: [tenants.id] }),
+  shifts: many(shiftRosters),
+}));
+
+export const shiftRostersRelations = relations(shiftRosters, ({ one }) => ({
+  tenant: one(tenants, { fields: [shiftRosters.tenantId], references: [tenants.id] }),
+  teamMember: one(teamMembers, { fields: [shiftRosters.teamMemberId], references: [teamMembers.id] }),
+}));
+
 export const insertTenantSchema = createInsertSchema(tenants).omit({ id: true, createdAt: true });
 export const insertTenantUserSchema = createInsertSchema(tenantUsers).omit({ id: true, createdAt: true });
 export const insertIncidentSchema = createInsertSchema(incidents).omit({ id: true, createdAt: true, updatedAt: true });
@@ -204,6 +284,10 @@ export const insertProjectSchema = createInsertSchema(projects).omit({ id: true,
 export const insertTaskSchema = createInsertSchema(tasks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertReportSchema = createInsertSchema(reports).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
+export const insertServiceSchema = createInsertSchema(services).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertSlaDefinitionSchema = createInsertSchema(slaDefinitions).omit({ id: true, createdAt: true });
+export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({ id: true, createdAt: true });
+export const insertShiftRosterSchema = createInsertSchema(shiftRosters).omit({ id: true, createdAt: true });
 
 export type Tenant = typeof tenants.$inferSelect;
 export type InsertTenant = z.infer<typeof insertTenantSchema>;
@@ -223,3 +307,11 @@ export type Report = typeof reports.$inferSelect;
 export type InsertReport = z.infer<typeof insertReportSchema>;
 export type SecurityEvent = typeof securityEvents.$inferSelect;
 export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;
+export type Service = typeof services.$inferSelect;
+export type InsertService = z.infer<typeof insertServiceSchema>;
+export type SlaDefinition = typeof slaDefinitions.$inferSelect;
+export type InsertSlaDefinition = z.infer<typeof insertSlaDefinitionSchema>;
+export type TeamMember = typeof teamMembers.$inferSelect;
+export type InsertTeamMember = z.infer<typeof insertTeamMemberSchema>;
+export type ShiftRoster = typeof shiftRosters.$inferSelect;
+export type InsertShiftRoster = z.infer<typeof insertShiftRosterSchema>;
