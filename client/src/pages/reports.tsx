@@ -5,18 +5,20 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { Report } from "@shared/schema";
 import {
-  Plus,
   FileText,
   Sparkles,
   Download,
   Eye,
   Loader2,
   CheckCircle2,
-  Clock,
+  Mail,
+  Monitor,
+  Bug,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -35,12 +37,19 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
+
+const REPORT_TYPE_LABELS: Record<string, { label: string; icon: any; color: string }> = {
+  executive_summary: { label: "Executive Summary", icon: BarChart3, color: "text-blue-500" },
+  endpoint: { label: "Endpoint Report", icon: Monitor, color: "text-red-500" },
+  email: { label: "Email Report", icon: Mail, color: "text-purple-500" },
+  vulnerability: { label: "Vulnerability Report", icon: Bug, color: "text-orange-500" },
+};
 
 function ReportViewer({ report }: { report: Report }) {
   const findings = (report.findings as any[]) || [];
   const recommendations = (report.recommendations as any[]) || [];
   const metrics = (report.metrics as any) || {};
+  const typeInfo = REPORT_TYPE_LABELS[(report as any).reportType || "executive_summary"];
 
   return (
     <ScrollArea className="h-[70vh]">
@@ -50,6 +59,10 @@ function ReportViewer({ report }: { report: Report }) {
             <Badge variant="secondary">{report.period}</Badge>
             <Badge variant={report.status === "published" ? "default" : "secondary"}>
               {report.status}
+            </Badge>
+            <Badge variant="outline" className="gap-1">
+              {typeInfo && <typeInfo.icon className={`w-3 h-3 ${typeInfo.color}`} />}
+              {typeInfo?.label || "Executive Summary"}
             </Badge>
           </div>
           <h2 className="text-lg font-semibold">{report.title}</h2>
@@ -139,6 +152,7 @@ export default function ReportsPage() {
   const { toast } = useToast();
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [viewingReport, setViewingReport] = useState<Report | null>(null);
+  const [selectedReportType, setSelectedReportType] = useState("executive_summary");
 
   const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
@@ -156,9 +170,9 @@ export default function ReportsPage() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/reports", currentTenant?.id] });
       setGenerateDialogOpen(false);
-      toast({ title: "Report generated", description: "AI has generated your security report." });
+      toast({ title: "Report generated", description: "AI has generated your security report and saved it to disk." });
     },
     onError: () => {
       toast({ title: "Generation failed", description: "Please try again.", variant: "destructive" });
@@ -171,7 +185,30 @@ export default function ReportsPage() {
     generateMutation.mutate({
       title: formData.get("title"),
       period: formData.get("period"),
+      reportType: selectedReportType,
     });
+  };
+
+  const handleDownload = async (reportId: number) => {
+    try {
+      const response = await fetch(`/api/reports/download/${reportId}`, { credentials: "include" });
+      if (!response.ok) throw new Error("Download failed");
+      const disposition = response.headers.get("content-disposition");
+      let filename = `report_${reportId}.json`;
+      if (disposition) {
+        const match = disposition.match(/filename="?(.+?)"?$/);
+        if (match) filename = match[1];
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      toast({ title: "Download failed", variant: "destructive" });
+    }
   };
 
   return (
@@ -210,6 +247,38 @@ export default function ReportsPage() {
                   />
                 </div>
                 <div className="space-y-2">
+                  <Label>Report Type</Label>
+                  <Select value={selectedReportType} onValueChange={setSelectedReportType}>
+                    <SelectTrigger data-testid="select-report-type"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="executive_summary">
+                        <span className="flex items-center gap-2">
+                          <BarChart3 className="w-3.5 h-3.5 text-blue-500" />
+                          Executive Summary
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="endpoint">
+                        <span className="flex items-center gap-2">
+                          <Monitor className="w-3.5 h-3.5 text-red-500" />
+                          Endpoint Report
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="email">
+                        <span className="flex items-center gap-2">
+                          <Mail className="w-3.5 h-3.5 text-purple-500" />
+                          Email Report
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="vulnerability">
+                        <span className="flex items-center gap-2">
+                          <Bug className="w-3.5 h-3.5 text-orange-500" />
+                          Vulnerability Report
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
                   <Label>Report Period</Label>
                   <Select name="period" defaultValue="last_month">
                     <SelectTrigger data-testid="select-report-period"><SelectValue /></SelectTrigger>
@@ -223,8 +292,7 @@ export default function ReportsPage() {
                 </div>
                 <div className="p-3 rounded-md bg-primary/5 border border-primary/10">
                   <p className="text-xs text-muted-foreground">
-                    AI will analyze all incidents, tickets, and security data for the selected period
-                    and generate a comprehensive report with executive summary, findings, and recommendations.
+                    AI will analyze {selectedReportType === "email" ? "email security events" : selectedReportType === "endpoint" ? "endpoint threats and malware" : selectedReportType === "vulnerability" ? "vulnerability scan data" : "all security data"} and generate a comprehensive report saved to disk.
                   </p>
                 </div>
                 <Button type="submit" className="w-full" disabled={generateMutation.isPending} data-testid="button-submit-report">
@@ -264,44 +332,59 @@ export default function ReportsPage() {
         </Card>
       ) : (
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {reports.map((report) => (
-            <Card key={report.id} className="hover-elevate" data-testid={`card-report-${report.id}`}>
-              <CardContent className="p-5 space-y-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center justify-center w-9 h-9 rounded-md bg-primary/10 shrink-0">
-                    <FileText className="w-4 h-4 text-primary" />
+          {reports.map((report) => {
+            const typeInfo = REPORT_TYPE_LABELS[(report as any).reportType || "executive_summary"];
+            const TypeIcon = typeInfo?.icon || FileText;
+            return (
+              <Card key={report.id} className="hover-elevate" data-testid={`card-report-${report.id}`}>
+                <CardContent className="p-5 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center justify-center w-9 h-9 rounded-md bg-primary/10 shrink-0">
+                      <TypeIcon className={`w-4 h-4 ${typeInfo?.color || "text-primary"}`} />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Badge variant={report.status === "published" ? "default" : "secondary"} className="text-[10px]">
+                        {report.status}
+                      </Badge>
+                    </div>
                   </div>
-                  <Badge variant={report.status === "published" ? "default" : "secondary"} className="text-[10px]">
-                    {report.status}
-                  </Badge>
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-sm font-medium line-clamp-2">{report.title}</h3>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-[10px]">{report.period}</Badge>
-                    <span className="text-[10px] text-muted-foreground">
-                      {new Date(report.createdAt).toLocaleDateString()}
-                    </span>
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-medium line-clamp-2">{report.title}</h3>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Badge variant="outline" className="text-[10px]">{typeInfo?.label || "Executive"}</Badge>
+                      <Badge variant="outline" className="text-[10px]">{report.period}</Badge>
+                      <span className="text-[10px] text-muted-foreground">
+                        {new Date(report.createdAt).toLocaleDateString()}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                {report.executiveSummary && (
-                  <p className="text-[10px] text-muted-foreground line-clamp-3">{report.executiveSummary}</p>
-                )}
-                <div className="flex items-center gap-2 pt-1">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => setViewingReport(report)}
-                    data-testid={`button-view-report-${report.id}`}
-                  >
-                    <Eye className="w-3 h-3 mr-1.5" />
-                    View
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                  {report.executiveSummary && (
+                    <p className="text-[10px] text-muted-foreground line-clamp-3">{report.executiveSummary}</p>
+                  )}
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => setViewingReport(report)}
+                      data-testid={`button-view-report-${report.id}`}
+                    >
+                      <Eye className="w-3 h-3 mr-1.5" />
+                      View
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDownload(report.id)}
+                      data-testid={`button-download-report-${report.id}`}
+                    >
+                      <Download className="w-3 h-3" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       )}
 

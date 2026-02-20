@@ -14,6 +14,8 @@ export const ticketStatusEnum = pgEnum("ticket_status", ["open", "in_progress", 
 export const ticketPriorityEnum = pgEnum("ticket_priority", ["urgent", "high", "medium", "low"]);
 export const projectStatusEnum = pgEnum("project_status", ["planning", "active", "on_hold", "completed", "cancelled"]);
 export const taskStatusEnum = pgEnum("task_status", ["backlog", "todo", "in_progress", "review", "done"]);
+export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability"]);
+export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability"]);
 
 export const tenants = pgTable("tenants", {
   id: serial("id").primaryKey(),
@@ -103,20 +105,43 @@ export const tasks = pgTable("tasks", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const securityEvents = pgTable("security_events", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  eventType: eventTypeEnum("event_type").notNull(),
+  severity: severityEnum("severity").default("medium").notNull(),
+  threat: varchar("threat", { length: 500 }),
+  target: varchar("target", { length: 500 }),
+  attacker: varchar("attacker", { length: 500 }),
+  asset: varchar("asset", { length: 500 }),
+  app: varchar("app", { length: 255 }),
+  description: text("description"),
+  rawPayload: jsonb("raw_payload"),
+  occurredAt: timestamp("occurred_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const reports = pgTable("reports", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull().references(() => tenants.id),
   title: varchar("title", { length: 500 }).notNull(),
+  reportType: reportTypeEnum("report_type").default("executive_summary").notNull(),
   period: varchar("period", { length: 50 }).notNull(),
   executiveSummary: text("executive_summary"),
   findings: jsonb("findings"),
   recommendations: jsonb("recommendations"),
   metrics: jsonb("metrics"),
   status: varchar("status", { length: 50 }).default("draft").notNull(),
+  filePath: text("file_path"),
+  fileName: varchar("file_name", { length: 255 }),
   generatedBy: varchar("generated_by"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+
+export const securityEventsRelations = relations(securityEvents, ({ one }) => ({
+  tenant: one(tenants, { fields: [securityEvents.tenantId], references: [tenants.id] }),
+}));
 
 export const tenantsRelations = relations(tenants, ({ one, many }) => ({
   parent: one(tenants, { fields: [tenants.parentId], references: [tenants.id], relationName: "tenant_hierarchy" }),
@@ -126,6 +151,7 @@ export const tenantsRelations = relations(tenants, ({ one, many }) => ({
   tickets: many(tickets),
   projects: many(projects),
   reports: many(reports),
+  securityEvents: many(securityEvents),
 }));
 
 export const tenantUsersRelations = relations(tenantUsers, ({ one }) => ({
@@ -166,6 +192,7 @@ export const insertTicketCommentSchema = createInsertSchema(ticketComments).omit
 export const insertProjectSchema = createInsertSchema(projects).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertTaskSchema = createInsertSchema(tasks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertReportSchema = createInsertSchema(reports).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
 
 export type Tenant = typeof tenants.$inferSelect;
 export type InsertTenant = z.infer<typeof insertTenantSchema>;
@@ -183,3 +210,5 @@ export type Task = typeof tasks.$inferSelect;
 export type InsertTask = z.infer<typeof insertTaskSchema>;
 export type Report = typeof reports.$inferSelect;
 export type InsertReport = z.infer<typeof insertReportSchema>;
+export type SecurityEvent = typeof securityEvents.$inferSelect;
+export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;

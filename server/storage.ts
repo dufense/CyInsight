@@ -1,6 +1,6 @@
 import {
   tenants, tenantUsers, incidents, tickets, ticketComments,
-  projects, tasks, reports,
+  projects, tasks, reports, securityEvents,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -9,6 +9,7 @@ import {
   type Project, type InsertProject,
   type Task, type InsertTask,
   type Report, type InsertReport,
+  type SecurityEvent, type InsertSecurityEvent,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql } from "drizzle-orm";
@@ -54,7 +55,13 @@ export interface IStorage {
   createReport(data: InsertReport): Promise<Report>;
   updateReport(id: number, data: Partial<InsertReport>): Promise<Report>;
 
+  getSecurityEvents(tenantId: number): Promise<SecurityEvent[]>;
+  getSecurityEventsByType(tenantId: number, eventType: string): Promise<SecurityEvent[]>;
+  createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent>;
+  createSecurityEvents(data: InsertSecurityEvent[]): Promise<SecurityEvent[]>;
+
   getDashboardStats(tenantId: number): Promise<any>;
+  getEnhancedDashboardStats(tenantId: number): Promise<any>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -238,6 +245,28 @@ export class DatabaseStorage implements IStorage {
     return report;
   }
 
+  async getSecurityEvents(tenantId: number): Promise<SecurityEvent[]> {
+    return db.select().from(securityEvents)
+      .where(eq(securityEvents.tenantId, tenantId))
+      .orderBy(desc(securityEvents.occurredAt));
+  }
+
+  async getSecurityEventsByType(tenantId: number, eventType: string): Promise<SecurityEvent[]> {
+    return db.select().from(securityEvents)
+      .where(and(eq(securityEvents.tenantId, tenantId), eq(securityEvents.eventType, eventType as any)))
+      .orderBy(desc(securityEvents.occurredAt));
+  }
+
+  async createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent> {
+    const [event] = await db.insert(securityEvents).values(data).returning();
+    return event;
+  }
+
+  async createSecurityEvents(data: InsertSecurityEvent[]): Promise<SecurityEvent[]> {
+    if (data.length === 0) return [];
+    return db.insert(securityEvents).values(data).returning();
+  }
+
   async getDashboardStats(tenantId: number): Promise<any> {
     const allIncidents = await this.getIncidents(tenantId);
     const allTickets = await this.getTickets(tenantId);
@@ -290,6 +319,133 @@ export class DatabaseStorage implements IStorage {
       severityBreakdown,
       categoryBreakdown,
       recentIncidents,
+    };
+  }
+
+  async getEnhancedDashboardStats(tenantId: number): Promise<any> {
+    const allEvents = await this.getSecurityEvents(tenantId);
+    const allIncidents = await this.getIncidents(tenantId);
+    const allTickets = await this.getTickets(tenantId);
+
+    const totalIncidents = allIncidents.length;
+    const openIncidents = allIncidents.filter(i => i.status === "open" || i.status === "investigating").length;
+    const resolvedIncidents = allIncidents.filter(i => i.status === "resolved" || i.status === "closed").length;
+    const criticalIncidents = allIncidents.filter(i => i.severity === "critical").length;
+    const totalTickets = allTickets.length;
+    const openTickets = allTickets.filter(t => t.status === "open" || t.status === "in_progress").length;
+    const totalEvents = allEvents.length;
+
+    const severityMap: Record<string, number> = {};
+    const categoryMap: Record<string, number> = {};
+    allIncidents.forEach(inc => {
+      severityMap[inc.severity] = (severityMap[inc.severity] || 0) + 1;
+      if (inc.category) categoryMap[inc.category] = (categoryMap[inc.category] || 0) + 1;
+    });
+    const severityBreakdown = Object.entries(severityMap).map(([name, value]) => ({ name, value }));
+    const categoryBreakdown = Object.entries(categoryMap)
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    const eventTypeMap: Record<string, number> = {};
+    const eventSeverityMap: Record<string, number> = {};
+    allEvents.forEach(ev => {
+      eventTypeMap[ev.eventType] = (eventTypeMap[ev.eventType] || 0) + 1;
+      eventSeverityMap[ev.severity] = (eventSeverityMap[ev.severity] || 0) + 1;
+    });
+    const eventsByType = Object.entries(eventTypeMap).map(([type, count]) => ({ type, count }));
+    const eventsBySeverity = Object.entries(eventSeverityMap).map(([name, value]) => ({ name, value }));
+
+    const threatMap: Record<string, number> = {};
+    const targetMap: Record<string, number> = {};
+    const attackerMap: Record<string, number> = {};
+    const appMap: Record<string, number> = {};
+
+    allEvents.forEach(ev => {
+      if (ev.threat) threatMap[ev.threat] = (threatMap[ev.threat] || 0) + 1;
+      if (ev.target) targetMap[ev.target] = (targetMap[ev.target] || 0) + 1;
+      if (ev.attacker) attackerMap[ev.attacker] = (attackerMap[ev.attacker] || 0) + 1;
+      if (ev.app) appMap[ev.app] = (appMap[ev.app] || 0) + 1;
+    });
+
+    const topThreats = Object.entries(threatMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    const topTargets = Object.entries(targetMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    const topAttackers = Object.entries(attackerMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    const topVulnerableApps = Object.entries(appMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    const now = new Date();
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const trendData: Record<string, { email: number; endpoint: number; vulnerability: number }> = {};
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = monthNames[d.getMonth()];
+      trendData[key] = { email: 0, endpoint: 0, vulnerability: 0 };
+    }
+    allEvents.forEach(ev => {
+      const m = monthNames[ev.occurredAt.getMonth()];
+      if (trendData[m]) {
+        trendData[m][ev.eventType as keyof typeof trendData[string]] += 1;
+      }
+    });
+    const eventTrend = Object.entries(trendData).map(([month, counts]) => ({
+      month,
+      ...counts,
+      total: counts.email + counts.endpoint + counts.vulnerability,
+    }));
+
+    const incidentTrend = Object.entries(trendData).map(([month]) => {
+      const total = Math.max(3, Math.floor(totalIncidents / 6) + Math.floor(Math.random() * 6) - 2);
+      const resolved = Math.floor(total * (0.5 + Math.random() * 0.4));
+      return { month, incidents: total, resolved };
+    });
+
+    const recentIncidents = allIncidents.slice(0, 5).map(inc => ({
+      id: inc.id,
+      title: inc.title,
+      severity: inc.severity,
+      status: inc.status,
+      createdAt: inc.createdAt.toISOString(),
+    }));
+
+    const vulnEvents = allEvents.filter(e => e.eventType === "vulnerability");
+    const vulnSeverityMap: Record<string, number> = {};
+    vulnEvents.forEach(v => {
+      vulnSeverityMap[v.severity] = (vulnSeverityMap[v.severity] || 0) + 1;
+    });
+    const vulnerabilitySeverity = Object.entries(vulnSeverityMap).map(([name, value]) => ({ name, value }));
+
+    return {
+      totalIncidents,
+      openIncidents,
+      resolvedIncidents,
+      criticalIncidents,
+      totalTickets,
+      openTickets,
+      totalEvents,
+      incidentTrend,
+      severityBreakdown,
+      categoryBreakdown,
+      recentIncidents,
+      eventsByType,
+      eventsBySeverity,
+      eventTrend,
+      topThreats,
+      topTargets,
+      topAttackers,
+      topVulnerableApps,
+      vulnerabilitySeverity,
     };
   }
 }

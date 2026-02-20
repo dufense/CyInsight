@@ -8,9 +8,21 @@ import {
   insertProjectSchema,
   insertTaskSchema,
   insertTicketCommentSchema,
+  insertSecurityEventSchema,
 } from "@shared/schema";
 import OpenAI from "openai";
 import { z } from "zod";
+import multer from "multer";
+import * as XLSX from "xlsx";
+import * as fs from "fs";
+import * as path from "path";
+
+const upload = multer({ dest: "/tmp/uploads/" });
+const REPORTS_DIR = path.join(process.cwd(), "data", "reports");
+const UPLOADS_DIR = path.join(process.cwd(), "data", "uploads");
+
+if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -160,7 +172,7 @@ export async function registerRoutes(
     try {
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
-      const stats = await storage.getDashboardStats(tenantId);
+      const stats = await storage.getEnhancedDashboardStats(tenantId);
       res.json(stats);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch dashboard" });
@@ -421,39 +433,48 @@ export async function registerRoutes(
       const access = await getUserTenantAccess(req);
       assertMSSRole(access);
 
-      const { tenantId, title, period } = req.body;
+      const { tenantId, title, period, reportType } = req.body;
       if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
 
       await assertTenantAccess(req, tenantId);
 
       const incidentsList = await storage.getIncidents(tenantId);
       const ticketsList = await storage.getTickets(tenantId);
+      const securityEventsList = await storage.getSecurityEvents(tenantId);
       const tenant = await storage.getTenant(tenantId);
 
-      const incidentSummary = incidentsList.slice(0, 20).map(i => ({
-        title: i.title,
-        severity: i.severity,
-        status: i.status,
-        category: i.category,
-        source: i.source,
-      }));
+      const rType = reportType || "executive_summary";
 
-      const prompt = `You are a senior cybersecurity analyst preparing a monthly security report for ${tenant?.name || "the client"}.
+      let promptContext = "";
+      if (rType === "email") {
+        const emailEvents = securityEventsList.filter(e => e.eventType === "email");
+        promptContext = `Email Security Events (${emailEvents.length} total):\n${JSON.stringify(emailEvents.slice(0, 30).map(e => ({ threat: e.threat, target: e.target, attacker: e.attacker, severity: e.severity, description: e.description })), null, 2)}`;
+      } else if (rType === "endpoint") {
+        const endpointEvents = securityEventsList.filter(e => e.eventType === "endpoint");
+        promptContext = `Endpoint Security Events (${endpointEvents.length} total):\n${JSON.stringify(endpointEvents.slice(0, 30).map(e => ({ threat: e.threat, target: e.target, attacker: e.attacker, asset: e.asset, severity: e.severity, description: e.description })), null, 2)}`;
+      } else if (rType === "vulnerability") {
+        const vulnEvents = securityEventsList.filter(e => e.eventType === "vulnerability");
+        promptContext = `Vulnerability Events (${vulnEvents.length} total):\n${JSON.stringify(vulnEvents.slice(0, 30).map(e => ({ threat: e.threat, target: e.target, app: e.app, severity: e.severity, description: e.description })), null, 2)}`;
+      } else {
+        const incidentSummary = incidentsList.slice(0, 20).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, source: i.source }));
+        promptContext = `Incidents (${incidentsList.length} total):\n${JSON.stringify(incidentSummary, null, 2)}\n\nTickets: ${ticketsList.length} total, ${ticketsList.filter(t => t.status === "open").length} open\n\nSecurity Events: ${securityEventsList.length} total (Email: ${securityEventsList.filter(e => e.eventType === "email").length}, Endpoint: ${securityEventsList.filter(e => e.eventType === "endpoint").length}, Vulnerability: ${securityEventsList.filter(e => e.eventType === "vulnerability").length})`;
+      }
 
-Based on the following security data, generate a comprehensive report:
+      const reportTypeLabel = rType === "executive_summary" ? "Executive Summary" : rType === "endpoint" ? "Endpoint Security" : rType === "email" ? "Email Security" : "Vulnerability Assessment";
 
-Incidents (${incidentsList.length} total):
-${JSON.stringify(incidentSummary, null, 2)}
+      const prompt = `You are a senior cybersecurity analyst preparing a ${reportTypeLabel} report for ${tenant?.name || "the client"}.
 
-Tickets: ${ticketsList.length} total, ${ticketsList.filter(t => t.status === "open").length} open
+Based on the following security data, generate a comprehensive ${reportTypeLabel} report:
+
+${promptContext}
 
 Generate a JSON response with:
-1. "executiveSummary": A 3-4 paragraph professional executive summary
+1. "executiveSummary": A 3-4 paragraph professional executive summary specific to ${reportTypeLabel}
 2. "findings": An array of 4-6 key findings, each with "title", "description", "severity" (critical/high/medium/low)
 3. "recommendations": An array of 4-6 actionable recommendations, each with "title", "description", "priority" (high/medium/low)
-4. "metrics": An object with key metrics like "total_incidents", "critical_count", "resolution_rate", "avg_response_time", "threat_score"
+4. "metrics": An object with key metrics relevant to ${reportTypeLabel}
 
-Be specific and professional. Reference actual incident categories and patterns.`;
+Be specific and professional. Reference actual data patterns and threats.`;
 
       const response = await openai.chat.completions.create({
         model: "gpt-5-mini",
@@ -464,15 +485,30 @@ Be specific and professional. Reference actual incident categories and patterns.
 
       const reportData = JSON.parse(response.choices[0]?.message?.content || "{}");
 
+      const reportTitle = title || `${reportTypeLabel} Report - ${tenant?.name}`;
+      const fileName = `${reportTitle.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}.json`;
+      const filePath = path.join(REPORTS_DIR, fileName);
+      fs.writeFileSync(filePath, JSON.stringify({
+        title: reportTitle,
+        type: rType,
+        tenant: tenant?.name,
+        period: period || "last_month",
+        generatedAt: new Date().toISOString(),
+        ...reportData,
+      }, null, 2));
+
       const report = await storage.createReport({
         tenantId,
-        title: title || `Monthly Security Report - ${tenant?.name}`,
+        title: reportTitle,
+        reportType: rType,
         period: period || "last_month",
         executiveSummary: reportData.executiveSummary || "",
         findings: reportData.findings || [],
         recommendations: reportData.recommendations || [],
         metrics: reportData.metrics || {},
         status: "published",
+        filePath,
+        fileName,
         generatedBy: access.userId,
       });
 
@@ -480,6 +516,150 @@ Be specific and professional. Reference actual incident categories and patterns.
     } catch (error: any) {
       console.error("Error generating report:", error);
       res.status(error.status || 500).json({ message: error.message || "Failed to generate report" });
+    }
+  });
+
+  app.get("/api/reports/download/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const report = await storage.getReport(id);
+      if (!report) return res.status(404).json({ message: "Report not found" });
+
+      await assertTenantAccess(req, report.tenantId);
+
+      if (!report.filePath || !fs.existsSync(report.filePath)) {
+        const fallbackContent = JSON.stringify({
+          title: report.title,
+          type: report.reportType,
+          period: report.period,
+          executiveSummary: report.executiveSummary,
+          findings: report.findings,
+          recommendations: report.recommendations,
+          metrics: report.metrics,
+          generatedAt: report.createdAt,
+        }, null, 2);
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${report.fileName || "report.json"}"`);
+        return res.send(fallbackContent);
+      }
+
+      res.setHeader("Content-Disposition", `attachment; filename="${report.fileName || "report.json"}"`);
+      res.sendFile(report.filePath);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to download report" });
+    }
+  });
+
+  app.get("/api/security-events/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const eventType = req.query.eventType as string | undefined;
+      const events = eventType
+        ? await storage.getSecurityEventsByType(tenantId, eventType)
+        : await storage.getSecurityEvents(tenantId);
+      res.json(events);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch security events" });
+    }
+  });
+
+  app.post("/api/import", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      const tid = parseInt(tenantId);
+      await assertTenantAccess(req, tid);
+
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const originalName = req.file.originalname || "";
+      const ext = path.extname(originalName).toLowerCase();
+
+      const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_${originalName}`);
+      fs.copyFileSync(req.file.path, savedPath);
+      fs.unlinkSync(req.file.path);
+
+      let rows: any[] = [];
+
+      if (ext === ".csv") {
+        const workbook = XLSX.readFile(savedPath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet);
+      } else if (ext === ".xlsx" || ext === ".xls") {
+        const workbook = XLSX.readFile(savedPath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet);
+      } else if (ext === ".pdf") {
+        const pdfParseModule = await import("pdf-parse");
+        const pdfParse = (pdfParseModule as any).default || pdfParseModule;
+        const buffer = fs.readFileSync(savedPath);
+        const pdfData = await pdfParse(buffer);
+        const lines = pdfData.text.split("\n").filter((l: string) => l.trim());
+
+        rows = lines.map((line: string) => {
+          const parts = line.split(/[,\t|]/).map((p: string) => p.trim());
+          return {
+            eventType: parts[0] || "endpoint",
+            threat: parts[1] || line.substring(0, 100),
+            target: parts[2] || "",
+            attacker: parts[3] || "",
+            severity: parts[4] || "medium",
+            description: line,
+          };
+        });
+      } else {
+        return res.status(400).json({ message: "Unsupported file format. Use .csv, .xlsx, .xls, or .pdf" });
+      }
+
+      const validEventTypes = ["email", "endpoint", "vulnerability"];
+      const validSeverities = ["critical", "high", "medium", "low", "info"];
+
+      const events = rows.map((row: any) => {
+        const eventType = validEventTypes.includes(String(row.eventType || row.event_type || "").toLowerCase())
+          ? String(row.eventType || row.event_type || "endpoint").toLowerCase()
+          : "endpoint";
+        const severity = validSeverities.includes(String(row.severity || "").toLowerCase())
+          ? String(row.severity || "medium").toLowerCase()
+          : "medium";
+
+        return {
+          tenantId: tid,
+          eventType: eventType as "email" | "endpoint" | "vulnerability",
+          severity: severity as "critical" | "high" | "medium" | "low" | "info",
+          threat: String(row.threat || row.Threat || row.threat_name || "").substring(0, 500) || null,
+          target: String(row.target || row.Target || row.recipient || row.system || "").substring(0, 500) || null,
+          attacker: String(row.attacker || row.Attacker || row.sender || row.source_ip || "").substring(0, 500) || null,
+          asset: String(row.asset || row.Asset || row.hostname || "").substring(0, 500) || null,
+          app: String(row.app || row.App || row.application || "").substring(0, 255) || null,
+          description: String(row.description || row.Description || row.details || "").substring(0, 2000) || null,
+          occurredAt: row.occurredAt || row.occurred_at || row.date || row.timestamp ? new Date(row.occurredAt || row.occurred_at || row.date || row.timestamp) : new Date(),
+        };
+      }).filter((e: any) => e.threat || e.target || e.description);
+
+      let imported = 0;
+      if (events.length > 0) {
+        const batchSize = 100;
+        for (let i = 0; i < events.length; i += batchSize) {
+          const batch = events.slice(i, i + batchSize);
+          await storage.createSecurityEvents(batch);
+          imported += batch.length;
+        }
+      }
+
+      res.json({
+        message: `Successfully imported ${imported} security events`,
+        imported,
+        total: rows.length,
+        skipped: rows.length - imported,
+        fileSaved: savedPath,
+      });
+    } catch (error: any) {
+      console.error("Import error:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to import data" });
     }
   });
 

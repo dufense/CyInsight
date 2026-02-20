@@ -18,6 +18,7 @@ import IncidentsPage from "@/pages/incidents";
 import TicketsPage from "@/pages/tickets";
 import ProjectsPage from "@/pages/projects";
 import ReportsPage from "@/pages/reports";
+import ImportPage from "@/pages/import";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -37,6 +38,7 @@ function AuthenticatedRouter() {
       <Route path="/tickets" component={TicketsPage} />
       <Route path="/projects" component={ProjectsPage} />
       <Route path="/reports" component={ReportsPage} />
+      <Route path="/import" component={ImportPage} />
       <Route component={NotFound} />
     </Switch>
   );

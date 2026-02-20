@@ -6,6 +6,7 @@ import {
   Ticket,
   FolderKanban,
   FileText,
+  Upload,
   ChevronDown,
   Building2,
   LogOut,
@@ -43,6 +44,7 @@ const mssNavItems = [
   { title: "Tickets", url: "/tickets", icon: Ticket },
   { title: "Projects", url: "/projects", icon: FolderKanban },
   { title: "Reports", url: "/reports", icon: FileText },
+  { title: "Import Data", url: "/import", icon: Upload },
 ];
 
 const customerNavItems = [
