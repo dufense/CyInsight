@@ -1,17 +1,17 @@
 # SecureOps - MSSP Reporting Platform
 
 ## Overview
-Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for managing security operations across client organizations. Features hierarchical tenant architecture (MSSP → Customers), incident orchestration, AI-powered report generation, support ticketing with SLA tracking, project management with Kanban boards, enterprise-grade CISO-level security dashboards, Solutions & Services management with MSA/SLA tracking, shift roster management for Implementation and MSS teams, and automated project reporting.
+Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for managing security operations across client organizations. Features hierarchical tenant architecture (MSSP → Customers), incident orchestration, AI-powered report generation, support ticketing with SLA tracking and AI-powered suggestions, project management with Kanban boards and AI risk assessment/task breakdown, Knowledge Base with document management (8 categories), enterprise-grade CISO-level security dashboards, Solutions & Services management with MSA/SLA tracking, shift roster management for Implementation and MSS teams, and automated project reporting.
 
 ## Architecture
 - **Frontend**: React + Vite + TailwindCSS + shadcn/ui + Recharts + wouter routing
 - **Backend**: Express.js with session-based auth (Replit Auth)
 - **Database**: PostgreSQL (Neon) with Drizzle ORM
-- **AI**: OpenAI via Replit AI Integrations for report generation
+- **AI**: OpenAI via Replit AI Integrations for report generation, ticket suggestions, project risk assessment, task breakdown, document content generation
 - **Auth**: Replit OIDC Auth with role-based access control
 
 ## Key Files
-- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters)
+- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters, documents)
 - `server/routes.ts` - API routes with tenant access control middleware
 - `server/storage.ts` - Database storage layer (IStorage interface) with CRUD for all entities
 - `server/seed.ts` - Disabled (production-ready, no seed data)
@@ -21,6 +21,7 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 - `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 8 tabs
 - `client/src/pages/tickets.tsx` - Ticketing with SLA indicators and activity dashboard
 - `client/src/pages/projects.tsx` - Project management with activity dashboard and report generation
+- `client/src/pages/knowledge-base.tsx` - Knowledge Base with document management and AI content generation
 - `client/src/pages/services.tsx` - Solutions & Services management with SLA tracking
 - `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
 - `client/src/pages/reports.tsx` - AI-powered report generation with 8 report types
@@ -81,6 +82,7 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 - `sla_definitions` - SLA targets per service per priority
 - `team_members` - Team member profiles (implementation/mss teams)
 - `shift_rosters` - Shift schedule entries
+- `documents` - Knowledge Base documents with categories and visibility controls
 
 ## Report Types
 executive_summary, endpoint, email, vulnerability, compliance, threat_intelligence, incident_response, cloud_security
@@ -112,6 +114,12 @@ Customer tenants can be created via POST /api/tenants by MSS admins.
 - `GET/POST/PATCH/DELETE /api/shift-rosters` - Shift roster CRUD
 - `GET /api/reports/:tenantId` - List reports
 - `POST /api/reports/generate` - AI-powered report generation
+- `GET/POST/PATCH/DELETE /api/documents` - Document CRUD with tenant-scoped access
+- `POST /api/ai/generate-document` - AI-powered document content generation
+- `POST /api/ai/ticket-suggest` - AI ticket auto-categorize and priority suggestion
+- `POST /api/ai/ticket-response` - AI-generated ticket response
+- `POST /api/ai/project-risk` - AI project risk assessment
+- `POST /api/ai/task-breakdown` - AI task breakdown from goal
 - `POST /api/import` - File import (CSV/Excel/PDF)
 - `GET /api/reports/download/:id` - Download report file
 

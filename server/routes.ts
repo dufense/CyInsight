@@ -13,6 +13,7 @@ import {
   insertSlaDefinitionSchema,
   insertTeamMemberSchema,
   insertShiftRosterSchema,
+  insertDocumentSchema,
 } from "@shared/schema";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -794,6 +795,314 @@ Be specific and professional. Reference actual data patterns and threats.`;
       res.json({ message: "Deleted" });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to delete shift roster" });
+    }
+  });
+
+  // Documents / Knowledge Base routes
+  app.get("/api/documents/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      const access = await assertTenantAccess(req, tenantId);
+      const category = req.query.category as string | undefined;
+      let docs = category
+        ? await storage.getDocumentsByCategory(tenantId, category)
+        : await storage.getDocuments(tenantId);
+      if (!access.isMSS) {
+        docs = docs.filter(d => d.customerVisible && d.status === "published");
+      }
+      res.json(docs);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch documents" });
+    }
+  });
+
+  app.get("/api/documents/detail/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const doc = await storage.getDocument(id);
+      if (!doc) return res.status(404).json({ message: "Document not found" });
+      const access = await assertTenantAccess(req, doc.tenantId);
+      if (!access.isMSS && (!doc.customerVisible || doc.status !== "published")) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      res.json(doc);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch document" });
+    }
+  });
+
+  app.post("/api/documents", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const validated = insertDocumentSchema.parse(req.body);
+      await assertTenantAccess(req, validated.tenantId);
+      const doc = await storage.createDocument({ ...validated, createdBy: access.userId });
+      res.status(201).json(doc);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Validation error", errors: error.errors });
+      res.status(error.status || 500).json({ message: error.message || "Failed to create document" });
+    }
+  });
+
+  app.patch("/api/documents/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getDocument(id);
+      if (!existing) return res.status(404).json({ message: "Document not found" });
+      const access = await assertTenantAccess(req, existing.tenantId);
+      assertMSSRole(access);
+      const doc = await storage.updateDocument(id, { ...req.body, updatedBy: access.userId });
+      res.json(doc);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update document" });
+    }
+  });
+
+  app.delete("/api/documents/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getDocument(id);
+      if (!existing) return res.status(404).json({ message: "Document not found" });
+      const access = await assertTenantAccess(req, existing.tenantId);
+      assertMSSRole(access);
+      await storage.deleteDocument(id);
+      res.json({ message: "Deleted" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to delete document" });
+    }
+  });
+
+  // AI: Generate document content
+  app.post("/api/ai/generate-document", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { tenantId, title, category, context } = req.body;
+      if (!tenantId || !title || !category) return res.status(400).json({ message: "tenantId, title, and category are required" });
+      await assertTenantAccess(req, tenantId);
+
+      const tenant = await storage.getTenant(tenantId);
+      const categoryLabels: Record<string, string> = {
+        knowledge_transfer: "Knowledge Transfer Document",
+        implementation: "Implementation Guide",
+        sop: "Standard Operating Procedure (SOP)",
+        runbook: "Runbook",
+        policy: "Security Policy",
+        architecture: "Architecture Document",
+        training: "Training Material",
+        other: "General Document",
+      };
+      const categoryLabel = categoryLabels[category] || "Document";
+
+      const prompt = `You are a senior cybersecurity professional creating a ${categoryLabel} for ${tenant?.name || "the client"}.
+
+Document Title: "${title}"
+${context ? `Additional Context: ${context}` : ""}
+
+Generate a comprehensive, professional ${categoryLabel} in Markdown format. Include:
+- Executive overview
+- Detailed sections with clear headings
+- Step-by-step procedures where applicable
+- Best practices and recommendations
+- Relevant security considerations
+
+The document should be production-ready, professional, and suitable for enterprise MSSP clients. Use proper Markdown formatting with headers, lists, tables where appropriate.`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        max_completion_tokens: 4096,
+      });
+
+      const content = response.choices[0]?.message?.content || "";
+      res.json({ content });
+    } catch (error: any) {
+      console.error("Error generating document:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to generate document" });
+    }
+  });
+
+  // AI: Ticket auto-categorize and priority suggestion
+  app.post("/api/ai/ticket-suggest", isAuthenticated, async (req: any, res) => {
+    try {
+      const { title, description } = req.body;
+      if (!title) return res.status(400).json({ message: "title is required" });
+
+      const prompt = `You are an MSSP security operations expert. Analyze this support ticket and suggest categorization and priority.
+
+Title: "${title}"
+${description ? `Description: "${description}"` : ""}
+
+Respond in JSON with:
+{
+  "suggestedPriority": "urgent|high|medium|low",
+  "suggestedCategory": "general|incident|access|configuration|billing",
+  "reasoning": "brief explanation",
+  "suggestedResponse": "a professional initial response acknowledging the ticket and outlining next steps (2-3 sentences)"
+}`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 1024,
+      });
+
+      const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error with AI ticket suggestion:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to get AI suggestions" });
+    }
+  });
+
+  // AI: Generate ticket response
+  app.post("/api/ai/ticket-response", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { ticketId } = req.body;
+      if (!ticketId) return res.status(400).json({ message: "ticketId is required" });
+
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+      await assertTenantAccess(req, ticket.tenantId);
+
+      const comments = await storage.getTicketComments(ticketId);
+      const commentsText = comments.map(c => `[${c.isInternal ? "Internal" : "Reply"}]: ${c.content}`).join("\n");
+
+      const prompt = `You are a senior MSSP security operations analyst responding to a support ticket.
+
+Ticket Title: "${ticket.title}"
+Priority: ${ticket.priority}
+Category: ${ticket.category || "general"}
+Status: ${ticket.status}
+Description: "${ticket.description || ""}"
+${commentsText ? `\nConversation History:\n${commentsText}` : ""}
+
+Generate a professional, helpful response that:
+1. Acknowledges the issue clearly
+2. Provides actionable next steps or resolution
+3. Maintains a professional security operations tone
+4. Is concise but thorough (3-5 sentences)
+
+Respond with just the response text, no JSON wrapping.`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        max_completion_tokens: 1024,
+      });
+
+      const content = response.choices[0]?.message?.content || "";
+      res.json({ response: content });
+    } catch (error: any) {
+      console.error("Error generating ticket response:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to generate response" });
+    }
+  });
+
+  // AI: Project risk assessment
+  app.post("/api/ai/project-risk", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { projectId } = req.body;
+      if (!projectId) return res.status(400).json({ message: "projectId is required" });
+
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      await assertTenantAccess(req, project.tenantId);
+
+      const projectTasks = await storage.getTasks(projectId);
+      const totalTasks = projectTasks.length;
+      const doneTasks = projectTasks.filter(t => t.status === "done").length;
+      const overdueTasks = projectTasks.filter(t => t.dueDate && new Date(t.dueDate) < new Date() && t.status !== "done").length;
+      const urgentTasks = projectTasks.filter(t => t.priority === "urgent" || t.priority === "high").length;
+
+      const prompt = `You are a project management expert for an MSSP. Analyze this project and provide a risk assessment.
+
+Project: "${project.name}"
+Status: ${project.status}
+Description: "${project.description || "N/A"}"
+Start Date: ${project.startDate || "Not set"}
+End Date: ${project.endDate || "Not set"}
+
+Task Metrics:
+- Total Tasks: ${totalTasks}
+- Completed: ${doneTasks} (${totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0}%)
+- Overdue: ${overdueTasks}
+- High/Urgent Priority: ${urgentTasks}
+
+Task Details: ${JSON.stringify(projectTasks.slice(0, 20).map(t => ({ title: t.title, status: t.status, priority: t.priority, dueDate: t.dueDate, assignedTo: t.assignedTo })))}
+
+Respond in JSON with:
+{
+  "riskLevel": "low|medium|high|critical",
+  "riskScore": 0-100,
+  "summary": "2-3 sentence risk summary",
+  "risks": [{"title": "risk name", "description": "brief description", "severity": "low|medium|high|critical"}],
+  "recommendations": ["actionable recommendation 1", "recommendation 2", "recommendation 3"]
+}`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 2048,
+      });
+
+      const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error with project risk assessment:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to assess project risk" });
+    }
+  });
+
+  // AI: Generate task breakdown from goal
+  app.post("/api/ai/task-breakdown", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { projectId, goal } = req.body;
+      if (!projectId || !goal) return res.status(400).json({ message: "projectId and goal are required" });
+
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      await assertTenantAccess(req, project.tenantId);
+
+      const prompt = `You are an MSSP project management expert. Break down this goal into actionable tasks for the project "${project.name}".
+
+Goal: "${goal}"
+
+Generate a list of tasks with proper priorities and estimated effort. Respond in JSON:
+{
+  "tasks": [
+    {
+      "title": "concise task title",
+      "description": "brief task description",
+      "priority": "urgent|high|medium|low",
+      "estimatedDays": 1-14
+    }
+  ]
+}
+
+Generate 3-8 specific, actionable tasks. Each task should be completable by one person.`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 2048,
+      });
+
+      const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error with task breakdown:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to generate task breakdown" });
     }
   });
 

@@ -1,7 +1,7 @@
 import {
   tenants, tenantUsers, incidents, tickets, ticketComments,
   projects, tasks, reports, securityEvents,
-  services, slaDefinitions, teamMembers, shiftRosters,
+  services, slaDefinitions, teamMembers, shiftRosters, documents,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -15,6 +15,7 @@ import {
   type SlaDefinition, type InsertSlaDefinition,
   type TeamMember, type InsertTeamMember,
   type ShiftRoster, type InsertShiftRoster,
+  type Document, type InsertDocument,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql, gte, lte } from "drizzle-orm";
@@ -90,6 +91,13 @@ export interface IStorage {
   createShiftRoster(data: InsertShiftRoster): Promise<ShiftRoster>;
   updateShiftRoster(id: number, data: Partial<InsertShiftRoster>): Promise<ShiftRoster>;
   deleteShiftRoster(id: number): Promise<void>;
+
+  getDocuments(tenantId: number): Promise<Document[]>;
+  getDocumentsByCategory(tenantId: number, category: string): Promise<Document[]>;
+  getDocument(id: number): Promise<Document | undefined>;
+  createDocument(data: InsertDocument): Promise<Document>;
+  updateDocument(id: number, data: Partial<InsertDocument>): Promise<Document>;
+  deleteDocument(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -636,6 +644,40 @@ export class DatabaseStorage implements IStorage {
 
   async deleteShiftRoster(id: number): Promise<void> {
     await db.delete(shiftRosters).where(eq(shiftRosters.id, id));
+  }
+
+  async getDocuments(tenantId: number): Promise<Document[]> {
+    return db.select().from(documents)
+      .where(eq(documents.tenantId, tenantId))
+      .orderBy(desc(documents.updatedAt));
+  }
+
+  async getDocumentsByCategory(tenantId: number, category: string): Promise<Document[]> {
+    return db.select().from(documents)
+      .where(and(eq(documents.tenantId, tenantId), eq(documents.category, category as any)))
+      .orderBy(desc(documents.updatedAt));
+  }
+
+  async getDocument(id: number): Promise<Document | undefined> {
+    const [doc] = await db.select().from(documents).where(eq(documents.id, id));
+    return doc;
+  }
+
+  async createDocument(data: InsertDocument): Promise<Document> {
+    const [doc] = await db.insert(documents).values(data).returning();
+    return doc;
+  }
+
+  async updateDocument(id: number, data: Partial<InsertDocument>): Promise<Document> {
+    const [doc] = await db.update(documents)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(documents.id, id))
+      .returning();
+    return doc;
+  }
+
+  async deleteDocument(id: number): Promise<void> {
+    await db.delete(documents).where(eq(documents.id, id));
   }
 }
 

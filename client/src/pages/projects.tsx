@@ -18,6 +18,11 @@ import {
   PauseCircle,
   BarChart3,
   ListChecks,
+  Sparkles,
+  ShieldAlert,
+  Bot,
+  Target,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -283,6 +288,55 @@ export default function ProjectsPage() {
     },
   });
 
+  const [riskDialogOpen, setRiskDialogOpen] = useState(false);
+  const [riskData, setRiskData] = useState<any>(null);
+  const [goalDialogOpen, setGoalDialogOpen] = useState(false);
+  const [goalText, setGoalText] = useState("");
+  const [generatedTasks, setGeneratedTasks] = useState<any[]>([]);
+
+  const riskAssessmentMutation = useMutation({
+    mutationFn: async (projectId: number) => {
+      const res = await apiRequest("POST", "/api/ai/project-risk", { projectId });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setRiskData(data);
+    },
+    onError: () => {
+      toast({ title: "Failed to assess risk", variant: "destructive" });
+    },
+  });
+
+  const taskBreakdownMutation = useMutation({
+    mutationFn: async ({ projectId, goal }: { projectId: number; goal: string }) => {
+      const res = await apiRequest("POST", "/api/ai/task-breakdown", { projectId, goal });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setGeneratedTasks(data.tasks || []);
+    },
+    onError: () => {
+      toast({ title: "Failed to generate tasks", variant: "destructive" });
+    },
+  });
+
+  const addGeneratedTaskMutation = useMutation({
+    mutationFn: async (task: any) => {
+      const res = await apiRequest("POST", "/api/tasks", {
+        projectId: selectedProject,
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        status: "todo",
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tasks"] });
+      toast({ title: "Task added" });
+    },
+  });
+
   if (!selectedProject && projects.length > 0 && !projectsLoading) {
     setSelectedProject(projects[0].id);
   }
@@ -324,6 +378,34 @@ export default function ProjectsPage() {
         <div className="flex items-center gap-2 flex-wrap">
           {isMSS && (
             <>
+              <Button
+                size="sm"
+                variant="secondary"
+                data-testid="button-ai-risk-assessment"
+                onClick={() => {
+                  if (selectedProject) {
+                    setRiskData(null);
+                    setRiskDialogOpen(true);
+                    riskAssessmentMutation.mutate(selectedProject);
+                  }
+                }}
+              >
+                <ShieldAlert className="w-3.5 h-3.5 mr-1.5" />
+                AI Risk Assessment
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                data-testid="button-ai-task-breakdown"
+                onClick={() => {
+                  setGoalText("");
+                  setGeneratedTasks([]);
+                  setGoalDialogOpen(true);
+                }}
+              >
+                <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                AI Task Breakdown
+              </Button>
               <Dialog open={reportDialogOpen} onOpenChange={setReportDialogOpen}>
                 <DialogTrigger asChild>
                   <Button size="sm" variant="secondary" data-testid="button-generate-report">
@@ -546,6 +628,152 @@ export default function ProjectsPage() {
           </div>
         )}
       </div>
+
+      <Dialog open={riskDialogOpen} onOpenChange={setRiskDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-primary" />
+              AI Risk Assessment
+            </DialogTitle>
+          </DialogHeader>
+          {riskAssessmentMutation.isPending ? (
+            <div className="flex items-center justify-center p-8">
+              <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
+              <span className="text-sm text-muted-foreground">Analyzing project risks...</span>
+            </div>
+          ) : riskData ? (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Badge variant={riskData.riskLevel === "critical" || riskData.riskLevel === "high" ? "destructive" : riskData.riskLevel === "medium" ? "default" : "secondary"} className="text-xs">
+                    {riskData.riskLevel?.toUpperCase()}
+                  </Badge>
+                  <span className="text-sm text-muted-foreground">Risk Score: {riskData.riskScore}/100</span>
+                </div>
+              </div>
+              <p className="text-sm">{riskData.summary}</p>
+              {riskData.risks?.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-medium">Identified Risks</h4>
+                  {riskData.risks.map((risk: any, i: number) => (
+                    <Card key={i}>
+                      <CardContent className="p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <AlertTriangle className={`w-3 h-3 ${risk.severity === "critical" || risk.severity === "high" ? "text-destructive" : "text-muted-foreground"}`} />
+                          <span className="text-xs font-medium">{risk.title}</span>
+                          <Badge variant="outline" className="text-[9px]">{risk.severity}</Badge>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{risk.description}</p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+              {riskData.recommendations?.length > 0 && (
+                <div className="space-y-1">
+                  <h4 className="text-xs font-medium">Recommendations</h4>
+                  <ul className="space-y-1">
+                    {riskData.recommendations.map((rec: string, i: number) => (
+                      <li key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
+                        <Target className="w-3 h-3 mt-0.5 shrink-0 text-primary" />
+                        {rec}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={goalDialogOpen} onOpenChange={setGoalDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-primary" />
+              AI Task Breakdown
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            {generatedTasks.length === 0 && (
+              <>
+                <Label className="text-sm">Describe a project goal</Label>
+                <Textarea
+                  value={goalText}
+                  onChange={(e) => setGoalText(e.target.value)}
+                  placeholder="e.g., Implement firewall rule audit for all client environments..."
+                  rows={3}
+                  data-testid="input-ai-goal"
+                />
+                <Button
+                  className="w-full"
+                  disabled={!goalText || !selectedProject || taskBreakdownMutation.isPending}
+                  onClick={() => {
+                    if (selectedProject && goalText) {
+                      taskBreakdownMutation.mutate({ projectId: selectedProject, goal: goalText });
+                    }
+                  }}
+                  data-testid="button-generate-tasks"
+                >
+                  {taskBreakdownMutation.isPending ? (
+                    <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                  )}
+                  {taskBreakdownMutation.isPending ? "Generating..." : "Generate Tasks"}
+                </Button>
+              </>
+            )}
+            {generatedTasks.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">Click "Add" to add tasks to the project board:</p>
+                {generatedTasks.map((task: any, i: number) => (
+                  <Card key={i}>
+                    <CardContent className="p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-medium">{task.title}</span>
+                            <Badge variant="outline" className="text-[9px]">{task.priority}</Badge>
+                            {task.estimatedDays && (
+                              <span className="text-[9px] text-muted-foreground">{task.estimatedDays}d</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-muted-foreground mt-0.5">{task.description}</p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs shrink-0"
+                          onClick={() => addGeneratedTaskMutation.mutate(task)}
+                          disabled={addGeneratedTaskMutation.isPending}
+                          data-testid={`button-add-task-${i}`}
+                        >
+                          <Plus className="w-3 h-3 mr-1" />
+                          Add
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+                <Button
+                  variant="secondary"
+                  className="w-full text-xs"
+                  onClick={() => {
+                    generatedTasks.forEach(task => addGeneratedTaskMutation.mutate(task));
+                  }}
+                  data-testid="button-add-all-tasks"
+                >
+                  <Plus className="w-3 h-3 mr-1" />
+                  Add All Tasks
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Briefcase,
   CalendarClock,
+  BookOpen,
 } from "lucide-react";
 import {
   Sidebar,
@@ -45,6 +46,7 @@ const mssNavItems = [
   { title: "Incidents", url: "/incidents", icon: AlertTriangle },
   { title: "Tickets", url: "/tickets", icon: Ticket },
   { title: "Projects", url: "/projects", icon: FolderKanban },
+  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
   { title: "Services & SLA", url: "/services", icon: Briefcase },
   { title: "Shift Roster", url: "/shift-roster", icon: CalendarClock },
   { title: "Reports", url: "/reports", icon: FileText },
@@ -54,6 +56,7 @@ const mssNavItems = [
 const customerNavItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   { title: "Tickets", url: "/tickets", icon: Ticket },
+  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
 ];
 
 export function AppSidebar() {

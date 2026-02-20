@@ -21,6 +21,7 @@ import ServicesPage from "@/pages/services";
 import ShiftRosterPage from "@/pages/shift-roster";
 import ReportsPage from "@/pages/reports";
 import ImportPage from "@/pages/import";
+import KnowledgeBasePage from "@/pages/knowledge-base";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -42,6 +43,7 @@ function AuthenticatedRouter() {
       <Route path="/services" component={ServicesPage} />
       <Route path="/shift-roster" component={ShiftRosterPage} />
       <Route path="/reports" component={ReportsPage} />
+      <Route path="/knowledge-base" component={KnowledgeBasePage} />
       <Route path="/import" component={ImportPage} />
       <Route component={NotFound} />
     </Switch>

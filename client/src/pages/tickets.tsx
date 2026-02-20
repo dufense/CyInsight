@@ -16,6 +16,9 @@ import {
   ShieldAlert,
   Activity,
   Timer,
+  Sparkles,
+  Send,
+  Bot,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -231,11 +234,13 @@ function TicketCard({
   isMSS,
   onStatusChange,
   services,
+  onAiResponse,
 }: {
   ticket: Ticket;
   isMSS: boolean;
   onStatusChange: (id: number, status: string) => void;
   services: Service[];
+  onAiResponse?: (ticketId: number) => void;
 }) {
   const Icon = STATUS_ICONS[ticket.status] || AlertCircle;
   const serviceName = ticket.serviceId
@@ -296,21 +301,33 @@ function TicketCard({
             </div>
           </div>
           {isMSS && (
-            <Select
-              value={ticket.status}
-              onValueChange={(status) => onStatusChange(ticket.id, status)}
-            >
-              <SelectTrigger className="h-7 text-[10px] w-[110px] shrink-0">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="open">Open</SelectItem>
-                <SelectItem value="in_progress">In Progress</SelectItem>
-                <SelectItem value="waiting">Waiting</SelectItem>
-                <SelectItem value="resolved">Resolved</SelectItem>
-                <SelectItem value="closed">Closed</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title="AI Response"
+                onClick={() => onAiResponse?.(ticket.id)}
+                data-testid={`button-ai-response-${ticket.id}`}
+              >
+                <Bot className="w-3.5 h-3.5 text-primary" />
+              </Button>
+              <Select
+                value={ticket.status}
+                onValueChange={(status) => onStatusChange(ticket.id, status)}
+              >
+                <SelectTrigger className="h-7 text-[10px] w-[110px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="open">Open</SelectItem>
+                  <SelectItem value="in_progress">In Progress</SelectItem>
+                  <SelectItem value="waiting">Waiting</SelectItem>
+                  <SelectItem value="resolved">Resolved</SelectItem>
+                  <SelectItem value="closed">Closed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           )}
         </div>
       </CardContent>
@@ -339,6 +356,11 @@ export default function TicketsPage() {
     enabled: !!currentTenant,
   });
 
+  const [aiSuggestion, setAiSuggestion] = useState<any>(null);
+  const [aiResponseDialogOpen, setAiResponseDialogOpen] = useState(false);
+  const [aiResponseTicketId, setAiResponseTicketId] = useState<number | null>(null);
+  const [aiResponseText, setAiResponseText] = useState("");
+
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
       const res = await apiRequest("POST", "/api/tickets", { ...data, tenantId: currentTenant?.id });
@@ -348,7 +370,42 @@ export default function TicketsPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/tickets"] });
       setDialogOpen(false);
       setCreateServiceId("");
+      setAiSuggestion(null);
       toast({ title: "Ticket created", description: "Your support ticket has been submitted." });
+    },
+  });
+
+  const aiSuggestMutation = useMutation({
+    mutationFn: async (data: { title: string; description: string }) => {
+      const res = await apiRequest("POST", "/api/ai/ticket-suggest", data);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setAiSuggestion(data);
+    },
+  });
+
+  const aiResponseMutation = useMutation({
+    mutationFn: async (ticketId: number) => {
+      const res = await apiRequest("POST", "/api/ai/ticket-response", { ticketId });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setAiResponseText(data.response || "");
+    },
+  });
+
+  const submitCommentMutation = useMutation({
+    mutationFn: async ({ ticketId, content }: { ticketId: number; content: string }) => {
+      const res = await apiRequest("POST", `/api/tickets/${ticketId}/comments`, { content });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickets"] });
+      setAiResponseDialogOpen(false);
+      setAiResponseText("");
+      setAiResponseTicketId(null);
+      toast({ title: "Response sent" });
     },
   });
 
@@ -425,10 +482,56 @@ export default function TicketsPage() {
                 <Label htmlFor="ticket-desc">Description</Label>
                 <Textarea id="ticket-desc" name="description" rows={4} data-testid="input-ticket-description" />
               </div>
+
+              <Card className="border-dashed border-primary/30 bg-primary/5">
+                <CardContent className="p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-primary" />
+                      <span className="text-xs font-medium">AI Smart Suggestions</span>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="text-xs"
+                      disabled={aiSuggestMutation.isPending}
+                      onClick={() => {
+                        const form = document.querySelector("form");
+                        const title = (form?.querySelector('[name="title"]') as HTMLInputElement)?.value || "";
+                        const desc = (form?.querySelector('[name="description"]') as HTMLTextAreaElement)?.value || "";
+                        if (title) aiSuggestMutation.mutate({ title, description: desc });
+                      }}
+                      data-testid="button-ai-suggest"
+                    >
+                      {aiSuggestMutation.isPending ? (
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 mr-1" />
+                      )}
+                      {aiSuggestMutation.isPending ? "Analyzing..." : "Analyze"}
+                    </Button>
+                  </div>
+                  {aiSuggestion && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex items-center gap-3 text-xs">
+                        <span className="text-muted-foreground">Suggested Priority:</span>
+                        <Badge variant="outline" className={PRIORITY_STYLES[aiSuggestion.suggestedPriority] || ""}>{aiSuggestion.suggestedPriority}</Badge>
+                        <span className="text-muted-foreground">Category:</span>
+                        <Badge variant="outline">{aiSuggestion.suggestedCategory}</Badge>
+                      </div>
+                      {aiSuggestion.reasoning && (
+                        <p className="text-[10px] text-muted-foreground"><Bot className="w-3 h-3 inline mr-1" />{aiSuggestion.reasoning}</p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
                   <Label>Priority</Label>
-                  <Select name="priority" defaultValue="medium">
+                  <Select name="priority" defaultValue={aiSuggestion?.suggestedPriority || "medium"} key={aiSuggestion?.suggestedPriority || "default"}>
                     <SelectTrigger data-testid="select-ticket-priority"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="urgent">Urgent</SelectItem>
@@ -440,7 +543,7 @@ export default function TicketsPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>Category</Label>
-                  <Select name="category" defaultValue="general">
+                  <Select name="category" defaultValue={aiSuggestion?.suggestedCategory || "general"} key={aiSuggestion?.suggestedCategory || "default"}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="general">General</SelectItem>
@@ -543,12 +646,73 @@ export default function TicketsPage() {
                   isMSS={isMSS}
                   onStatusChange={(id, status) => updateMutation.mutate({ id, status })}
                   services={services}
+                  onAiResponse={(ticketId) => {
+                    setAiResponseTicketId(ticketId);
+                    setAiResponseText("");
+                    setAiResponseDialogOpen(true);
+                    aiResponseMutation.mutate(ticketId);
+                  }}
                 />
               ))}
             </div>
           )}
         </TabsContent>
       </Tabs>
+
+      <Dialog open={aiResponseDialogOpen} onOpenChange={setAiResponseDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-primary" />
+              AI-Generated Response
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            {aiResponseMutation.isPending ? (
+              <div className="flex items-center justify-center p-8">
+                <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
+                <span className="text-sm text-muted-foreground">Generating response...</span>
+              </div>
+            ) : (
+              <>
+                <Textarea
+                  value={aiResponseText}
+                  onChange={(e) => setAiResponseText(e.target.value)}
+                  rows={6}
+                  className="text-sm"
+                  data-testid="textarea-ai-response"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    className="flex-1"
+                    disabled={!aiResponseText || submitCommentMutation.isPending}
+                    onClick={() => {
+                      if (aiResponseTicketId && aiResponseText) {
+                        submitCommentMutation.mutate({ ticketId: aiResponseTicketId, content: aiResponseText });
+                      }
+                    }}
+                    data-testid="button-send-ai-response"
+                  >
+                    <Send className="w-3.5 h-3.5 mr-1.5" />
+                    {submitCommentMutation.isPending ? "Sending..." : "Send Response"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={aiResponseMutation.isPending}
+                    onClick={() => {
+                      if (aiResponseTicketId) aiResponseMutation.mutate(aiResponseTicketId);
+                    }}
+                    data-testid="button-regenerate-response"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                    Regenerate
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

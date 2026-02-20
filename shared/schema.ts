@@ -206,6 +206,27 @@ export const shiftRosters = pgTable("shift_rosters", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const documentCategoryEnum = pgEnum("document_category", [
+  "knowledge_transfer", "implementation", "sop", "runbook", "policy", "architecture", "training", "other"
+]);
+
+export const documentStatusEnum = pgEnum("document_status", ["draft", "published", "archived"]);
+
+export const documents = pgTable("documents", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  title: varchar("title", { length: 500 }).notNull(),
+  content: text("content"),
+  category: documentCategoryEnum("category").default("other").notNull(),
+  status: documentStatusEnum("status").default("draft").notNull(),
+  tags: text("tags"),
+  customerVisible: boolean("customer_visible").default(false).notNull(),
+  createdBy: varchar("created_by"),
+  updatedBy: varchar("updated_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const securityEventsRelations = relations(securityEvents, ({ one }) => ({
   tenant: one(tenants, { fields: [securityEvents.tenantId], references: [tenants.id] }),
 }));
@@ -222,6 +243,7 @@ export const tenantsRelations = relations(tenants, ({ one, many }) => ({
   services: many(services),
   teamMembers: many(teamMembers),
   shiftRosters: many(shiftRosters),
+  documents: many(documents),
 }));
 
 export const tenantUsersRelations = relations(tenantUsers, ({ one }) => ({
@@ -275,6 +297,10 @@ export const shiftRostersRelations = relations(shiftRosters, ({ one }) => ({
   teamMember: one(teamMembers, { fields: [shiftRosters.teamMemberId], references: [teamMembers.id] }),
 }));
 
+export const documentsRelations = relations(documents, ({ one }) => ({
+  tenant: one(tenants, { fields: [documents.tenantId], references: [tenants.id] }),
+}));
+
 export const insertTenantSchema = createInsertSchema(tenants).omit({ id: true, createdAt: true });
 export const insertTenantUserSchema = createInsertSchema(tenantUsers).omit({ id: true, createdAt: true });
 export const insertIncidentSchema = createInsertSchema(incidents).omit({ id: true, createdAt: true, updatedAt: true });
@@ -288,6 +314,7 @@ export const insertServiceSchema = createInsertSchema(services).omit({ id: true,
 export const insertSlaDefinitionSchema = createInsertSchema(slaDefinitions).omit({ id: true, createdAt: true });
 export const insertTeamMemberSchema = createInsertSchema(teamMembers).omit({ id: true, createdAt: true });
 export const insertShiftRosterSchema = createInsertSchema(shiftRosters).omit({ id: true, createdAt: true });
+export const insertDocumentSchema = createInsertSchema(documents).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type Tenant = typeof tenants.$inferSelect;
 export type InsertTenant = z.infer<typeof insertTenantSchema>;
@@ -315,3 +342,5 @@ export type TeamMember = typeof teamMembers.$inferSelect;
 export type InsertTeamMember = z.infer<typeof insertTeamMemberSchema>;
 export type ShiftRoster = typeof shiftRosters.$inferSelect;
 export type InsertShiftRoster = z.infer<typeof insertShiftRosterSchema>;
+export type Document = typeof documents.$inferSelect;
+export type InsertDocument = z.infer<typeof insertDocumentSchema>;
