@@ -455,12 +455,30 @@ export async function registerRoutes(
       } else if (rType === "vulnerability") {
         const vulnEvents = securityEventsList.filter(e => e.eventType === "vulnerability");
         promptContext = `Vulnerability Events (${vulnEvents.length} total):\n${JSON.stringify(vulnEvents.slice(0, 30).map(e => ({ threat: e.threat, target: e.target, app: e.app, severity: e.severity, description: e.description })), null, 2)}`;
+      } else if (rType === "compliance") {
+        const allSummary = securityEventsList.slice(0, 20).map(e => ({ threat: e.threat, severity: e.severity, action: e.action, mitreTactic: e.mitreTactic }));
+        promptContext = `Compliance-relevant events (${securityEventsList.length} total):\n${JSON.stringify(allSummary, null, 2)}\n\nIncidents: ${incidentsList.length} total, ${incidentsList.filter(i => i.severity === "critical").length} critical\nOpen tickets: ${ticketsList.filter(t => t.status === "open").length}`;
+      } else if (rType === "threat_intelligence") {
+        const threatEvents = securityEventsList.slice(0, 30).map(e => ({ threat: e.threat, threatVector: e.threatVector, mitreTactic: e.mitreTactic, mitreTechnique: e.mitreTechnique, severity: e.severity, country: e.country }));
+        promptContext = `Threat Intelligence Events (${securityEventsList.length} total):\n${JSON.stringify(threatEvents, null, 2)}`;
+      } else if (rType === "incident_response") {
+        const irData = incidentsList.slice(0, 25).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, affectedAssets: i.affectedAssets, source: i.source }));
+        promptContext = `Incident Response Data (${incidentsList.length} incidents):\n${JSON.stringify(irData, null, 2)}\n\nEvent breakdown: ${securityEventsList.length} total events`;
+      } else if (rType === "cloud_security") {
+        const cloudEvents = securityEventsList.filter(e => ["cloud", "casb", "sse"].includes(e.eventType));
+        promptContext = `Cloud Security Events (${cloudEvents.length} total):\n${JSON.stringify(cloudEvents.slice(0, 30).map(e => ({ threat: e.threat, app: e.app, severity: e.severity, action: e.action, description: e.description })), null, 2)}`;
       } else {
         const incidentSummary = incidentsList.slice(0, 20).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, source: i.source }));
         promptContext = `Incidents (${incidentsList.length} total):\n${JSON.stringify(incidentSummary, null, 2)}\n\nTickets: ${ticketsList.length} total, ${ticketsList.filter(t => t.status === "open").length} open\n\nSecurity Events: ${securityEventsList.length} total (Email: ${securityEventsList.filter(e => e.eventType === "email").length}, Endpoint: ${securityEventsList.filter(e => e.eventType === "endpoint").length}, Vulnerability: ${securityEventsList.filter(e => e.eventType === "vulnerability").length})`;
       }
 
-      const reportTypeLabel = rType === "executive_summary" ? "Executive Summary" : rType === "endpoint" ? "Endpoint Security" : rType === "email" ? "Email Security" : "Vulnerability Assessment";
+      const reportLabels: Record<string, string> = {
+        executive_summary: "Executive Summary", endpoint: "Endpoint Security", email: "Email Security",
+        vulnerability: "Vulnerability Assessment", compliance: "Compliance & Governance",
+        threat_intelligence: "Threat Intelligence", incident_response: "Incident Response",
+        cloud_security: "Cloud Security",
+      };
+      const reportTypeLabel = reportLabels[rType] || "Executive Summary";
 
       const prompt = `You are a senior cybersecurity analyst preparing a ${reportTypeLabel} report for ${tenant?.name || "the client"}.
 

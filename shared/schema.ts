@@ -14,8 +14,8 @@ export const ticketStatusEnum = pgEnum("ticket_status", ["open", "in_progress", 
 export const ticketPriorityEnum = pgEnum("ticket_priority", ["urgent", "high", "medium", "low"]);
 export const projectStatusEnum = pgEnum("project_status", ["planning", "active", "on_hold", "completed", "cancelled"]);
 export const taskStatusEnum = pgEnum("task_status", ["backlog", "todo", "in_progress", "review", "done"]);
-export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability"]);
-export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability"]);
+export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"]);
+export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability", "compliance", "threat_intelligence", "incident_response", "cloud_security"]);
 
 export const tenants = pgTable("tenants", {
   id: serial("id").primaryKey(),
@@ -116,6 +116,17 @@ export const securityEvents = pgTable("security_events", {
   asset: varchar("asset", { length: 500 }),
   app: varchar("app", { length: 255 }),
   description: text("description"),
+  threatVector: varchar("threat_vector", { length: 200 }),
+  mitreTactic: varchar("mitre_tactic", { length: 200 }),
+  mitreTechnique: varchar("mitre_technique", { length: 200 }),
+  action: varchar("action", { length: 100 }),
+  sourceType: varchar("source_type", { length: 100 }),
+  logSource: varchar("log_source", { length: 200 }),
+  sender: varchar("sender", { length: 500 }),
+  recipient: varchar("recipient", { length: 500 }),
+  protocol: varchar("protocol", { length: 50 }),
+  country: varchar("country", { length: 100 }),
+  riskScore: integer("risk_score"),
   rawPayload: jsonb("raw_payload"),
   occurredAt: timestamp("occurred_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),

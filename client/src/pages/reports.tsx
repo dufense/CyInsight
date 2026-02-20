@@ -15,6 +15,10 @@ import {
   Monitor,
   Bug,
   BarChart3,
+  ShieldCheck,
+  Crosshair,
+  AlertTriangle,
+  Cloud,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +47,10 @@ const REPORT_TYPE_LABELS: Record<string, { label: string; icon: any; color: stri
   endpoint: { label: "Endpoint Report", icon: Monitor, color: "text-red-500" },
   email: { label: "Email Report", icon: Mail, color: "text-purple-500" },
   vulnerability: { label: "Vulnerability Report", icon: Bug, color: "text-orange-500" },
+  compliance: { label: "Compliance Report", icon: ShieldCheck, color: "text-green-500" },
+  threat_intelligence: { label: "Threat Intelligence", icon: Crosshair, color: "text-cyan-500" },
+  incident_response: { label: "Incident Response", icon: AlertTriangle, color: "text-yellow-500" },
+  cloud_security: { label: "Cloud Security", icon: Cloud, color: "text-sky-500" },
 };
 
 function ReportViewer({ report }: { report: Report }) {

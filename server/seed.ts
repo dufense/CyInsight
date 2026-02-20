@@ -29,7 +29,6 @@ export async function seedDatabase() {
   ];
 
   const createdCustomers = await db.insert(tenants).values(customerData).returning();
-
   const allTenants = [...createdMSSPs, ...createdCustomers];
 
   const incidentTemplates: Record<string, Array<{ title: string; description: string; severity: "critical" | "high" | "medium" | "low" | "info"; status: "open" | "investigating" | "contained" | "resolved" | "closed"; source: string; category: string; affectedAssets: string }>> = {
@@ -175,7 +174,7 @@ export async function seedSecurityEvents(allTenants?: Array<{ id: number; slug: 
     allTenants = await db.select().from(tenants);
   }
 
-  console.log("Seeding security events data...");
+  console.log("Seeding comprehensive security events data...");
 
   const randomDate = (daysBack: number) => {
     const d = new Date();
@@ -184,118 +183,292 @@ export async function seedSecurityEvents(allTenants?: Array<{ id: number; slug: 
     return d;
   };
 
-  const emailEvents = [
-    { threat: "Emotet Trojan", target: "finance@{tenant}.com", attacker: "invoice-update@malicious-domain.ru", severity: "critical" as const, description: "Emotet dropper attached to fake invoice email" },
-    { threat: "Credential Phishing", target: "ceo@{tenant}.com", attacker: "support@micros0ft-verify.com", severity: "high" as const, description: "Credential harvesting page impersonating Microsoft 365 login" },
-    { threat: "BEC Wire Fraud", target: "accounts@{tenant}.com", attacker: "cfo-urgent@{tenant}-exec.com", severity: "critical" as const, description: "Business email compromise requesting urgent wire transfer" },
-    { threat: "Spear Phishing", target: "hr@{tenant}.com", attacker: "resume-apply@jobsite-fake.com", severity: "high" as const, description: "Targeted phishing with malicious resume attachment" },
-    { threat: "Malware Delivery", target: "admin@{tenant}.com", attacker: "noreply@delivery-notice.xyz", severity: "high" as const, description: "Malware dropper disguised as delivery notification" },
-    { threat: "Spam Campaign", target: "info@{tenant}.com", attacker: "deals@promo-blast.net", severity: "low" as const, description: "Mass spam campaign with suspicious links" },
-    { threat: "Credential Phishing", target: "ops@{tenant}.com", attacker: "it-helpdesk@{tenant}-portal.net", severity: "high" as const, description: "Internal IT helpdesk impersonation for credential theft" },
-    { threat: "Ransomware Dropper", target: "legal@{tenant}.com", attacker: "court-notice@legal-filing.xyz", severity: "critical" as const, description: "Ransomware payload in fake legal notice" },
-    { threat: "Data Exfil Link", target: "sales@{tenant}.com", attacker: "proposal@partner-collab.com", severity: "medium" as const, description: "Phishing link leading to data exfiltration page" },
-    { threat: "Whaling Attack", target: "cfo@{tenant}.com", attacker: "board@{tenant}-directors.com", severity: "critical" as const, description: "Whaling attack targeting CFO with fake board directive" },
-    { threat: "QR Phishing", target: "reception@{tenant}.com", attacker: "scan-verify@qr-secure.net", severity: "medium" as const, description: "QR code phishing redirecting to credential harvester" },
-    { threat: "Invoice Fraud", target: "procurement@{tenant}.com", attacker: "billing@vendor-update.biz", severity: "high" as const, description: "Fraudulent invoice from impersonated vendor" },
-    { threat: "Spear Phishing", target: "developer@{tenant}.com", attacker: "security-alert@github-notify.io", severity: "high" as const, description: "GitHub impersonation targeting developer credentials" },
-    { threat: "Malware Delivery", target: "support@{tenant}.com", attacker: "ticket@helpdesk-urgent.com", severity: "medium" as const, description: "Trojan in fake helpdesk ticket attachment" },
-    { threat: "Credential Phishing", target: "manager@{tenant}.com", attacker: "zoom-invite@meeting-now.xyz", severity: "medium" as const, description: "Fake Zoom meeting invite harvesting credentials" },
-  ];
+  const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+  const riskRange = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-  const endpointEvents = [
-    { threat: "Ryuk Ransomware", target: "SRV-DC-01", attacker: "185.220.101.34", asset: "Domain Controller", severity: "critical" as const, description: "Ryuk ransomware encryption activity on domain controller" },
-    { threat: "Cobalt Strike Beacon", target: "WS-FIN-015", attacker: "45.77.123.89", asset: "Finance Workstation", severity: "critical" as const, description: "Cobalt Strike beacon communication detected" },
-    { threat: "TrickBot", target: "WS-HR-003", attacker: "91.215.85.201", asset: "HR Workstation", severity: "high" as const, description: "TrickBot banking trojan infecting HR endpoint" },
-    { threat: "Mimikatz", target: "SRV-APP-02", attacker: "Internal Lateral", asset: "Application Server", severity: "critical" as const, description: "Mimikatz credential dumping detected on app server" },
-    { threat: "WannaCry Variant", target: "WS-OPS-009", attacker: "Unknown", asset: "Operations Workstation", severity: "critical" as const, description: "WannaCry variant spreading via SMB" },
-    { threat: "Emotet Payload", target: "WS-SALES-007", attacker: "193.56.28.103", asset: "Sales Workstation", severity: "high" as const, description: "Emotet payload executed from email attachment" },
-    { threat: "PowerShell Empire", target: "SRV-WEB-01", attacker: "172.16.45.22", asset: "Web Server", severity: "high" as const, description: "PowerShell Empire agent executing recon commands" },
-    { threat: "Cryptominer", target: "SRV-BUILD-03", attacker: "Mining Pool", asset: "Build Server", severity: "medium" as const, description: "XMRig cryptocurrency miner detected on build server" },
-    { threat: "Backdoor Trojan", target: "WS-EXEC-001", attacker: "203.0.113.42", asset: "Executive Laptop", severity: "critical" as const, description: "Persistent backdoor installed on executive laptop" },
-    { threat: "Fileless Malware", target: "SRV-DB-01", attacker: "In-Memory", asset: "Database Server", severity: "high" as const, description: "Fileless malware using WMI for persistence" },
-    { threat: "Rootkit", target: "SRV-MAIL-01", attacker: "78.46.91.155", asset: "Mail Server", severity: "critical" as const, description: "Kernel-level rootkit hiding malicious processes" },
-    { threat: "Adware", target: "WS-MKT-012", attacker: "Bundled Software", asset: "Marketing Workstation", severity: "low" as const, description: "Adware installed via software bundle" },
-    { threat: "RAT (Remote Access)", target: "WS-DEV-004", attacker: "94.130.12.77", asset: "Developer Workstation", severity: "high" as const, description: "Remote access trojan providing persistent access" },
-    { threat: "Ransomware Precursor", target: "SRV-FILE-02", attacker: "Internal Pivot", asset: "File Server", severity: "high" as const, description: "Pre-ransomware reconnaissance and lateral movement" },
-    { threat: "Keylogger", target: "WS-ACCT-006", attacker: "Unknown", asset: "Accounting Workstation", severity: "high" as const, description: "Keylogger capturing credentials on accounting system" },
-  ];
-
-  const vulnerabilityEvents = [
-    { threat: "CVE-2025-21298", target: "SRV-EXCH-01", severity: "critical" as const, app: "Microsoft Exchange", description: "Remote code execution vulnerability in Exchange Server" },
-    { threat: "CVE-2025-0282", target: "VPN-GW-01", severity: "critical" as const, app: "Ivanti Connect Secure", description: "Authentication bypass in VPN gateway" },
-    { threat: "CVE-2024-3400", target: "FW-PALO-01", severity: "critical" as const, app: "Palo Alto PAN-OS", description: "Command injection in firewall management interface" },
-    { threat: "CVE-2025-1234", target: "SRV-WEB-02", severity: "high" as const, app: "Apache Tomcat", description: "Path traversal vulnerability in web server" },
-    { threat: "CVE-2024-50623", target: "FTP-CLEO-01", severity: "critical" as const, app: "Cleo Harmony", description: "Unrestricted file upload vulnerability" },
-    { threat: "CVE-2025-5678", target: "SRV-DB-PROD", severity: "high" as const, app: "PostgreSQL", description: "Privilege escalation in database server" },
-    { threat: "CVE-2025-2468", target: "SRV-JIRA-01", severity: "medium" as const, app: "Atlassian Jira", description: "Stored XSS in project management tool" },
-    { threat: "CVE-2024-11234", target: "LB-NGINX-01", severity: "high" as const, app: "NGINX Plus", description: "HTTP request smuggling in load balancer" },
-    { threat: "CVE-2025-3344", target: "SRV-JENKINS-01", severity: "high" as const, app: "Jenkins", description: "Arbitrary code execution via pipeline script" },
-    { threat: "CVE-2025-7890", target: "WS-CHROME-ALL", severity: "medium" as const, app: "Google Chrome", description: "Use-after-free vulnerability in browser engine" },
-    { threat: "CVE-2025-4455", target: "SRV-DOCKER-01", severity: "high" as const, app: "Docker Engine", description: "Container escape vulnerability" },
-    { threat: "CVE-2024-9876", target: "FW-FORTINET-01", severity: "critical" as const, app: "FortiGate", description: "Authentication bypass in firewall web interface" },
-    { threat: "CVE-2025-1122", target: "SRV-AD-01", severity: "high" as const, app: "Active Directory", description: "Privilege escalation via certificate services" },
-    { threat: "CVE-2025-6677", target: "SRV-SPLUNK-01", severity: "medium" as const, app: "Splunk Enterprise", description: "SSRF vulnerability in SIEM platform" },
-    { threat: "CVE-2025-8899", target: "SRV-K8S-01", severity: "high" as const, app: "Kubernetes", description: "RBAC bypass allowing cluster admin access" },
-  ];
+  const countries = ["United States", "Russia", "China", "North Korea", "Iran", "Brazil", "Nigeria", "Romania", "Ukraine", "India", "Germany", "Netherlands", "France", "United Kingdom", "Vietnam", "Turkey", "Pakistan", "Indonesia"];
+  const actions = ["blocked", "quarantined", "isolated", "allowed", "alerted", "sandboxed", "dropped", "logged"];
+  const emailActions = ["blocked", "quarantined", "delivered", "sandboxed", "stripped"];
+  const logSources = ["CrowdStrike Falcon", "Palo Alto Cortex XDR", "Microsoft Defender", "SentinelOne", "Check Point HEC", "Fortinet FortiGate", "Cisco Umbrella", "Zscaler ZIA", "Netskope CASB", "Proofpoint", "Mimecast", "Splunk SIEM", "QRadar", "LogRhythm", "Rapid7 InsightIDR", "Carbon Black", "Trend Micro", "McAfee ePO", "Sophos Central", "Darktrace"];
 
   for (const tenant of allTenants) {
-    if (tenant.slug.includes("vinca") || tenant.slug.includes("cibervest") || tenant.slug.includes("hitaskit")) {
-      continue;
-    }
+    if (tenant.slug.includes("vinca") || tenant.slug.includes("cibervest") || tenant.slug.includes("hitaskit")) continue;
 
     const slugClean = tenant.slug.replace(/-/g, "");
+    const events: any[] = [];
 
-    const emailCount = 8 + Math.floor(Math.random() * 8);
-    const emailBatch = [];
-    for (let i = 0; i < emailCount; i++) {
-      const tmpl = emailEvents[i % emailEvents.length];
-      emailBatch.push({
-        tenantId: tenant.id,
-        eventType: "email" as const,
-        severity: tmpl.severity,
-        threat: tmpl.threat,
-        target: tmpl.target.replace("{tenant}", slugClean),
-        attacker: tmpl.attacker.replace("{tenant}", slugClean),
-        description: tmpl.description,
-        occurredAt: randomDate(90),
+    const emailTemplates = [
+      { threat: "Emotet Trojan", sender: "invoice-update@malicious-domain.ru", recipient: "finance@{t}.com", severity: "critical" as const, threatVector: "Phishing", mitreTactic: "Initial Access", mitreTechnique: "T1566.001 - Spearphishing Attachment", description: "Emotet dropper attached to fake invoice email", sourceType: "Email Gateway" },
+      { threat: "Credential Phishing", sender: "support@micros0ft-verify.com", recipient: "ceo@{t}.com", severity: "high" as const, threatVector: "Phishing", mitreTactic: "Credential Access", mitreTechnique: "T1556 - Modify Authentication Process", description: "Credential harvesting page impersonating Microsoft 365", sourceType: "Email Gateway" },
+      { threat: "BEC Wire Fraud", sender: "cfo-urgent@{t}-exec.com", recipient: "accounts@{t}.com", severity: "critical" as const, threatVector: "Social Engineering", mitreTactic: "Initial Access", mitreTechnique: "T1566.002 - Spearphishing Link", description: "Business email compromise requesting urgent wire transfer", sourceType: "Email Gateway" },
+      { threat: "Spear Phishing", sender: "resume-apply@jobsite-fake.com", recipient: "hr@{t}.com", severity: "high" as const, threatVector: "Phishing", mitreTactic: "Initial Access", mitreTechnique: "T1566.001 - Spearphishing Attachment", description: "Targeted phishing with malicious resume attachment", sourceType: "Email Gateway" },
+      { threat: "Malware Delivery", sender: "noreply@delivery-notice.xyz", recipient: "admin@{t}.com", severity: "high" as const, threatVector: "Phishing", mitreTactic: "Execution", mitreTechnique: "T1204.002 - Malicious File", description: "Malware dropper disguised as delivery notification", sourceType: "Email Gateway" },
+      { threat: "Spam Campaign", sender: "deals@promo-blast.net", recipient: "info@{t}.com", severity: "low" as const, threatVector: "Spam", mitreTactic: "Initial Access", mitreTechnique: "T1566 - Phishing", description: "Mass spam campaign with suspicious links", sourceType: "Spam Filter" },
+      { threat: "Ransomware Dropper", sender: "court-notice@legal-filing.xyz", recipient: "legal@{t}.com", severity: "critical" as const, threatVector: "Ransomware", mitreTactic: "Execution", mitreTechnique: "T1204.002 - Malicious File", description: "Ransomware payload in fake legal notice", sourceType: "Email Gateway" },
+      { threat: "Whaling Attack", sender: "board@{t}-directors.com", recipient: "cfo@{t}.com", severity: "critical" as const, threatVector: "Social Engineering", mitreTactic: "Initial Access", mitreTechnique: "T1566.002 - Spearphishing Link", description: "Whaling attack targeting CFO with fake board directive", sourceType: "Email Gateway" },
+      { threat: "QR Phishing", sender: "scan-verify@qr-secure.net", recipient: "reception@{t}.com", severity: "medium" as const, threatVector: "Phishing", mitreTactic: "Credential Access", mitreTechnique: "T1598 - Phishing for Information", description: "QR code phishing redirecting to credential harvester", sourceType: "Email Gateway" },
+      { threat: "Invoice Fraud", sender: "billing@vendor-update.biz", recipient: "procurement@{t}.com", severity: "high" as const, threatVector: "Social Engineering", mitreTactic: "Initial Access", mitreTechnique: "T1566.002 - Spearphishing Link", description: "Fraudulent invoice from impersonated vendor", sourceType: "Email Gateway" },
+      { threat: "Spear Phishing", sender: "security-alert@github-notify.io", recipient: "developer@{t}.com", severity: "high" as const, threatVector: "Phishing", mitreTactic: "Credential Access", mitreTechnique: "T1598 - Phishing for Information", description: "GitHub impersonation targeting developer credentials", sourceType: "Email Gateway" },
+      { threat: "Credential Phishing", sender: "zoom-invite@meeting-now.xyz", recipient: "manager@{t}.com", severity: "medium" as const, threatVector: "Phishing", mitreTactic: "Credential Access", mitreTechnique: "T1556 - Modify Authentication Process", description: "Fake Zoom meeting invite harvesting credentials", sourceType: "Email Gateway" },
+      { threat: "Malware Delivery", sender: "ticket@helpdesk-urgent.com", recipient: "support@{t}.com", severity: "medium" as const, threatVector: "Phishing", mitreTactic: "Execution", mitreTechnique: "T1204.002 - Malicious File", description: "Trojan in fake helpdesk ticket attachment", sourceType: "Email Gateway" },
+      { threat: "Data Exfil Link", sender: "proposal@partner-collab.com", recipient: "sales@{t}.com", severity: "medium" as const, threatVector: "Social Engineering", mitreTactic: "Exfiltration", mitreTechnique: "T1567 - Exfiltration Over Web Service", description: "Phishing link leading to data exfiltration page", sourceType: "Email Gateway" },
+      { threat: "BEC Payroll Diversion", sender: "hr-update@{t}-portal.net", recipient: "payroll@{t}.com", severity: "critical" as const, threatVector: "Social Engineering", mitreTactic: "Initial Access", mitreTechnique: "T1566.002 - Spearphishing Link", description: "BEC attempting payroll direct deposit change", sourceType: "Email Gateway" },
+    ];
+
+    for (let i = 0; i < 12 + Math.floor(Math.random() * 6); i++) {
+      const t = emailTemplates[i % emailTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "email" as const, severity: t.severity,
+        threat: t.threat, target: t.recipient.replace(/\{t\}/g, slugClean), attacker: t.sender.replace(/\{t\}/g, slugClean),
+        sender: t.sender.replace(/\{t\}/g, slugClean), recipient: t.recipient.replace(/\{t\}/g, slugClean),
+        description: t.description, threatVector: t.threatVector, mitreTactic: t.mitreTactic,
+        mitreTechnique: t.mitreTechnique, action: pick(emailActions), sourceType: t.sourceType,
+        logSource: pick(["Proofpoint", "Mimecast", "Microsoft Defender for O365", "Barracuda", "Cisco IronPort"]),
+        country: pick(countries), riskScore: riskRange(40, 98), occurredAt: randomDate(120),
       });
     }
 
-    const endpointCount = 8 + Math.floor(Math.random() * 8);
-    const endpointBatch = [];
-    for (let i = 0; i < endpointCount; i++) {
-      const tmpl = endpointEvents[i % endpointEvents.length];
-      endpointBatch.push({
-        tenantId: tenant.id,
-        eventType: "endpoint" as const,
-        severity: tmpl.severity,
-        threat: tmpl.threat,
-        target: tmpl.target,
-        attacker: tmpl.attacker,
-        asset: tmpl.asset,
-        description: tmpl.description,
-        occurredAt: randomDate(90),
+    const endpointTemplates = [
+      { threat: "Ryuk Ransomware", target: "SRV-DC-01", attacker: "185.220.101.34", asset: "Domain Controller", severity: "critical" as const, threatVector: "Ransomware", mitreTactic: "Impact", mitreTechnique: "T1486 - Data Encrypted for Impact" },
+      { threat: "Cobalt Strike Beacon", target: "WS-FIN-015", attacker: "45.77.123.89", asset: "Finance Workstation", severity: "critical" as const, threatVector: "C2", mitreTactic: "Command and Control", mitreTechnique: "T1071.001 - Web Protocols" },
+      { threat: "TrickBot", target: "WS-HR-003", attacker: "91.215.85.201", asset: "HR Workstation", severity: "high" as const, threatVector: "Malware", mitreTactic: "Collection", mitreTechnique: "T1005 - Data from Local System" },
+      { threat: "Mimikatz", target: "SRV-APP-02", attacker: "Internal Lateral", asset: "Application Server", severity: "critical" as const, threatVector: "Credential Theft", mitreTactic: "Credential Access", mitreTechnique: "T1003.001 - LSASS Memory" },
+      { threat: "WannaCry Variant", target: "WS-OPS-009", attacker: "Unknown", asset: "Operations Workstation", severity: "critical" as const, threatVector: "Ransomware", mitreTactic: "Lateral Movement", mitreTechnique: "T1021.002 - SMB/Windows Admin Shares" },
+      { threat: "Emotet Payload", target: "WS-SALES-007", attacker: "193.56.28.103", asset: "Sales Workstation", severity: "high" as const, threatVector: "Malware", mitreTactic: "Execution", mitreTechnique: "T1059.001 - PowerShell" },
+      { threat: "PowerShell Empire", target: "SRV-WEB-01", attacker: "172.16.45.22", asset: "Web Server", severity: "high" as const, threatVector: "C2", mitreTactic: "Execution", mitreTechnique: "T1059.001 - PowerShell" },
+      { threat: "Cryptominer", target: "SRV-BUILD-03", attacker: "Mining Pool", asset: "Build Server", severity: "medium" as const, threatVector: "Cryptojacking", mitreTactic: "Impact", mitreTechnique: "T1496 - Resource Hijacking" },
+      { threat: "Backdoor Trojan", target: "WS-EXEC-001", attacker: "203.0.113.42", asset: "Executive Laptop", severity: "critical" as const, threatVector: "Trojan", mitreTactic: "Persistence", mitreTechnique: "T1547.001 - Registry Run Keys" },
+      { threat: "Fileless Malware", target: "SRV-DB-01", attacker: "In-Memory", asset: "Database Server", severity: "high" as const, threatVector: "Fileless", mitreTactic: "Defense Evasion", mitreTechnique: "T1055 - Process Injection" },
+      { threat: "Rootkit", target: "SRV-MAIL-01", attacker: "78.46.91.155", asset: "Mail Server", severity: "critical" as const, threatVector: "Rootkit", mitreTactic: "Defense Evasion", mitreTechnique: "T1014 - Rootkit" },
+      { threat: "RAT (Remote Access)", target: "WS-DEV-004", attacker: "94.130.12.77", asset: "Developer Workstation", severity: "high" as const, threatVector: "Trojan", mitreTactic: "Command and Control", mitreTechnique: "T1219 - Remote Access Software" },
+      { threat: "Ransomware Precursor", target: "SRV-FILE-02", attacker: "Internal Pivot", asset: "File Server", severity: "high" as const, threatVector: "Ransomware", mitreTactic: "Discovery", mitreTechnique: "T1083 - File and Directory Discovery" },
+      { threat: "Keylogger", target: "WS-ACCT-006", attacker: "Unknown", asset: "Accounting Workstation", severity: "high" as const, threatVector: "Spyware", mitreTactic: "Collection", mitreTechnique: "T1056.001 - Keylogging" },
+      { threat: "Adware", target: "WS-MKT-012", attacker: "Bundled Software", asset: "Marketing Workstation", severity: "low" as const, threatVector: "PUP", mitreTactic: "Execution", mitreTechnique: "T1204.002 - Malicious File" },
+    ];
+
+    for (let i = 0; i < 12 + Math.floor(Math.random() * 8); i++) {
+      const t = endpointTemplates[i % endpointTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "endpoint" as const, severity: t.severity,
+        threat: t.threat, target: t.target, attacker: t.attacker, asset: t.asset,
+        description: `${t.threat} detected on ${t.asset}`, threatVector: t.threatVector,
+        mitreTactic: t.mitreTactic, mitreTechnique: t.mitreTechnique,
+        action: pick(["blocked", "quarantined", "isolated", "alerted"]),
+        sourceType: "EDR", logSource: pick(["CrowdStrike Falcon", "SentinelOne", "Microsoft Defender", "Carbon Black", "Palo Alto Cortex XDR"]),
+        country: pick(countries), riskScore: riskRange(50, 99), occurredAt: randomDate(120),
       });
     }
 
-    const vulnCount = 8 + Math.floor(Math.random() * 8);
-    const vulnBatch = [];
-    for (let i = 0; i < vulnCount; i++) {
-      const tmpl = vulnerabilityEvents[i % vulnerabilityEvents.length];
-      vulnBatch.push({
-        tenantId: tenant.id,
-        eventType: "vulnerability" as const,
-        severity: tmpl.severity,
-        threat: tmpl.threat,
-        target: tmpl.target,
-        app: tmpl.app,
-        description: tmpl.description,
-        occurredAt: randomDate(90),
+    const vulnTemplates = [
+      { threat: "CVE-2025-21298", target: "SRV-EXCH-01", app: "Microsoft Exchange", severity: "critical" as const },
+      { threat: "CVE-2025-0282", target: "VPN-GW-01", app: "Ivanti Connect Secure", severity: "critical" as const },
+      { threat: "CVE-2024-3400", target: "FW-PALO-01", app: "Palo Alto PAN-OS", severity: "critical" as const },
+      { threat: "CVE-2025-1234", target: "SRV-WEB-02", app: "Apache Tomcat", severity: "high" as const },
+      { threat: "CVE-2024-50623", target: "FTP-CLEO-01", app: "Cleo Harmony", severity: "critical" as const },
+      { threat: "CVE-2025-5678", target: "SRV-DB-PROD", app: "PostgreSQL", severity: "high" as const },
+      { threat: "CVE-2025-2468", target: "SRV-JIRA-01", app: "Atlassian Jira", severity: "medium" as const },
+      { threat: "CVE-2024-11234", target: "LB-NGINX-01", app: "NGINX Plus", severity: "high" as const },
+      { threat: "CVE-2025-3344", target: "SRV-JENKINS-01", app: "Jenkins", severity: "high" as const },
+      { threat: "CVE-2025-7890", target: "WS-CHROME-ALL", app: "Google Chrome", severity: "medium" as const },
+      { threat: "CVE-2025-4455", target: "SRV-DOCKER-01", app: "Docker Engine", severity: "high" as const },
+      { threat: "CVE-2024-9876", target: "FW-FORTINET-01", app: "FortiGate", severity: "critical" as const },
+      { threat: "CVE-2025-1122", target: "SRV-AD-01", app: "Active Directory", severity: "high" as const },
+      { threat: "CVE-2025-8899", target: "SRV-K8S-01", app: "Kubernetes", severity: "high" as const },
+    ];
+
+    for (let i = 0; i < 10 + Math.floor(Math.random() * 6); i++) {
+      const t = vulnTemplates[i % vulnTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "vulnerability" as const, severity: t.severity,
+        threat: t.threat, target: t.target, app: t.app,
+        description: `${t.threat} affecting ${t.app}`, threatVector: "Vulnerability",
+        mitreTactic: "Initial Access", mitreTechnique: "T1190 - Exploit Public-Facing Application",
+        action: pick(["alerted", "logged"]), sourceType: "Vulnerability Scanner",
+        logSource: pick(["Tenable Nessus", "Qualys", "Rapid7 InsightVM", "OpenVAS"]),
+        riskScore: riskRange(30, 95), occurredAt: randomDate(120),
       });
     }
 
-    await db.insert(securityEvents).values([...emailBatch, ...endpointBatch, ...vulnBatch]);
+    const casbTemplates = [
+      { threat: "Shadow IT - Unauthorized SaaS", app: "WeTransfer", severity: "high" as const, description: "Sensitive files uploaded to unauthorized file sharing service" },
+      { threat: "Shadow IT - Personal Cloud", app: "Google Drive (Personal)", severity: "medium" as const, description: "Corporate data synced to personal cloud storage" },
+      { threat: "Unauthorized Cloud App", app: "Slack (Free Tier)", severity: "medium" as const, description: "Employees using unauthorized free Slack workspace" },
+      { threat: "Cloud DLP Violation", app: "Dropbox", severity: "high" as const, description: "PII data detected in shared Dropbox folder" },
+      { threat: "Risky OAuth Grant", app: "Third-Party Chrome Extension", severity: "high" as const, description: "Risky OAuth permissions granted to unknown extension" },
+      { threat: "Account Takeover", app: "Salesforce", severity: "critical" as const, description: "Impossible travel login detected on Salesforce account" },
+      { threat: "Shadow IT - AI Tool", app: "ChatGPT (Unmanaged)", severity: "high" as const, description: "Confidential code pasted into unmanaged AI tool" },
+      { threat: "Excessive Sharing", app: "OneDrive", severity: "medium" as const, description: "Sensitive folder shared externally with broad permissions" },
+    ];
+
+    for (let i = 0; i < 8 + Math.floor(Math.random() * 5); i++) {
+      const t = casbTemplates[i % casbTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "casb" as const, severity: t.severity,
+        threat: t.threat, app: t.app, description: t.description,
+        target: pick([`user${riskRange(1,20)}@${slugClean}.com`, `admin@${slugClean}.com`, `sales@${slugClean}.com`]),
+        threatVector: "Cloud Misuse", mitreTactic: "Exfiltration",
+        mitreTechnique: "T1567 - Exfiltration Over Web Service",
+        action: pick(["blocked", "alerted", "logged"]), sourceType: "CASB",
+        logSource: pick(["Netskope", "Microsoft Defender for Cloud Apps", "Zscaler CASB", "Skyhigh Security"]),
+        riskScore: riskRange(40, 90), occurredAt: randomDate(120),
+      });
+    }
+
+    const wafTemplates = [
+      { threat: "SQL Injection", severity: "critical" as const, protocol: "HTTPS", description: "SQL injection attempt on login form" },
+      { threat: "Cross-Site Scripting (XSS)", severity: "high" as const, protocol: "HTTPS", description: "Reflected XSS attack in search parameter" },
+      { threat: "DDoS - HTTP Flood", severity: "critical" as const, protocol: "HTTP", description: "Volumetric HTTP flood targeting web application" },
+      { threat: "Directory Traversal", severity: "high" as const, protocol: "HTTPS", description: "Path traversal attempt accessing system files" },
+      { threat: "Command Injection", severity: "critical" as const, protocol: "HTTPS", description: "OS command injection via vulnerable parameter" },
+      { threat: "CSRF Attack", severity: "medium" as const, protocol: "HTTPS", description: "Cross-site request forgery on admin panel" },
+      { threat: "XML External Entity (XXE)", severity: "high" as const, protocol: "HTTPS", description: "XXE injection in XML parser endpoint" },
+      { threat: "Bot Traffic", severity: "medium" as const, protocol: "HTTP", description: "Automated bot scraping sensitive content" },
+      { threat: "API Abuse", severity: "high" as const, protocol: "HTTPS", description: "Rate limit exceeded on authentication API" },
+      { threat: "DDoS - Slowloris", severity: "high" as const, protocol: "HTTP", description: "Slowloris attack holding connections open" },
+    ];
+
+    for (let i = 0; i < 10 + Math.floor(Math.random() * 6); i++) {
+      const t = wafTemplates[i % wafTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "waf" as const, severity: t.severity,
+        threat: t.threat, description: t.description, protocol: t.protocol,
+        target: pick([`web.${slugClean}.com`, `api.${slugClean}.com`, `portal.${slugClean}.com`, `app.${slugClean}.com`]),
+        attacker: `${riskRange(1,223)}.${riskRange(0,255)}.${riskRange(0,255)}.${riskRange(1,254)}`,
+        threatVector: "Web Attack", mitreTactic: "Initial Access",
+        mitreTechnique: "T1190 - Exploit Public-Facing Application",
+        action: pick(["blocked", "dropped", "alerted", "logged"]), sourceType: "WAF",
+        logSource: pick(["Cloudflare WAF", "AWS WAF", "Imperva", "F5 BIG-IP", "Akamai Kona"]),
+        country: pick(countries), riskScore: riskRange(50, 99), occurredAt: randomDate(120),
+      });
+    }
+
+    const dlpTemplates = [
+      { threat: "PII Leakage", severity: "critical" as const, description: "Social Security Numbers detected in outgoing email" },
+      { threat: "Financial Data Exposure", severity: "high" as const, description: "Credit card numbers found in uploaded document" },
+      { threat: "Source Code Leak", severity: "high" as const, description: "Proprietary source code uploaded to public repository" },
+      { threat: "Healthcare Data (PHI)", severity: "critical" as const, description: "Patient health information in unauthorized location" },
+      { threat: "Sensitive Document Print", severity: "medium" as const, description: "Classified document sent to unmonitored printer" },
+      { threat: "USB Data Transfer", severity: "high" as const, description: "Bulk data copied to unauthorized USB device" },
+    ];
+
+    for (let i = 0; i < 6 + Math.floor(Math.random() * 4); i++) {
+      const t = dlpTemplates[i % dlpTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "dlp" as const, severity: t.severity,
+        threat: t.threat, description: t.description,
+        target: pick([`user${riskRange(1,15)}@${slugClean}.com`, `admin@${slugClean}.com`]),
+        threatVector: "Data Loss", mitreTactic: "Exfiltration",
+        mitreTechnique: pick(["T1048 - Exfiltration Over Alternative Protocol", "T1567 - Exfiltration Over Web Service"]),
+        action: pick(["blocked", "alerted", "logged"]), sourceType: "DLP",
+        logSource: pick(["Symantec DLP", "Microsoft Purview", "Forcepoint DLP", "Digital Guardian"]),
+        riskScore: riskRange(60, 99), occurredAt: randomDate(120),
+      });
+    }
+
+    const networkTemplates = [
+      { threat: "Port Scan", severity: "medium" as const, protocol: "TCP", description: "Sequential port scan from external IP" },
+      { threat: "DNS Tunneling", severity: "high" as const, protocol: "DNS", description: "Suspicious DNS queries indicating data exfiltration" },
+      { threat: "C2 Communication", severity: "critical" as const, protocol: "HTTPS", description: "Outbound connection to known C2 infrastructure" },
+      { threat: "Lateral Movement", severity: "high" as const, protocol: "SMB", description: "Unusual SMB traffic between workstations" },
+      { threat: "ARP Spoofing", severity: "high" as const, protocol: "ARP", description: "ARP spoofing detected on internal network" },
+      { threat: "Suspicious Outbound", severity: "medium" as const, protocol: "HTTPS", description: "High-volume outbound traffic to unusual destination" },
+      { threat: "IDS Alert - Exploit Kit", severity: "critical" as const, protocol: "HTTP", description: "Exploit kit download attempt detected by IDS" },
+      { threat: "Brute Force SSH", severity: "high" as const, protocol: "SSH", description: "Multiple failed SSH login attempts from single IP" },
+    ];
+
+    for (let i = 0; i < 8 + Math.floor(Math.random() * 5); i++) {
+      const t = networkTemplates[i % networkTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "network" as const, severity: t.severity,
+        threat: t.threat, description: t.description, protocol: t.protocol,
+        target: pick([`10.${riskRange(0,255)}.${riskRange(0,255)}.${riskRange(1,254)}`, `192.168.${riskRange(1,10)}.${riskRange(1,254)}`]),
+        attacker: `${riskRange(1,223)}.${riskRange(0,255)}.${riskRange(0,255)}.${riskRange(1,254)}`,
+        threatVector: pick(["Network Intrusion", "C2", "Lateral Movement", "Reconnaissance"]),
+        mitreTactic: pick(["Reconnaissance", "Lateral Movement", "Command and Control", "Exfiltration"]),
+        mitreTechnique: pick(["T1046 - Network Service Discovery", "T1571 - Non-Standard Port", "T1071 - Application Layer Protocol"]),
+        action: pick(["blocked", "dropped", "alerted", "logged"]), sourceType: "IDS/IPS",
+        logSource: pick(["Palo Alto NGFW", "Fortinet FortiGate", "Cisco Firepower", "Snort", "Suricata", "Check Point"]),
+        country: pick(countries), riskScore: riskRange(40, 95), occurredAt: randomDate(120),
+      });
+    }
+
+    const identityTemplates = [
+      { threat: "Impossible Travel", severity: "high" as const, description: "Login from two countries within 30 minutes" },
+      { threat: "Brute Force Login", severity: "high" as const, description: "50+ failed login attempts in 5 minutes" },
+      { threat: "Privilege Escalation", severity: "critical" as const, description: "User elevated to admin role without approval" },
+      { threat: "Stale Account Access", severity: "medium" as const, description: "Dormant account accessed after 90 days" },
+      { threat: "MFA Fatigue Attack", severity: "high" as const, description: "Repeated MFA push notifications to user" },
+      { threat: "Password Spray", severity: "high" as const, description: "Common passwords tried across multiple accounts" },
+      { threat: "Service Account Abuse", severity: "critical" as const, description: "Service account used for interactive login" },
+    ];
+
+    for (let i = 0; i < 6 + Math.floor(Math.random() * 4); i++) {
+      const t = identityTemplates[i % identityTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "identity" as const, severity: t.severity,
+        threat: t.threat, description: t.description,
+        target: pick([`admin@${slugClean}.com`, `user${riskRange(1,20)}@${slugClean}.com`, `svc_account_${riskRange(1,5)}`]),
+        attacker: `${riskRange(1,223)}.${riskRange(0,255)}.${riskRange(0,255)}.${riskRange(1,254)}`,
+        threatVector: "Identity Attack", mitreTactic: "Credential Access",
+        mitreTechnique: pick(["T1110 - Brute Force", "T1078 - Valid Accounts", "T1556 - Modify Authentication Process"]),
+        action: pick(["blocked", "alerted", "logged"]), sourceType: "Identity Provider",
+        logSource: pick(["Azure AD", "Okta", "CyberArk", "Ping Identity", "OneLogin"]),
+        country: pick(countries), riskScore: riskRange(50, 98), occurredAt: randomDate(120),
+      });
+    }
+
+    const cloudTemplates = [
+      { threat: "Public S3 Bucket", severity: "critical" as const, app: "AWS S3", description: "S3 bucket with sensitive data exposed publicly" },
+      { threat: "Overprivileged IAM Role", severity: "high" as const, app: "AWS IAM", description: "IAM role with admin access assigned to Lambda" },
+      { threat: "Unencrypted RDS", severity: "high" as const, app: "AWS RDS", description: "Database instance running without encryption at rest" },
+      { threat: "Azure Key Vault Exposure", severity: "critical" as const, app: "Azure Key Vault", description: "Key Vault access policy overly permissive" },
+      { threat: "GCP Firewall Misconfiguration", severity: "high" as const, app: "GCP VPC", description: "Firewall rule allows 0.0.0.0/0 inbound on all ports" },
+      { threat: "Container Image Vulnerability", severity: "high" as const, app: "ECR/ACR", description: "Container images with critical CVEs in registry" },
+    ];
+
+    for (let i = 0; i < 6 + Math.floor(Math.random() * 4); i++) {
+      const t = cloudTemplates[i % cloudTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "cloud" as const, severity: t.severity,
+        threat: t.threat, app: t.app, description: t.description,
+        target: pick([`account-${slugClean}-prod`, `account-${slugClean}-dev`, `subscription-${slugClean}`]),
+        threatVector: "Cloud Misconfiguration", mitreTactic: "Initial Access",
+        mitreTechnique: "T1190 - Exploit Public-Facing Application",
+        action: pick(["alerted", "logged"]), sourceType: "CSPM",
+        logSource: pick(["AWS Security Hub", "Azure Defender", "GCP Security Command Center", "Prisma Cloud", "Wiz"]),
+        riskScore: riskRange(60, 99), occurredAt: randomDate(120),
+      });
+    }
+
+    const sseTemplates = [
+      { threat: "Unsanctioned App Access", severity: "medium" as const, description: "User accessing blocked web application category" },
+      { threat: "SSL Inspection Bypass", severity: "high" as const, description: "Application using certificate pinning to bypass inspection" },
+      { threat: "Malware Download Blocked", severity: "high" as const, description: "Known malicious file download blocked at proxy" },
+      { threat: "Phishing Site Access", severity: "high" as const, description: "User attempted to access known phishing URL" },
+      { threat: "Data Upload to Cloud", severity: "medium" as const, description: "Large file upload to unmanaged cloud service" },
+    ];
+
+    for (let i = 0; i < 5 + Math.floor(Math.random() * 4); i++) {
+      const t = sseTemplates[i % sseTemplates.length];
+      events.push({
+        tenantId: tenant.id, eventType: "sse" as const, severity: t.severity,
+        threat: t.threat, description: t.description,
+        target: pick([`user${riskRange(1,15)}@${slugClean}.com`]),
+        threatVector: "Web Security", mitreTactic: pick(["Initial Access", "Exfiltration"]),
+        mitreTechnique: pick(["T1566 - Phishing", "T1567 - Exfiltration Over Web Service"]),
+        action: pick(["blocked", "alerted", "logged"]), sourceType: "SSE/SWG",
+        logSource: pick(["Zscaler ZIA", "Netskope", "Palo Alto Prisma Access", "Cisco Umbrella", "Skyhigh Security"]),
+        country: pick(countries), riskScore: riskRange(30, 85), occurredAt: randomDate(120),
+      });
+    }
+
+    if (events.length > 0) {
+      const batchSize = 50;
+      for (let i = 0; i < events.length; i += batchSize) {
+        await db.insert(securityEvents).values(events.slice(i, i + batchSize));
+      }
+    }
   }
 
-  console.log("Security events seeded successfully!");
+  console.log("Comprehensive security events seeded successfully!");
 }
