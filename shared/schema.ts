@@ -6,6 +6,7 @@ import { z } from "zod";
 export * from "./models/auth";
 export * from "./models/chat";
 
+export const tenantTypeEnum = pgEnum("tenant_type", ["mssp", "customer"]);
 export const roleEnum = pgEnum("user_role", ["mss_admin", "mss_analyst", "customer"]);
 export const severityEnum = pgEnum("severity", ["critical", "high", "medium", "low", "info"]);
 export const incidentStatusEnum = pgEnum("incident_status", ["open", "investigating", "contained", "resolved", "closed"]);
@@ -18,6 +19,8 @@ export const tenants = pgTable("tenants", {
   id: serial("id").primaryKey(),
   name: varchar("name", { length: 255 }).notNull().unique(),
   slug: varchar("slug", { length: 100 }).notNull().unique(),
+  type: tenantTypeEnum("type").default("customer").notNull(),
+  parentId: integer("parent_id"),
   logoUrl: text("logo_url"),
   industry: varchar("industry", { length: 100 }),
   contactEmail: varchar("contact_email", { length: 255 }),
@@ -115,7 +118,9 @@ export const reports = pgTable("reports", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const tenantsRelations = relations(tenants, ({ many }) => ({
+export const tenantsRelations = relations(tenants, ({ one, many }) => ({
+  parent: one(tenants, { fields: [tenants.parentId], references: [tenants.id], relationName: "tenant_hierarchy" }),
+  children: many(tenants, { relationName: "tenant_hierarchy" }),
   users: many(tenantUsers),
   incidents: many(incidents),
   tickets: many(tickets),

@@ -6,10 +6,11 @@ import {
   Ticket,
   FolderKanban,
   FileText,
-  Settings,
   ChevronDown,
   Building2,
   LogOut,
+  Users,
+  ChevronRight,
 } from "lucide-react";
 import {
   Sidebar,
@@ -28,6 +29,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -49,11 +52,14 @@ const customerNavItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
-  const { tenants, currentTenant, setCurrentTenant, userRole } = useTenant();
+  const { tenants, hierarchy, currentTenant, setCurrentTenant, userRole } = useTenant();
   const { user, logout } = useAuth();
 
   const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
   const navItems = isMSS ? mssNavItems : customerNavItems;
+
+  const currentTenantType = currentTenant?.type || "customer";
+  const isViewingMSSP = currentTenantType === "mssp";
 
   return (
     <Sidebar>
@@ -75,36 +81,76 @@ export function AppSidebar() {
                 className="flex items-center gap-2 w-full rounded-md border border-sidebar-border px-3 py-2 text-xs"
                 data-testid="dropdown-tenant-selector"
               >
-                <Building2 className="w-3.5 h-3.5 text-muted-foreground" />
+                {isViewingMSSP ? (
+                  <Shield className="w-3.5 h-3.5 text-primary shrink-0" />
+                ) : (
+                  <Building2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                )}
                 <span className="flex-1 text-left truncate">
-                  {currentTenant?.name || "Select Tenant"}
+                  {currentTenant?.name || "Select Organization"}
                 </span>
-                <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                <Badge variant={isViewingMSSP ? "default" : "outline"} className="text-[9px] px-1.5 py-0 shrink-0">
+                  {isViewingMSSP ? "MSSP" : "Customer"}
+                </Badge>
+                <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-56">
-              {tenants.map((tenant) => (
-                <DropdownMenuItem
-                  key={tenant.id}
-                  onClick={() => setCurrentTenant(tenant)}
-                  data-testid={`menu-tenant-${tenant.slug}`}
-                >
-                  <Building2 className="w-3.5 h-3.5 mr-2" />
-                  <span>{tenant.name}</span>
-                  {tenant.id === currentTenant?.id && (
-                    <Badge variant="secondary" className="ml-auto text-[10px]">Active</Badge>
+            <DropdownMenuContent align="start" className="w-64">
+              {hierarchy.map((mssp) => (
+                <div key={mssp.id}>
+                  <DropdownMenuLabel className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground py-1">
+                    <Shield className="w-3 h-3" />
+                    {mssp.name}
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onClick={() => setCurrentTenant(mssp)}
+                    className="pl-4"
+                    data-testid={`menu-tenant-${mssp.slug}`}
+                  >
+                    <Shield className="w-3.5 h-3.5 mr-2 text-primary" />
+                    <span>{mssp.name}</span>
+                    <Badge variant="default" className="ml-auto text-[9px] px-1.5 py-0">MSSP</Badge>
+                    {mssp.id === currentTenant?.id && (
+                      <ChevronRight className="w-3 h-3 ml-1 text-primary" />
+                    )}
+                  </DropdownMenuItem>
+                  {mssp.children && mssp.children.length > 0 && (
+                    <>
+                      {mssp.children.map((child) => (
+                        <DropdownMenuItem
+                          key={child.id}
+                          onClick={() => setCurrentTenant(child)}
+                          className="pl-8"
+                          data-testid={`menu-tenant-${child.slug}`}
+                        >
+                          <Building2 className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
+                          <span className="truncate">{child.name}</span>
+                          {child.id === currentTenant?.id && (
+                            <ChevronRight className="w-3 h-3 ml-auto text-primary" />
+                          )}
+                        </DropdownMenuItem>
+                      ))}
+                    </>
                   )}
-                </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </div>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+        )}
+
+        {!isMSS && currentTenant && (
+          <div className="flex items-center gap-2 w-full rounded-md border border-sidebar-border px-3 py-2 text-xs">
+            <Building2 className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="flex-1 text-left truncate">{currentTenant.name}</span>
+          </div>
         )}
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel className="text-[10px] uppercase tracking-wider">
-            {isMSS ? "Operations" : "Overview"}
+            {isMSS ? (isViewingMSSP ? "MSSP Operations" : "Customer Operations") : "Overview"}
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -124,6 +170,33 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        {isMSS && isViewingMSSP && hierarchy.length > 0 && (() => {
+          const currentMSSP = hierarchy.find(h => h.id === currentTenant?.id);
+          return currentMSSP && currentMSSP.children.length > 0;
+        })() && (
+          <SidebarGroup>
+            <SidebarGroupLabel className="text-[10px] uppercase tracking-wider">
+              <Users className="w-3 h-3 mr-1 inline" />
+              Customers ({hierarchy.find(h => h.id === currentTenant?.id)?.children.length || 0})
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {(hierarchy.find(h => h.id === currentTenant?.id)?.children || []).map((child) => (
+                  <SidebarMenuItem key={child.id}>
+                    <SidebarMenuButton
+                      onClick={() => setCurrentTenant(child)}
+                      data-testid={`sidebar-customer-${child.slug}`}
+                    >
+                      <Building2 className="w-4 h-4" />
+                      <span className="truncate">{child.name}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
       </SidebarContent>
 
       <SidebarFooter className="p-3">

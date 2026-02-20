@@ -1,78 +1,166 @@
 import { db } from "./db";
 import { tenants, incidents, tickets, projects, tasks } from "@shared/schema";
-import { eq } from "drizzle-orm";
 
 export async function seedDatabase() {
   const existingTenants = await db.select().from(tenants);
   if (existingTenants.length > 0) return;
 
-  console.log("Seeding database with initial data...");
+  console.log("Seeding database with hierarchical tenant data...");
 
-  const tenantData = [
-    { name: "Vinca Cyber", slug: "vinca-cyber", industry: "Cybersecurity", contactEmail: "ops@vincacyber.com" },
-    { name: "Cibervest", slug: "cibervest", industry: "Financial Services", contactEmail: "security@cibervest.com" },
-    { name: "PKF", slug: "pkf", industry: "Professional Services", contactEmail: "it@pkf.com" },
-    { name: "HitaskIT", slug: "hitaskit", industry: "Technology", contactEmail: "soc@hitaskit.com" },
+  const msspData = [
+    { name: "Vinca Cyber", slug: "vinca-cyber", type: "mssp" as const, industry: "Cybersecurity", contactEmail: "ops@vincacyber.com" },
+    { name: "Cibervest", slug: "cibervest", type: "mssp" as const, industry: "Financial Services", contactEmail: "security@cibervest.com" },
+    { name: "HitaskIT", slug: "hitaskit", type: "mssp" as const, industry: "Technology", contactEmail: "soc@hitaskit.com" },
   ];
 
-  const createdTenants = await db.insert(tenants).values(tenantData).returning();
+  const createdMSSPs = await db.insert(tenants).values(msspData).returning();
+  const vincaId = createdMSSPs.find(t => t.slug === "vinca-cyber")!.id;
+  const cibervestId = createdMSSPs.find(t => t.slug === "cibervest")!.id;
+  const hitaskitId = createdMSSPs.find(t => t.slug === "hitaskit")!.id;
 
-  for (const tenant of createdTenants) {
-    const incidentData = [
-      { tenantId: tenant.id, title: "Suspicious RDP brute force attempts detected", description: "Multiple failed RDP login attempts from IP range 185.220.x.x targeting domain controllers", severity: "critical" as const, status: "investigating" as const, source: "SIEM", category: "intrusion", affectedAssets: "DC-01, DC-02" },
-      { tenantId: tenant.id, title: "Phishing campaign targeting finance department", description: "Spear phishing emails with malicious PDF attachments sent to 15 employees", severity: "high" as const, status: "contained" as const, source: "Email Gateway", category: "phishing", affectedAssets: "Exchange Server" },
-      { tenantId: tenant.id, title: "Malware detected on endpoint WS-ACCT-042", description: "Emotet trojan detected by EDR on workstation in accounting department", severity: "high" as const, status: "open" as const, source: "EDR", category: "malware", affectedAssets: "WS-ACCT-042" },
-      { tenantId: tenant.id, title: "Unusual outbound data transfer detected", description: "Large volume of data transferred to external cloud storage service during non-business hours", severity: "medium" as const, status: "investigating" as const, source: "DLP", category: "data_breach", affectedAssets: "File Server FS-01" },
-      { tenantId: tenant.id, title: "SSL certificate expiring on public-facing web server", description: "SSL certificate for main web application expires in 7 days", severity: "medium" as const, status: "open" as const, source: "Vulnerability Scanner", category: "vulnerability", affectedAssets: "web-prod-01" },
-      { tenantId: tenant.id, title: "Failed login attempts from unknown geographic location", description: "Multiple login attempts from unusual IP ranges in Eastern Europe", severity: "medium" as const, status: "resolved" as const, source: "Azure AD", category: "intrusion", affectedAssets: "Azure AD" },
-      { tenantId: tenant.id, title: "Outdated firmware on network switches", description: "Critical vulnerability CVE-2024-1234 affects current firmware version on 8 switches", severity: "low" as const, status: "open" as const, source: "Vulnerability Scanner", category: "vulnerability", affectedAssets: "Network Layer 2" },
-      { tenantId: tenant.id, title: "DDoS attempt on external web services", description: "Volumetric DDoS attack targeting public API endpoints", severity: "critical" as const, status: "resolved" as const, source: "WAF", category: "ddos", affectedAssets: "API Gateway" },
-      { tenantId: tenant.id, title: "Unauthorized access to admin panel", description: "User attempted access to admin dashboard without proper authorization", severity: "high" as const, status: "closed" as const, source: "Application Logs", category: "intrusion", affectedAssets: "Admin Portal" },
-      { tenantId: tenant.id, title: "Endpoint protection agent offline on 3 servers", description: "EDR agents stopped reporting on production database servers", severity: "medium" as const, status: "investigating" as const, source: "EDR Console", category: "other", affectedAssets: "DB-01, DB-02, DB-03" },
-    ];
+  const customerData = [
+    { name: "Fedfina", slug: "fedfina", type: "customer" as const, parentId: vincaId, industry: "Financial Services", contactEmail: "it@fedfina.com" },
+    { name: "P99 Software", slug: "p99-software", type: "customer" as const, parentId: vincaId, industry: "Software Development", contactEmail: "security@p99soft.com" },
+    { name: "Nineleaves", slug: "nineleaves", type: "customer" as const, parentId: vincaId, industry: "Technology Consulting", contactEmail: "admin@nineleaves.com" },
+    { name: "Maantic Global", slug: "maantic-global", type: "customer" as const, parentId: vincaId, industry: "IT Solutions", contactEmail: "security@maantic.com" },
+    { name: "Claim Power", slug: "claim-power", type: "customer" as const, parentId: vincaId, industry: "Insurance Technology", contactEmail: "it@claimpower.com" },
+    { name: "PKF Africa", slug: "pkf-africa", type: "customer" as const, parentId: cibervestId, industry: "Professional Services", contactEmail: "it@pkfafrica.com" },
+    { name: "RTIX Surgical", slug: "rtix-surgical", type: "customer" as const, parentId: hitaskitId, industry: "Healthcare Technology", contactEmail: "it@rtixsurgical.com" },
+  ];
 
-    await db.insert(incidents).values(incidentData);
+  const createdCustomers = await db.insert(tenants).values(customerData).returning();
+
+  const allTenants = [...createdMSSPs, ...createdCustomers];
+
+  const incidentTemplates: Record<string, Array<{ title: string; description: string; severity: "critical" | "high" | "medium" | "low" | "info"; status: "open" | "investigating" | "contained" | "resolved" | "closed"; source: string; category: string; affectedAssets: string }>> = {
+    "fedfina": [
+      { title: "Unauthorized wire transfer attempt detected", description: "Suspicious wire transfer request from compromised email account targeting external bank", severity: "critical", status: "investigating", source: "SIEM", category: "fraud", affectedAssets: "Core Banking System" },
+      { title: "SQL injection attempt on loan portal", description: "Automated SQL injection attacks detected on public-facing loan application portal", severity: "high", status: "contained", source: "WAF", category: "intrusion", affectedAssets: "Loan Portal WEB-01" },
+      { title: "Phishing emails targeting treasury department", description: "Targeted spear phishing campaign impersonating CFO with urgent payment requests", severity: "high", status: "open", source: "Email Gateway", category: "phishing", affectedAssets: "Exchange Server" },
+      { title: "Anomalous database queries on customer PII", description: "Unusual SELECT queries on customer personal data outside business hours", severity: "medium", status: "investigating", source: "Database Activity Monitor", category: "data_breach", affectedAssets: "DB-CUST-01" },
+      { title: "Expired SSL on mobile banking API", description: "SSL certificate for mobile banking API endpoint expired", severity: "medium", status: "open", source: "Certificate Monitor", category: "vulnerability", affectedAssets: "api.fedfina.com" },
+      { title: "Brute force on employee VPN", description: "Over 500 failed VPN login attempts from multiple IP addresses", severity: "medium", status: "resolved", source: "VPN Gateway", category: "intrusion", affectedAssets: "VPN Gateway" },
+      { title: "Outdated Java runtime on payment servers", description: "Critical CVE affecting Java 8 runtime on 3 payment processing servers", severity: "high", status: "open", source: "Vulnerability Scanner", category: "vulnerability", affectedAssets: "PAY-01, PAY-02, PAY-03" },
+      { title: "Suspicious PowerShell execution on workstation", description: "Encoded PowerShell command detected on finance workstation", severity: "high", status: "contained", source: "EDR", category: "malware", affectedAssets: "WS-FIN-015" },
+    ],
+    "p99-software": [
+      { title: "Source code repository access from unknown IP", description: "GitHub Enterprise accessed from unrecognized IP address in suspicious geography", severity: "critical", status: "investigating", source: "CASB", category: "data_breach", affectedAssets: "GitHub Enterprise" },
+      { title: "Container escape vulnerability in CI/CD", description: "CVE-2025-1234 allows container escape in production Kubernetes cluster", severity: "critical", status: "open", source: "Container Scanner", category: "vulnerability", affectedAssets: "K8s Cluster PROD" },
+      { title: "Malicious npm package in dependency tree", description: "Supply chain attack via compromised npm package in build pipeline", severity: "high", status: "contained", source: "SCA Tool", category: "malware", affectedAssets: "Build Pipeline" },
+      { title: "API key exposed in public commit", description: "AWS API keys accidentally committed to public repository branch", severity: "high", status: "resolved", source: "Secret Scanner", category: "data_breach", affectedAssets: "AWS Account" },
+      { title: "DDoS on client demo environment", description: "Volumetric DDoS attack targeting client demo infrastructure", severity: "medium", status: "resolved", source: "WAF", category: "ddos", affectedAssets: "Demo Servers" },
+      { title: "Jenkins server running outdated plugins", description: "12 Jenkins plugins with known CVEs need immediate update", severity: "medium", status: "open", source: "Vulnerability Scanner", category: "vulnerability", affectedAssets: "Jenkins CI" },
+      { title: "Unauthorized SSH access to staging", description: "SSH login from departing employee's credentials after termination", severity: "high", status: "closed", source: "SIEM", category: "intrusion", affectedAssets: "Staging Servers" },
+    ],
+    "nineleaves": [
+      { title: "Ransomware precursor activity detected", description: "Cobalt Strike beacon communication detected from endpoint in consulting team", severity: "critical", status: "investigating", source: "EDR", category: "malware", affectedAssets: "WS-CONS-008" },
+      { title: "Client data exfiltration attempt", description: "Large data transfer to personal cloud storage detected via DLP", severity: "high", status: "contained", source: "DLP", category: "data_breach", affectedAssets: "File Server FS-02" },
+      { title: "Weak passwords on domain admin accounts", description: "Password audit reveals 3 domain admin accounts with weak passwords", severity: "high", status: "open", source: "Identity Audit", category: "vulnerability", affectedAssets: "Active Directory" },
+      { title: "Phishing site cloning company portal", description: "Lookalike domain registered hosting clone of employee login portal", severity: "medium", status: "investigating", source: "Threat Intel", category: "phishing", affectedAssets: "portal.nineleaves.com" },
+      { title: "Unpatched Exchange server CVE", description: "Microsoft Exchange CVE-2025-0001 affecting on-premise mail server", severity: "critical", status: "open", source: "Vulnerability Scanner", category: "vulnerability", affectedAssets: "EXCH-01" },
+      { title: "Suspicious VPN connection from offshore", description: "VPN login from unexpected geographic location for senior consultant", severity: "medium", status: "resolved", source: "VPN Gateway", category: "intrusion", affectedAssets: "VPN Gateway" },
+    ],
+    "maantic-global": [
+      { title: "Zero-day exploit attempt on web application", description: "Automated exploitation attempts targeting custom web application framework", severity: "critical", status: "investigating", source: "WAF", category: "intrusion", affectedAssets: "Web App WA-01" },
+      { title: "Insider threat - excessive data downloads", description: "Employee downloading large volumes of proprietary project documentation", severity: "high", status: "investigating", source: "DLP", category: "data_breach", affectedAssets: "SharePoint" },
+      { title: "Compromised service account credentials", description: "Service account used for API integration found on dark web credential dump", severity: "high", status: "contained", source: "Dark Web Monitor", category: "intrusion", affectedAssets: "API Gateway" },
+      { title: "Outdated antivirus definitions on 20 endpoints", description: "AV definitions more than 7 days old on remote worker endpoints", severity: "medium", status: "open", source: "AV Console", category: "vulnerability", affectedAssets: "Remote Endpoints" },
+      { title: "DNS tunneling attempt detected", description: "Suspicious DNS query patterns indicating potential data exfiltration", severity: "high", status: "contained", source: "DNS Firewall", category: "data_breach", affectedAssets: "DNS Infrastructure" },
+      { title: "Failed MFA bypass attempts", description: "Multiple attempts to bypass MFA on admin portal detected", severity: "medium", status: "resolved", source: "Identity Provider", category: "intrusion", affectedAssets: "Admin Portal" },
+    ],
+    "claim-power": [
+      { title: "PII data exposure in API response", description: "Customer PII including SSN exposed in unprotected API endpoint", severity: "critical", status: "investigating", source: "API Scanner", category: "data_breach", affectedAssets: "Claims API" },
+      { title: "Fraudulent insurance claim submission bot", description: "Automated bot submitting fraudulent claims through web portal", severity: "high", status: "contained", source: "WAF", category: "fraud", affectedAssets: "Claims Portal" },
+      { title: "Ransomware email with encrypted attachment", description: "Email with password-protected ZIP containing ransomware bypassed gateway", severity: "high", status: "open", source: "Email Gateway", category: "malware", affectedAssets: "Email System" },
+      { title: "Unsecured S3 bucket with claim documents", description: "Public S3 bucket containing sensitive claim documents discovered", severity: "critical", status: "resolved", source: "Cloud Security", category: "data_breach", affectedAssets: "AWS S3" },
+      { title: "OWASP Top 10 vulnerabilities on portal", description: "Penetration test reveals XSS and CSRF vulnerabilities on claims portal", severity: "medium", status: "open", source: "Pen Test Report", category: "vulnerability", affectedAssets: "Claims Portal" },
+      { title: "Lateral movement detected in network", description: "Pass-the-hash activity detected between workstations", severity: "high", status: "investigating", source: "EDR", category: "intrusion", affectedAssets: "Internal Network" },
+    ],
+    "pkf-africa": [
+      { title: "Business email compromise targeting CFO", description: "Sophisticated BEC attack impersonating managing partner for wire transfer", severity: "critical", status: "investigating", source: "Email Gateway", category: "phishing", affectedAssets: "Executive Accounts" },
+      { title: "Tax season phishing campaign", description: "Mass phishing targeting staff with fake tax document links", severity: "high", status: "contained", source: "Email Gateway", category: "phishing", affectedAssets: "Email System" },
+      { title: "Audit data exposed on shared drive", description: "Sensitive client audit data accessible without proper ACLs", severity: "high", status: "open", source: "DLP", category: "data_breach", affectedAssets: "File Server" },
+      { title: "Malware on partner laptop", description: "Trojan detected on visiting partner's laptop connected to network", severity: "medium", status: "contained", source: "NAC", category: "malware", affectedAssets: "Guest Network" },
+      { title: "Weak encryption on client communications", description: "TLS 1.0 still enabled on client-facing file exchange portal", severity: "medium", status: "open", source: "Security Audit", category: "vulnerability", affectedAssets: "File Exchange Portal" },
+      { title: "Unauthorized access to payroll system", description: "Failed attempts to access payroll from unauthorized workstation", severity: "medium", status: "resolved", source: "Application Logs", category: "intrusion", affectedAssets: "Payroll System" },
+      { title: "Cloud misconfiguration in Azure AD", description: "Overly permissive roles assigned in Azure AD tenant", severity: "high", status: "investigating", source: "Cloud Security", category: "vulnerability", affectedAssets: "Azure AD" },
+    ],
+    "rtix-surgical": [
+      { title: "Medical device network anomaly", description: "Unusual network traffic from surgical equipment controller to external IP", severity: "critical", status: "investigating", source: "Network Monitor", category: "intrusion", affectedAssets: "Surgical Device Network" },
+      { title: "HIPAA violation - unencrypted patient data", description: "Patient records transmitted unencrypted between facilities", severity: "critical", status: "open", source: "DLP", category: "data_breach", affectedAssets: "EMR System" },
+      { title: "Phishing targeting surgical staff", description: "Spear phishing with malicious links disguised as surgical supply orders", severity: "high", status: "contained", source: "Email Gateway", category: "phishing", affectedAssets: "Email System" },
+      { title: "Outdated firmware on IoT medical devices", description: "15 connected medical devices running firmware with known vulnerabilities", severity: "high", status: "open", source: "IoT Scanner", category: "vulnerability", affectedAssets: "Medical IoT Devices" },
+      { title: "Unauthorized Wi-Fi access point detected", description: "Rogue access point found in surgical wing broadcasting open SSID", severity: "medium", status: "resolved", source: "WIDS", category: "intrusion", affectedAssets: "Wireless Network" },
+      { title: "Backup integrity failure for patient records", description: "Weekly backup verification failed for patient database", severity: "medium", status: "investigating", source: "Backup Monitor", category: "other", affectedAssets: "Backup Server" },
+    ],
+  };
+
+  const msspIncidents: Record<string, Array<{ title: string; description: string; severity: "critical" | "high" | "medium" | "low" | "info"; status: "open" | "investigating" | "contained" | "resolved" | "closed"; source: string; category: string; affectedAssets: string }>> = {
+    "vinca-cyber": [
+      { title: "SOC infrastructure DDoS attack", description: "Distributed denial of service targeting SOC monitoring infrastructure", severity: "critical", status: "resolved", source: "WAF", category: "ddos", affectedAssets: "SOC Infrastructure" },
+      { title: "SIEM log ingestion pipeline failure", description: "Log forwarding agents failing on 12 client tenants", severity: "high", status: "investigating", source: "SIEM", category: "other", affectedAssets: "SIEM Pipeline" },
+      { title: "Threat intel feed compromise suspected", description: "Anomalous indicators in third-party threat intelligence feed", severity: "medium", status: "investigating", source: "Threat Intel", category: "other", affectedAssets: "TI Platform" },
+    ],
+    "cibervest": [
+      { title: "Client credential store unauthorized access", description: "Suspicious access to encrypted credential vault from unknown session", severity: "critical", status: "investigating", source: "Vault Audit", category: "intrusion", affectedAssets: "Credential Vault" },
+      { title: "MFA bypass on analyst portal", description: "Authentication bypass vulnerability found in analyst SSO portal", severity: "high", status: "contained", source: "Pen Test", category: "vulnerability", affectedAssets: "SSO Portal" },
+    ],
+    "hitaskit": [
+      { title: "Internal phishing simulation flagged", description: "Phishing test results show 30% click rate among staff", severity: "medium", status: "resolved", source: "Phishing Sim", category: "phishing", affectedAssets: "Staff Email" },
+      { title: "Monitoring agent disconnected on 5 endpoints", description: "EDR agents not reporting from client monitoring targets", severity: "high", status: "open", source: "EDR Console", category: "other", affectedAssets: "Client Endpoints" },
+    ],
+  };
+
+  for (const tenant of allTenants) {
+    const templateKey = tenant.slug;
+    const incidentList = incidentTemplates[templateKey] || msspIncidents[templateKey] || [];
+
+    if (incidentList.length > 0) {
+      const incidentData = incidentList.map(inc => ({
+        tenantId: tenant.id,
+        ...inc,
+      }));
+      await db.insert(incidents).values(incidentData);
+    }
 
     const ticketData = [
-      { tenantId: tenant.id, title: "Request for new firewall rule", description: "Need to allow traffic from partner network 10.20.x.x/24 to internal application server", priority: "medium" as const, status: "open" as const, category: "configuration" },
-      { tenantId: tenant.id, title: "VPN access not working for remote users", description: "Several remote employees reporting inability to connect via VPN client since yesterday", priority: "high" as const, status: "in_progress" as const, category: "incident" },
-      { tenantId: tenant.id, title: "Monthly security assessment report request", description: "Requesting comprehensive security assessment report for board meeting", priority: "medium" as const, status: "waiting" as const, category: "general" },
-      { tenantId: tenant.id, title: "Access provisioning for new hire batch", description: "15 new employees starting next Monday need access to corporate systems", priority: "urgent" as const, status: "open" as const, category: "access" },
-      { tenantId: tenant.id, title: "SIEM alert tuning required", description: "Too many false positive alerts from the web application firewall module", priority: "low" as const, status: "resolved" as const, category: "configuration" },
+      { tenantId: tenant.id, title: "Request for security policy review", description: "Annual security policy review and update needed", priority: "medium" as const, status: "open" as const, category: "general" },
+      { tenantId: tenant.id, title: "New employee access provisioning", description: "Access setup for 5 new employees starting next week", priority: "high" as const, status: "in_progress" as const, category: "access" },
+      { tenantId: tenant.id, title: "Firewall rule change request", description: "Need to update firewall rules for new application deployment", priority: "medium" as const, status: "waiting" as const, category: "configuration" },
+      { tenantId: tenant.id, title: "Security awareness training report", description: "Monthly security training completion report needed", priority: "low" as const, status: "resolved" as const, category: "general" },
     ];
 
     await db.insert(tickets).values(ticketData);
 
     const projectData = [
-      { tenantId: tenant.id, name: "SOC Enhancement Phase 2", description: "Upgrade SOC capabilities with advanced threat hunting and automated response", status: "active" as const },
-      { tenantId: tenant.id, name: "Zero Trust Implementation", description: "Deploy zero trust architecture across all network segments", status: "planning" as const },
+      { tenantId: tenant.id, name: "Security Posture Assessment", description: "Comprehensive assessment of current security controls and gaps", status: "active" as const },
+      { tenantId: tenant.id, name: "Compliance Remediation", description: "Address findings from recent compliance audit", status: "planning" as const },
     ];
 
     const createdProjects = await db.insert(projects).values(projectData).returning();
 
     if (createdProjects[0]) {
       const taskData = [
-        { projectId: createdProjects[0].id, title: "Deploy SOAR playbooks for phishing response", description: "Create and test automated playbooks for phishing incident response", status: "done" as const, priority: "high" as const },
-        { projectId: createdProjects[0].id, title: "Integrate threat intelligence feeds", description: "Connect MISP and AlienVault OTX feeds to SIEM", status: "in_progress" as const, priority: "high" as const },
-        { projectId: createdProjects[0].id, title: "Configure automated ticket creation from alerts", description: "Set up automatic ticket creation for P1 and P2 alerts", status: "review" as const, priority: "medium" as const },
-        { projectId: createdProjects[0].id, title: "Implement log correlation rules", description: "Create correlation rules for detecting lateral movement patterns", status: "todo" as const, priority: "urgent" as const },
-        { projectId: createdProjects[0].id, title: "Security dashboard redesign", description: "Update executive dashboard with new KPI metrics and visualizations", status: "backlog" as const, priority: "low" as const },
-        { projectId: createdProjects[0].id, title: "EDR policy optimization", description: "Fine-tune EDR detection policies to reduce false positives", status: "in_progress" as const, priority: "medium" as const },
+        { projectId: createdProjects[0].id, title: "Network vulnerability scan", description: "Run comprehensive network vulnerability scan", status: "done" as const, priority: "high" as const },
+        { projectId: createdProjects[0].id, title: "Endpoint security audit", description: "Audit EDR deployment and configuration", status: "in_progress" as const, priority: "high" as const },
+        { projectId: createdProjects[0].id, title: "Cloud security review", description: "Review cloud infrastructure security settings", status: "todo" as const, priority: "medium" as const },
+        { projectId: createdProjects[0].id, title: "Penetration test report", description: "Compile results from penetration testing", status: "review" as const, priority: "urgent" as const },
+        { projectId: createdProjects[0].id, title: "Security baseline documentation", description: "Document security baselines for all systems", status: "backlog" as const, priority: "low" as const },
       ];
-
       await db.insert(tasks).values(taskData);
     }
 
     if (createdProjects[1]) {
-      const ztTasks = [
-        { projectId: createdProjects[1].id, title: "Network segmentation assessment", description: "Document current network segments and identify gaps", status: "todo" as const, priority: "high" as const },
-        { projectId: createdProjects[1].id, title: "Identity provider evaluation", description: "Evaluate IdP solutions for conditional access", status: "backlog" as const, priority: "medium" as const },
-        { projectId: createdProjects[1].id, title: "Micro-segmentation POC", description: "Proof of concept for micro-segmentation in production", status: "backlog" as const, priority: "high" as const },
+      const complianceTasks = [
+        { projectId: createdProjects[1].id, title: "Policy gap analysis", description: "Identify gaps between current policies and compliance requirements", status: "todo" as const, priority: "high" as const },
+        { projectId: createdProjects[1].id, title: "Access control review", description: "Review and update access control matrices", status: "backlog" as const, priority: "medium" as const },
+        { projectId: createdProjects[1].id, title: "Incident response plan update", description: "Update IR plan based on audit findings", status: "backlog" as const, priority: "high" as const },
       ];
-
-      await db.insert(tasks).values(ztTasks);
+      await db.insert(tasks).values(complianceTasks);
     }
   }
 
-  console.log("Database seeded successfully!");
+  console.log("Database seeded with hierarchical tenant structure successfully!");
+  console.log(`  MSSPs: ${createdMSSPs.map(t => t.name).join(", ")}`);
+  console.log(`  Customers: ${createdCustomers.map(t => `${t.name} (under ${allTenants.find(p => p.id === t.parentId)?.name})`).join(", ")}`);
 }

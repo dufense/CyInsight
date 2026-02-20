@@ -16,6 +16,9 @@ import { eq, desc, and, count, sql } from "drizzle-orm";
 export interface IStorage {
   getTenants(): Promise<Tenant[]>;
   getTenant(id: number): Promise<Tenant | undefined>;
+  getMSSPs(): Promise<Tenant[]>;
+  getChildTenants(parentId: number): Promise<Tenant[]>;
+  getMSSPWithChildren(msspId: number): Promise<{ mssp: Tenant; children: Tenant[] } | undefined>;
   createTenant(data: InsertTenant): Promise<Tenant>;
 
   getTenantUser(userId: string, tenantId: number): Promise<TenantUser | undefined>;
@@ -62,6 +65,21 @@ export class DatabaseStorage implements IStorage {
   async getTenant(id: number): Promise<Tenant | undefined> {
     const [tenant] = await db.select().from(tenants).where(eq(tenants.id, id));
     return tenant;
+  }
+
+  async getMSSPs(): Promise<Tenant[]> {
+    return db.select().from(tenants).where(eq(tenants.type, "mssp")).orderBy(tenants.name);
+  }
+
+  async getChildTenants(parentId: number): Promise<Tenant[]> {
+    return db.select().from(tenants).where(eq(tenants.parentId, parentId)).orderBy(tenants.name);
+  }
+
+  async getMSSPWithChildren(msspId: number): Promise<{ mssp: Tenant; children: Tenant[] } | undefined> {
+    const mssp = await this.getTenant(msspId);
+    if (!mssp || mssp.type !== "mssp") return undefined;
+    const children = await this.getChildTenants(msspId);
+    return { mssp, children };
   }
 
   async createTenant(data: InsertTenant): Promise<Tenant> {
