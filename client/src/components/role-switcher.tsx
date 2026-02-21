@@ -88,7 +88,10 @@ export function RoleSwitcher() {
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["/api/user/profile"], data);
-      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "/api/user/profile" });
+      const preserveKeys = ["/api/user/profile", "/api/tenants", "/api/tenants/hierarchy", "/api/auth/user"];
+      queryClient.removeQueries({
+        predicate: (query) => !preserveKeys.includes(query.queryKey[0] as string),
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/tenants"] });
       queryClient.invalidateQueries({ queryKey: ["/api/tenants/hierarchy"] });
       setOpen(false);
