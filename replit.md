@@ -26,7 +26,8 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 - `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
 - `client/src/pages/reports.tsx` - AI-powered report generation with 13 report types
 - `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF) with AI enrichment and column detection
-- `client/src/pages/admin-center.tsx` - Admin Center for tenant user management (create/edit/delete users with role assignment)
+- `client/src/pages/admin-portal.tsx` - Dedicated Admin Portal with standalone layout (Overview, Tenants, Users, Licenses tabs)
+- `client/src/pages/admin-center.tsx` - (Legacy) Admin Center for tenant user management
 
 ## Security Events Architecture
 10 event types: email, endpoint, vulnerability, casb, waf, dlp, sse, network, identity, cloud
@@ -86,15 +87,17 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 - Customer: Dashboard, Tickets, Projects, Knowledge Base
 - Admin roles (platform_admin, mss_admin, soc_manager): Full access including Admin Center
 
-### Superadmin & Tenant Administration
-- Standalone superadmin login (username/password: admin/Admin@123)
-- Dedicated Tenant Admin page with 4 tabs:
-  - Platform Overview: Stats cards (tenants, users, licenses) + MSSP hierarchy view
-  - Tenants: Full CRUD for MSSP and customer tenants with search/filter
-  - Tenant Users: User management with role assignment across tenants
-  - License Management: License CRUD with type, status, dates, user/endpoint limits
-- Accessible to both superadmin and platform_admin users
-- Superadmin auth uses bcrypt-hashed password with session-based auth
+### Admin Portal (Standalone Multi-Tenancy Management)
+- Dedicated standalone Admin Portal at `/admin` with its own header bar (separate from sidebar)
+- Header shows SecureOps branding, "Go to SecureOps" button, theme toggle, logout
+- Accessible to superadmin (via login), platform_admin, mss_admin, and soc_manager
+- Superadmin login still at root with username/password: admin/Admin@123
+- 4 tabs with clean table-based UI:
+  - Overview: Platform stats cards (6 metrics) + MSSP hierarchy view
+  - Tenants: Full CRUD with table layout (Name, Type, Industry, Parent, Status, Created, Actions)
+  - Users: User management with multi-role assignment, role badges, search
+  - Licenses: License CRUD with table layout (Tenant, Type, Users, Status, Dates, Actions)
+- All tables have search, add/edit/delete with confirmation dialogs
 
 ## Database Tables
 - `superadmins` - Superadmin credentials (username, password_hash, display_name)

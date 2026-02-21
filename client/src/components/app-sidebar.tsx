@@ -47,8 +47,9 @@ function getNavItems(role: string) {
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   ];
 
-  if (role === "platform_admin") {
-    items.push({ title: "Admin Center", url: "/admin-center", icon: Settings });
+  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+  if (adminRoles.includes(role)) {
+    items.push({ title: "Admin Portal", url: "/admin", icon: Settings });
   }
 
   const incidentRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];

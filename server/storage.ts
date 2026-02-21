@@ -117,6 +117,7 @@ export interface IStorage {
   deleteLicense(id: number): Promise<void>;
 
   updateTenant(id: number, data: Partial<InsertTenant>): Promise<Tenant>;
+  deleteTenant(id: number): Promise<void>;
   getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]>;
   updateTenantUser(id: number, data: Partial<InsertTenantUser>): Promise<TenantUser>;
   deleteTenantUser(id: number): Promise<void>;
@@ -811,6 +812,10 @@ export class DatabaseStorage implements IStorage {
       .where(eq(tenants.id, id))
       .returning();
     return tenant;
+  }
+
+  async deleteTenant(id: number): Promise<void> {
+    await db.delete(tenants).where(eq(tenants.id, id));
   }
 
   async getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]> {

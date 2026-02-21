@@ -183,7 +183,8 @@ export async function registerRoutes(
     if (req.session?.isSuperAdmin) return true;
     if (req.user?.claims?.sub) {
       const access = await getUserTenantAccess(req);
-      return access.isPlatformAdmin;
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      return adminRoles.includes(access.role);
     }
     return false;
   }
@@ -228,6 +229,18 @@ export async function registerRoutes(
       res.json(tenant);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to update tenant" });
+    }
+  });
+
+  app.delete("/api/tenant-admin/tenants/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const id = parseInt(req.params.id);
+      await storage.deleteTenant(id);
+      res.json({ message: "Tenant deleted" });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to delete tenant" });
     }
   });
 
