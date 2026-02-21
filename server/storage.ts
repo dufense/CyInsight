@@ -409,14 +409,45 @@ export class DatabaseStorage implements IStorage {
     const topN = (map: Record<string, number>, n = 10) =>
       Object.entries(map).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, n);
 
+    const cleanSingleTactic = (raw: string): string => {
+      let t = raw.replace(/^\[?'?/, "").replace(/'?\]?$/, "").trim();
+      t = t.replace(/^TA\d{4}\s*-\s*/, "");
+      t = t.replace(/^T\d{4}(\.\d+)?\s*-\s*/, "");
+      t = t.replace(/['\[\]]/g, "").trim();
+      if (t.length > 35) t = t.substring(0, 35);
+      return t;
+    };
+
+    const splitAndClean = (raw: string): string[] => {
+      if (!raw) return [];
+      const parts = raw.replace(/^\[/, "").replace(/\]$/, "").split(/[,']/).map(p => p.trim()).filter(p => p.length > 2);
+      const cleaned: string[] = [];
+      for (const p of parts) {
+        const c = cleanSingleTactic(p);
+        if (c.length > 2 && !c.match(/^TA\d{4}$/) && !c.match(/^T\d{4}/)) cleaned.push(c);
+      }
+      return cleaned.length > 0 ? cleaned : [cleanSingleTactic(raw)].filter(c => c.length > 2);
+    };
+
     const countBy = (items: any[], key: string) => {
       const m: Record<string, number> = {};
       items.forEach(i => { const v = i[key]; if (v) m[v] = (m[v] || 0) + 1; });
       return m;
     };
 
+    const countByCleanSplit = (items: any[], key: string) => {
+      const m: Record<string, number> = {};
+      items.forEach(i => {
+        const v = i[key];
+        if (!v) return;
+        const labels = splitAndClean(v);
+        labels.forEach(l => { m[l] = (m[l] || 0) + 1; });
+      });
+      return m;
+    };
+
     const severityBreakdown = Object.entries(countBy(allIncidents, "severity")).map(([name, value]) => ({ name, value }));
-    const categoryBreakdown = topN(countBy(allIncidents, "category"), 8).map(({ name, count }) => ({ category: name, count }));
+    const categoryBreakdown = topN(countByCleanSplit(allIncidents, "category"), 10).map(({ name, count }) => ({ category: name, count }));
 
     const eventsByType = Object.entries(countBy(allEvents, "eventType")).map(([type, count]) => ({ type, count }));
     const eventsBySeverity = Object.entries(countBy(allEvents, "severity")).map(([name, value]) => ({ name, value }));
@@ -475,10 +506,10 @@ export class DatabaseStorage implements IStorage {
     const threatVectorMap = countBy(allEvents, "threatVector");
     const incidentsByThreatVector = topN(threatVectorMap, 12);
 
-    const mitreMap = countBy(allEvents, "mitreTactic");
+    const mitreMap = countByCleanSplit(allEvents, "mitreTactic");
     const mitreTactics = Object.entries(mitreMap).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
 
-    const mitreTechMap = countBy(allEvents, "mitreTechnique");
+    const mitreTechMap = countByCleanSplit(allEvents, "mitreTechnique");
     const topMitreTechniques = topN(mitreTechMap, 10);
 
     const actionMap = countBy(allEvents, "action");
@@ -493,11 +524,26 @@ export class DatabaseStorage implements IStorage {
     const emailSeverity = Object.entries(countBy(emailEvents, "severity")).map(([name, value]) => ({ name, value }));
     const emailThreatVectors = topN(countBy(emailEvents, "threatVector"), 6);
 
+    const cleanLogSource = (items: any[]) => {
+      const m: Record<string, number> = {};
+      items.forEach(i => {
+        let v = i.logSource;
+        if (!v) return;
+        if (v.startsWith("[{") || v.startsWith("['{") || v.startsWith("[{'")) {
+          const tagMatch = v.match(/tag_name['"]\s*:\s*['"]([^'"]+)/);
+          v = tagMatch ? tagMatch[1].replace(/^(DS|DT|DOM|EG):/, "").trim() : "Unknown Source";
+        }
+        if (v.length > 40) v = v.substring(0, 40);
+        m[v] = (m[v] || 0) + 1;
+      });
+      return m;
+    };
+
     const endpointEvents = allEvents.filter(e => e.eventType === "endpoint");
     const endpointByThreat = topN(countBy(endpointEvents, "threat"), 10);
     const endpointActions = Object.entries(countBy(endpointEvents, "action")).map(([name, value]) => ({ name, value }));
     const topInfectedHosts = topN(countBy(endpointEvents, "target"), 10);
-    const endpointLogSources = topN(countBy(endpointEvents, "logSource"), 6);
+    const endpointLogSources = topN(cleanLogSource(endpointEvents), 6);
     const endpointThreatVectors = topN(countBy(endpointEvents, "threatVector"), 8);
 
     const casbEvents = allEvents.filter(e => e.eventType === "casb");
@@ -527,7 +573,7 @@ export class DatabaseStorage implements IStorage {
     const cloudByThreat = topN(countBy(cloudEvents, "threat"), 10);
     const cloudApps = topN(countBy(cloudEvents, "app"), 6);
 
-    const logSourceMap = countBy(allEvents, "logSource");
+    const logSourceMap = cleanLogSource(allEvents);
     const topLogSources = topN(logSourceMap, 15);
     const sourceTypeMap = countBy(allEvents, "sourceType");
     const sourceTypes = Object.entries(sourceTypeMap).map(([name, value]) => ({ name, value }));

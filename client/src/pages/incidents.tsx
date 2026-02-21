@@ -9,6 +9,16 @@ import {
   Search,
   Filter,
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Brain,
+  Sparkles,
+  Clock,
+  Loader2,
+  Shield,
+  Target,
+  Zap,
+  Eye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,6 +66,57 @@ const STATUS_STYLES: Record<string, string> = {
   closed: "bg-muted text-muted-foreground",
 };
 
+function formatRelativeTime(dateStr: string | Date): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 1) return "just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 30) return `${diffDays}d ago`;
+  return `${Math.floor(diffDays / 30)}mo ago`;
+}
+
+function formatTimestamp(dateStr: string | Date): string {
+  const date = new Date(dateStr);
+  const formatted = date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const relative = formatRelativeTime(dateStr);
+  return `${formatted} (${relative})`;
+}
+
+function getPriorityScoreColor(score: number): string {
+  if (score >= 80) return "bg-destructive/10 text-destructive";
+  if (score >= 60) return "bg-chart-4/10 text-chart-4";
+  if (score >= 40) return "bg-chart-1/10 text-chart-1";
+  return "bg-chart-2/10 text-chart-2";
+}
+
+interface AIInsights {
+  riskAssessment: string;
+  attackVector: string;
+  mitreMappings: string[];
+  impactAnalysis: string;
+  recommendations: string[];
+  predictions: string[];
+  relatedThreats: string[];
+  priorityScore: number;
+}
+
+interface AIInsightsResponse {
+  insights: AIInsights;
+  relatedEventsCount: number;
+}
+
 export default function IncidentsPage() {
   const { currentTenant, userRole } = useTenant();
   const { toast } = useToast();
@@ -63,6 +124,8 @@ export default function IncidentsPage() {
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [insightsData, setInsightsData] = useState<Record<number, AIInsightsResponse>>({});
 
   const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
@@ -94,6 +157,19 @@ export default function IncidentsPage() {
     },
   });
 
+  const insightsMutation = useMutation({
+    mutationFn: async (incidentId: number) => {
+      const res = await apiRequest("POST", "/api/ai/incident-insights", { incidentId });
+      return res.json() as Promise<AIInsightsResponse>;
+    },
+    onSuccess: (data, incidentId) => {
+      setInsightsData((prev) => ({ ...prev, [incidentId]: data }));
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to fetch AI insights.", variant: "destructive" });
+    },
+  });
+
   const filtered = incidents.filter((inc) => {
     const matchesSearch = !search || inc.title.toLowerCase().includes(search.toLowerCase());
     const matchesSeverity = severityFilter === "all" || inc.severity === severityFilter;
@@ -111,6 +187,10 @@ export default function IncidentsPage() {
       source: formData.get("source"),
       category: formData.get("category"),
     });
+  };
+
+  const toggleRow = (id: number) => {
+    setExpandedId((prev) => (prev === id ? null : id));
   };
 
   return (
@@ -245,59 +325,235 @@ export default function IncidentsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-[30px]"></TableHead>
                   <TableHead className="w-[50px]">ID</TableHead>
                   <TableHead>Title</TableHead>
                   <TableHead className="w-[100px]">Severity</TableHead>
                   <TableHead className="w-[120px]">Status</TableHead>
                   <TableHead className="w-[100px]">Source</TableHead>
-                  <TableHead className="w-[100px]">Category</TableHead>
-                  <TableHead className="w-[120px]">Created</TableHead>
+                  <TableHead className="w-[180px]">Time</TableHead>
                   {isMSS && <TableHead className="w-[100px]">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((incident) => (
-                  <TableRow key={incident.id} data-testid={`row-incident-${incident.id}`}>
-                    <TableCell className="font-mono text-xs">#{incident.id}</TableCell>
-                    <TableCell>
-                      <span className="text-xs font-medium">{incident.title}</span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className={`text-[10px] ${SEVERITY_STYLES[incident.severity]}`}>
-                        {incident.severity}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className={`text-[10px] ${STATUS_STYLES[incident.status]}`}>
-                        {incident.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{incident.source || "--"}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground capitalize">{incident.category || "--"}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {new Date(incident.createdAt).toLocaleDateString()}
-                    </TableCell>
-                    {isMSS && (
-                      <TableCell>
-                        <Select
-                          value={incident.status}
-                          onValueChange={(status) => updateMutation.mutate({ id: incident.id, status })}
-                        >
-                          <SelectTrigger className="h-7 text-[10px] w-[100px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="open">Open</SelectItem>
-                            <SelectItem value="investigating">Investigating</SelectItem>
-                            <SelectItem value="contained">Contained</SelectItem>
-                            <SelectItem value="resolved">Resolved</SelectItem>
-                            <SelectItem value="closed">Closed</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
+                {filtered.map((incident) => {
+                  const isExpanded = expandedId === incident.id;
+                  const insights = insightsData[incident.id];
+                  const isLoadingInsights = insightsMutation.isPending && insightsMutation.variables === incident.id;
+
+                  return (
+                    <>
+                      <TableRow
+                        key={incident.id}
+                        data-testid={`row-incident-${incident.id}`}
+                        className="cursor-pointer"
+                        onClick={() => toggleRow(incident.id)}
+                      >
+                        <TableCell className="pr-0">
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                          )}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">#{incident.id}</TableCell>
+                        <TableCell>
+                          <span className="text-xs font-medium">{incident.title}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={`text-[10px] ${SEVERITY_STYLES[incident.severity]}`} data-testid={`badge-severity-${incident.id}`}>
+                            {incident.severity}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={`text-[10px] ${STATUS_STYLES[incident.status]}`} data-testid={`badge-status-${incident.id}`}>
+                            {incident.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{incident.source || "--"}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground" data-testid={`text-time-${incident.id}`}>
+                          <div className="flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            {formatTimestamp(incident.createdAt)}
+                          </div>
+                        </TableCell>
+                        {isMSS && (
+                          <TableCell onClick={(e) => e.stopPropagation()}>
+                            <Select
+                              value={incident.status}
+                              onValueChange={(status) => updateMutation.mutate({ id: incident.id, status })}
+                            >
+                              <SelectTrigger className="h-7 text-[10px] w-[100px]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="open">Open</SelectItem>
+                                <SelectItem value="investigating">Investigating</SelectItem>
+                                <SelectItem value="contained">Contained</SelectItem>
+                                <SelectItem value="resolved">Resolved</SelectItem>
+                                <SelectItem value="closed">Closed</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
+                        )}
+                      </TableRow>
+
+                      {isExpanded && (
+                        <TableRow key={`expanded-${incident.id}`} data-testid={`expanded-incident-${incident.id}`}>
+                          <TableCell colSpan={isMSS ? 8 : 7} className="p-0">
+                            <div className="p-4 space-y-4 bg-muted/30">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-3">
+                                  <div>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
+                                      <Eye className="w-3 h-3" /> Description
+                                    </p>
+                                    <p className="text-sm" data-testid={`text-description-${incident.id}`}>
+                                      {incident.description || "No description provided"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Affected Assets</p>
+                                    <p className="text-sm" data-testid={`text-assets-${incident.id}`}>
+                                      {incident.affectedAssets || "None specified"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Category</p>
+                                    <p className="text-sm capitalize" data-testid={`text-category-${incident.id}`}>
+                                      {incident.category || "--"}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="space-y-3">
+                                  <div>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Source</p>
+                                    <p className="text-sm" data-testid={`text-source-${incident.id}`}>
+                                      {incident.source || "--"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Recommendation</p>
+                                    <p className="text-sm" data-testid={`text-recommendation-${incident.id}`}>
+                                      {incident.recommendation || "No recommendation yet"}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="border-t pt-4">
+                                {!insights && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      insightsMutation.mutate(incident.id);
+                                    }}
+                                    disabled={isLoadingInsights}
+                                    data-testid={`button-ai-insights-${incident.id}`}
+                                  >
+                                    {isLoadingInsights ? (
+                                      <>
+                                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                                        Analyzing...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Brain className="w-3.5 h-3.5 mr-1.5" />
+                                        Get AI Insights
+                                      </>
+                                    )}
+                                  </Button>
+                                )}
+
+                                {insights && (
+                                  <div className="space-y-4" data-testid={`ai-insights-${incident.id}`}>
+                                    <div className="flex items-center gap-2 mb-3">
+                                      <Sparkles className="w-4 h-4 text-chart-1" />
+                                      <span className="text-sm font-semibold">AI Insights</span>
+                                      <Badge variant="outline" className="text-[10px] ml-auto">
+                                        {insights.relatedEventsCount} related events
+                                      </Badge>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div className="space-y-3">
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
+                                            <Shield className="w-3 h-3" /> Risk Assessment
+                                          </p>
+                                          <p className="text-sm" data-testid={`text-risk-assessment-${incident.id}`}>
+                                            {insights.insights.riskAssessment}
+                                          </p>
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
+                                            <Target className="w-3 h-3" /> Attack Vector
+                                          </p>
+                                          <p className="text-sm" data-testid={`text-attack-vector-${incident.id}`}>
+                                            {insights.insights.attackVector}
+                                          </p>
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
+                                            <Zap className="w-3 h-3" /> MITRE Mappings
+                                          </p>
+                                          <div className="flex flex-wrap gap-1" data-testid={`mitre-mappings-${incident.id}`}>
+                                            {insights.insights.mitreMappings.map((mapping, idx) => (
+                                              <Badge key={idx} variant="outline" className="text-[10px]">
+                                                {mapping}
+                                              </Badge>
+                                            ))}
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1">Impact Analysis</p>
+                                          <p className="text-sm" data-testid={`text-impact-analysis-${incident.id}`}>
+                                            {insights.insights.impactAnalysis}
+                                          </p>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-3">
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1">Recommendations</p>
+                                          <ol className="list-decimal list-inside space-y-1" data-testid={`list-recommendations-${incident.id}`}>
+                                            {insights.insights.recommendations.map((rec, idx) => (
+                                              <li key={idx} className="text-sm">{rec}</li>
+                                            ))}
+                                          </ol>
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1">Predictions</p>
+                                          <ol className="list-decimal list-inside space-y-1" data-testid={`list-predictions-${incident.id}`}>
+                                            {insights.insights.predictions.map((pred, idx) => (
+                                              <li key={idx} className="text-sm">{pred}</li>
+                                            ))}
+                                          </ol>
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-medium text-muted-foreground mb-1">Priority Score</p>
+                                          <Badge
+                                            variant="outline"
+                                            className={`text-[10px] ${getPriorityScoreColor(insights.insights.priorityScore)}`}
+                                            data-testid={`badge-priority-score-${incident.id}`}
+                                          >
+                                            {insights.insights.priorityScore}/100
+                                          </Badge>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>

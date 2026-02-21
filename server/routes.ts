@@ -2092,6 +2092,175 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
     }
   });
 
+  app.post("/api/ai/incident-insights", isAuthenticated, async (req: any, res) => {
+    try {
+      const { incidentId } = req.body;
+      if (!incidentId) return res.status(400).json({ message: "incidentId is required" });
+      const incident = await storage.getIncident(incidentId);
+      if (!incident) return res.status(404).json({ message: "Incident not found" });
+      await assertTenantAccess(req, incident.tenantId);
+
+      const relatedEvents = (await storage.getSecurityEvents(incident.tenantId))
+        .filter(e => {
+          const assets = (incident.affectedAssets || "").toLowerCase();
+          return (e.asset && assets.includes(e.asset.toLowerCase())) ||
+                 (e.target && assets.includes(e.target.toLowerCase())) ||
+                 (e.threat && incident.title.toLowerCase().includes(e.threat.toLowerCase()));
+        }).slice(0, 20);
+
+      const prompt = `You are a senior SOC analyst. Analyze this security incident and provide actionable intelligence.
+
+Incident:
+- Title: ${incident.title}
+- Severity: ${incident.severity}
+- Status: ${incident.status}
+- Category: ${incident.category || "unknown"}
+- Source: ${incident.source || "unknown"}
+- Affected Assets: ${incident.affectedAssets || "unknown"}
+- Description: ${(incident.description || "").substring(0, 500)}
+- Created: ${incident.createdAt.toISOString()}
+${incident.recommendation ? `- Recommendation: ${incident.recommendation.substring(0, 300)}` : ""}
+
+Related Security Events (${relatedEvents.length}):
+${JSON.stringify(relatedEvents.map(e => ({
+  threat: e.threat, severity: e.severity, eventType: e.eventType,
+  mitreTactic: e.mitreTactic, mitreTechnique: e.mitreTechnique,
+  action: e.action, asset: e.asset, riskScore: e.riskScore
+})), null, 2)}
+
+Provide a JSON response with:
+{
+  "riskAssessment": "High/Medium/Low with brief explanation",
+  "attackVector": "How the attack likely occurred",
+  "mitreMappings": ["Relevant MITRE ATT&CK tactics and techniques"],
+  "impactAnalysis": "Potential business impact",
+  "recommendations": ["List of 3-5 specific remediation steps"],
+  "predictions": ["2-3 predictions about what could happen next if not addressed"],
+  "relatedThreats": ["Similar threat patterns to watch for"],
+  "priorityScore": 1-100
+}`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0.3,
+      });
+
+      const insights = JSON.parse(response.choices[0]?.message?.content || "{}");
+      res.json({ insights, relatedEventsCount: relatedEvents.length });
+    } catch (error: any) {
+      console.error("AI incident insights error:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to generate insights" });
+    }
+  });
+
+  app.get("/api/ai/threat-analysis/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+
+      const events = await storage.getSecurityEvents(tenantId);
+      const incidents = await storage.getIncidents(tenantId);
+
+      const cleanLabel = (label: string): string => {
+        let cleaned = label.replace(/^\[?'?/, "").replace(/'?\]?$/, "").trim();
+        cleaned = cleaned.replace(/^TA\d{4}\s*-\s*/, "");
+        cleaned = cleaned.replace(/^T\d{4}(\.\d+)?\s*-\s*/, "");
+        return cleaned || label;
+      };
+
+      const tacticCounts: Record<string, number> = {};
+      const techniqueCounts: Record<string, number> = {};
+      const assetTargetCounts: Record<string, number> = {};
+      const threatCounts: Record<string, number> = {};
+      const severityCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+      const eventTypeCounts: Record<string, number> = {};
+      const attackTimeline: Record<string, number> = {};
+
+      events.forEach(e => {
+        if (e.mitreTactic) {
+          const tactics = e.mitreTactic.split(",").map((t: string) => cleanLabel(t.trim()));
+          tactics.forEach((t: string) => { if (t.length > 2) tacticCounts[t] = (tacticCounts[t] || 0) + 1; });
+        }
+        if (e.mitreTechnique) {
+          const techs = e.mitreTechnique.split(",").map((t: string) => cleanLabel(t.trim()));
+          techs.forEach((t: string) => { if (t.length > 2) techniqueCounts[t] = (techniqueCounts[t] || 0) + 1; });
+        }
+        if (e.asset) assetTargetCounts[e.asset] = (assetTargetCounts[e.asset] || 0) + 1;
+        if (e.target) assetTargetCounts[e.target] = (assetTargetCounts[e.target] || 0) + 1;
+        if (e.threat) threatCounts[e.threat] = (threatCounts[e.threat] || 0) + 1;
+        if (e.severity) severityCounts[e.severity] = (severityCounts[e.severity] || 0) + 1;
+        if (e.eventType) eventTypeCounts[e.eventType] = (eventTypeCounts[e.eventType] || 0) + 1;
+        const day = e.occurredAt.toISOString().split("T")[0];
+        attackTimeline[day] = (attackTimeline[day] || 0) + 1;
+      });
+
+      incidents.forEach(i => {
+        if (i.affectedAssets) {
+          i.affectedAssets.split(",").forEach(a => {
+            const asset = a.trim();
+            if (asset) assetTargetCounts[asset] = (assetTargetCounts[asset] || 0) + 1;
+          });
+        }
+        if (i.category) {
+          const cat = cleanLabel(i.category);
+          tacticCounts[cat] = (tacticCounts[cat] || 0) + 1;
+        }
+      });
+
+      const topN = (map: Record<string, number>, n: number) =>
+        Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, count]) => ({ name, count }));
+
+      const repeatedThreats = topN(threatCounts, 15);
+      const mostTargetedSystems = topN(assetTargetCounts, 20);
+      const topTactics = topN(tacticCounts, 15);
+      const topTechniques = topN(techniqueCounts, 15);
+      const attacksByLayer = Object.entries(eventTypeCounts).map(([layer, count]) => ({ layer, count })).sort((a, b) => b.count - a.count);
+
+      const timelineSorted = Object.entries(attackTimeline).sort((a, b) => a[0].localeCompare(b[0]));
+      const dailyTrend = timelineSorted.slice(-30).map(([date, count]) => ({ date: date.substring(5), count }));
+
+      const criticalIncidents = incidents.filter(i => i.severity === "critical").length;
+      const highIncidents = incidents.filter(i => i.severity === "high").length;
+      const openIncidents = incidents.filter(i => i.status === "open" || i.status === "investigating").length;
+
+      const keyObservations = [];
+      if (criticalIncidents > 0) keyObservations.push({ type: "critical", message: `${criticalIncidents} critical incidents require immediate attention`, severity: "critical" });
+      if (openIncidents > 5) keyObservations.push({ type: "warning", message: `${openIncidents} incidents remain open/investigating`, severity: "high" });
+      if (repeatedThreats.length > 0 && repeatedThreats[0].count > 5) keyObservations.push({ type: "pattern", message: `"${repeatedThreats[0].name}" is the most recurring threat with ${repeatedThreats[0].count} occurrences`, severity: "high" });
+      if (mostTargetedSystems.length > 0) keyObservations.push({ type: "target", message: `"${mostTargetedSystems[0].name}" is the most targeted system with ${mostTargetedSystems[0].count} events`, severity: "medium" });
+      if (topTactics.length > 0) keyObservations.push({ type: "tactic", message: `"${topTactics[0].name}" is the most used attack tactic (${topTactics[0].count} events)`, severity: "medium" });
+      const totalEventsLast7 = timelineSorted.slice(-7).reduce((s, [, c]) => s + c, 0);
+      const totalEventsPrev7 = timelineSorted.slice(-14, -7).reduce((s, [, c]) => s + c, 0);
+      if (totalEventsLast7 > totalEventsPrev7 * 1.2 && totalEventsPrev7 > 0) {
+        keyObservations.push({ type: "trend", message: `Attack volume increased ${Math.round(((totalEventsLast7 - totalEventsPrev7) / totalEventsPrev7) * 100)}% in the last 7 days`, severity: "high" });
+      }
+
+      res.json({
+        summary: {
+          totalEvents: events.length,
+          totalIncidents: incidents.length,
+          criticalIncidents,
+          highIncidents,
+          openIncidents,
+          avgRiskScore: events.length > 0 ? Math.round(events.filter(e => e.riskScore).reduce((s, e) => s + (e.riskScore || 0), 0) / Math.max(1, events.filter(e => e.riskScore).length)) : 0,
+        },
+        keyObservations,
+        repeatedThreats,
+        mostTargetedSystems,
+        topTactics,
+        topTechniques,
+        attacksByLayer,
+        severityDistribution: severityCounts,
+        dailyTrend,
+      });
+    } catch (error: any) {
+      console.error("Threat analysis error:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to generate threat analysis" });
+    }
+  });
+
   app.post("/api/ai/enrich-events", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);

@@ -6,6 +6,7 @@ import {
   ShieldAlert, ShieldCheck, ShieldOff, Wifi, Database, Eye, Zap, Clock, Timer,
   Server, AlertCircle, FileWarning, Ban, CheckCircle2, XCircle, Gauge, Radio,
   Network, Fingerprint, KeyRound, UserX, Upload, Download, Search, Radar, HardDrive,
+  Brain,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -172,6 +173,10 @@ export default function DashboardPage() {
     queryKey: ["/api/assets", currentTenant?.id],
     enabled: !!currentTenant?.id,
   });
+  const { data: threatAnalysis, isLoading: threatLoading } = useQuery<any>({
+    queryKey: ["/api/ai/threat-analysis", currentTenant?.id],
+    enabled: !!currentTenant?.id,
+  });
 
   if (isLoading || !stats) return <DashboardSkeleton />;
 
@@ -237,6 +242,7 @@ export default function DashboardPage() {
             <TabsTrigger value="logs" data-testid="tab-logs" className="text-xs">Log Sources</TabsTrigger>
             <TabsTrigger value="vuln" data-testid="tab-vuln" className="text-xs">Vulnerabilities</TabsTrigger>
             <TabsTrigger value="assets" data-testid="tab-assets" className="text-xs">Asset Inventory</TabsTrigger>
+            <TabsTrigger value="analysis" data-testid="tab-analysis" className="text-xs">Threat Analysis</TabsTrigger>
           </TabsList>
         </div>
 
@@ -321,20 +327,36 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent className="pt-0">
                 <div className="space-y-2">
-                  {s.recentIncidents.map((inc: any) => (
-                    <div key={inc.id} className="flex items-center justify-between gap-3 p-2.5 rounded-md bg-muted/30 border-l-2"
-                      style={{ borderLeftColor: SEV[inc.severity] || C.blue }}
-                      data-testid={`incident-row-${inc.id}`}>
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <ShieldAlert className="w-3.5 h-3.5 shrink-0" style={{ color: SEV[inc.severity] }} />
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-medium truncate">{inc.title}</p>
-                          <p className="text-[9px] text-muted-foreground">{new Date(inc.createdAt).toLocaleDateString()}</p>
+                  {s.recentIncidents.map((inc: any) => {
+                    const d = new Date(inc.createdAt);
+                    const now = new Date();
+                    const diffMs = now.getTime() - d.getTime();
+                    const diffMins = Math.floor(diffMs / 60000);
+                    const diffHrs = Math.floor(diffMs / 3600000);
+                    const diffDays = Math.floor(diffMs / 86400000);
+                    const timeAgo = diffMins < 60 ? `${diffMins}m ago` : diffHrs < 24 ? `${diffHrs}h ago` : `${diffDays}d ago`;
+                    const timeStr = d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+                    return (
+                      <div key={inc.id} className="flex items-center justify-between gap-3 p-2.5 rounded-md bg-muted/30 border-l-2"
+                        style={{ borderLeftColor: SEV[inc.severity] || C.blue }}
+                        data-testid={`incident-row-${inc.id}`}>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <ShieldAlert className="w-3.5 h-3.5 shrink-0" style={{ color: SEV[inc.severity] }} />
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-medium truncate">{inc.title}</p>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <Badge variant="outline" className={`text-[9px] h-4 px-1 ${SEV[inc.severity] ? "" : ""}`} style={{ borderColor: SEV[inc.severity], color: SEV[inc.severity] }}>{inc.severity}</Badge>
+                              <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+                                <Clock className="w-2.5 h-2.5" />{timeStr}
+                              </span>
+                              <span className="text-[9px] text-muted-foreground font-mono">({timeAgo})</span>
+                            </div>
+                          </div>
                         </div>
+                        <Badge variant={inc.status === "open" ? "destructive" : "secondary"} className="text-[9px] shrink-0">{inc.status}</Badge>
                       </div>
-                      <Badge variant={inc.status === "open" ? "destructive" : "secondary"} className="text-[9px] shrink-0">{inc.status}</Badge>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -784,6 +806,209 @@ export default function DashboardPage() {
                   </div>
                 </CardContent>
               </Card>
+            </>
+          )}
+        </TabsContent>
+
+        {/* Threat Analysis */}
+        <TabsContent value="analysis" className="space-y-4" data-testid="tab-content-analysis">
+          {threatLoading ? (
+            <div className="space-y-4">
+              <Card><CardContent className="p-5"><Skeleton className="h-40" /></CardContent></Card>
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card><CardContent className="p-5"><Skeleton className="h-64" /></CardContent></Card>
+                <Card><CardContent className="p-5"><Skeleton className="h-64" /></CardContent></Card>
+              </div>
+              <Card><CardContent className="p-5"><Skeleton className="h-64" /></CardContent></Card>
+            </div>
+          ) : (
+            <>
+              <Card data-testid="card-key-observations">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                    <Brain className="w-4 h-4" />
+                    Key Observations
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {(threatAnalysis?.keyObservations || []).length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-6 text-center">No observations available</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {(threatAnalysis?.keyObservations || []).map((obs: any, idx: number) => {
+                        const sevColor = obs.severity === "critical" ? C.red : obs.severity === "high" ? C.orange : C.yellow;
+                        const ObsIcon = getThreatIcon(obs.type);
+                        return (
+                          <div key={idx} className="flex items-start gap-3 p-3 rounded-md bg-muted/30"
+                            style={{ borderLeft: `4px solid ${sevColor}` }}
+                            data-testid={`observation-row-${idx}`}>
+                            <ObsIcon className="w-4 h-4 shrink-0 mt-0.5" style={{ color: sevColor }} />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[11px]">{obs.message}</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <Badge variant="outline" className="text-[9px] h-4 px-1" style={{ borderColor: sevColor, color: sevColor }}>{obs.severity}</Badge>
+                                <span className="text-[9px] text-muted-foreground capitalize">{obs.type}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card data-testid="card-repeated-attacks">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <Target className="w-4 h-4" />
+                      Repeated Attack Patterns
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={(threatAnalysis?.repeatedThreats || []).slice(0, 10)} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
+                          {(threatAnalysis?.repeatedThreats || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="card-targeted-systems">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <Monitor className="w-4 h-4" />
+                      Most Targeted Systems
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={(threatAnalysis?.mostTargetedSystems || []).slice(0, 10)} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
+                          {(threatAnalysis?.mostTargetedSystems || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card data-testid="card-top-techniques">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <Shield className="w-4 h-4" />
+                      Top Attack Techniques (MITRE)
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={(threatAnalysis?.topTechniques || []).slice(0, 10)} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={140} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
+                          {(threatAnalysis?.topTechniques || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="card-tactics-distribution">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <Crosshair className="w-4 h-4" />
+                      Attack Tactics Distribution
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <MiniPie data={(threatAnalysis?.topTactics || []).slice(0, 8).map((t: any) => ({ name: t.name, value: t.count }))} />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card data-testid="card-attack-trend">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                    <Activity className="w-4 h-4" />
+                    Attack Volume Trend
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <ResponsiveContainer width="100%" height={280}>
+                    <AreaChart data={threatAnalysis?.dailyTrend || []}>
+                      <defs>
+                        <linearGradient id="gThreatTrend" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={C.purple} stopOpacity={0.3} />
+                          <stop offset="95%" stopColor={C.purple} stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                      <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                      <Tooltip contentStyle={tooltipStyle} />
+                      <Area type="monotone" dataKey="count" stroke={C.purple} fill="url(#gThreatTrend)" strokeWidth={2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card data-testid="card-attacks-by-layer">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <Server className="w-4 h-4" />
+                      Attacks by Security Layer
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ResponsiveContainer width="100%" height={250}>
+                      <BarChart data={threatAnalysis?.attacksByLayer || []}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis dataKey="layer" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" name="Attacks" radius={[4, 4, 0, 0]} barSize={28}>
+                          {(threatAnalysis?.attacksByLayer || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="card-severity-distribution">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
+                      <AlertTriangle className="w-4 h-4" />
+                      Severity Distribution
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <MiniPie
+                      data={threatAnalysis?.severityDistribution ? [
+                        { name: "critical", value: threatAnalysis.severityDistribution.critical || 0 },
+                        { name: "high", value: threatAnalysis.severityDistribution.high || 0 },
+                        { name: "medium", value: threatAnalysis.severityDistribution.medium || 0 },
+                        { name: "low", value: threatAnalysis.severityDistribution.low || 0 },
+                      ] : []}
+                      colors={SEV}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
             </>
           )}
         </TabsContent>
