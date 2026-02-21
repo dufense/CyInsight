@@ -301,6 +301,39 @@ export const documentsRelations = relations(documents, ({ one }) => ({
   tenant: one(tenants, { fields: [documents.tenantId], references: [tenants.id] }),
 }));
 
+export const licenseStatusEnum = pgEnum("license_status", ["active", "expired", "suspended", "trial"]);
+
+export const superadmins = pgTable("superadmins", {
+  id: serial("id").primaryKey(),
+  username: varchar("username", { length: 100 }).notNull().unique(),
+  passwordHash: varchar("password_hash", { length: 255 }).notNull(),
+  displayName: varchar("display_name", { length: 255 }),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastLoginAt: timestamp("last_login_at"),
+});
+
+export const licenses = pgTable("licenses", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  licenseType: varchar("license_type", { length: 100 }).notNull(),
+  maxUsers: integer("max_users").default(10).notNull(),
+  maxEndpoints: integer("max_endpoints"),
+  status: licenseStatusEnum("status").default("active").notNull(),
+  startDate: timestamp("start_date").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const licensesRelations = relations(licenses, ({ one }) => ({
+  tenant: one(tenants, { fields: [licenses.tenantId], references: [tenants.id] }),
+}));
+
+export const insertSuperadminSchema = createInsertSchema(superadmins).omit({ id: true, createdAt: true, lastLoginAt: true });
+export const insertLicenseSchema = createInsertSchema(licenses).omit({ id: true, createdAt: true, updatedAt: true });
+
 export const insertTenantSchema = createInsertSchema(tenants).omit({ id: true, createdAt: true });
 export const insertTenantUserSchema = createInsertSchema(tenantUsers).omit({ id: true, createdAt: true });
 export const insertIncidentSchema = createInsertSchema(incidents).omit({ id: true, createdAt: true, updatedAt: true });
@@ -344,3 +377,7 @@ export type ShiftRoster = typeof shiftRosters.$inferSelect;
 export type InsertShiftRoster = z.infer<typeof insertShiftRosterSchema>;
 export type Document = typeof documents.$inferSelect;
 export type InsertDocument = z.infer<typeof insertDocumentSchema>;
+export type Superadmin = typeof superadmins.$inferSelect;
+export type InsertSuperadmin = z.infer<typeof insertSuperadminSchema>;
+export type License = typeof licenses.$inferSelect;
+export type InsertLicense = z.infer<typeof insertLicenseSchema>;
