@@ -298,6 +298,7 @@ function FlexChart({
   xAxisAngle,
   xAxisHeight,
   yAxisWidth,
+  onItemClick,
 }: {
   data: any[];
   chartType: string;
@@ -310,6 +311,7 @@ function FlexChart({
   xAxisAngle?: number;
   xAxisHeight?: number;
   yAxisWidth?: number;
+  onItemClick?: (item: any) => void;
 }) {
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
 
@@ -337,9 +339,11 @@ function FlexChart({
         <PieChart>
           <Pie data={resolvedData} cx="50%" cy="50%" innerRadius={Math.max(height / 5, 30)} outerRadius={Math.max(height / 3, 55)}
             paddingAngle={3} dataKey={dataKey} nameKey={nameKey}
-            animationBegin={0} animationDuration={800}>
+            animationBegin={0} animationDuration={800}
+            onClick={onItemClick ? (_, idx) => onItemClick(resolvedData[idx]) : undefined}
+            style={onItemClick ? { cursor: "pointer" } : undefined}>
             {resolvedData.map((e, i) => (
-              <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} />
+              <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} className={onItemClick ? "cursor-pointer" : ""} />
             ))}
           </Pie>
           <Tooltip contentStyle={tooltipStyle} />
@@ -497,9 +501,11 @@ function FlexChart({
         <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
           formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
         <Bar dataKey={dataKey} name="Events" radius={layout === "vertical" ? [0, 4, 4, 0] : [4, 4, 0, 0]}
-          barSize={layout === "vertical" ? 14 : 28} animationDuration={800}>
+          barSize={layout === "vertical" ? 14 : 28} animationDuration={800}
+          onClick={onItemClick ? (data: any) => onItemClick(data) : undefined}
+          style={onItemClick ? { cursor: "pointer" } : undefined}>
           {resolvedData.map((e, i) => (
-            <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} />
+            <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} className={onItemClick ? "cursor-pointer" : ""} />
           ))}
         </Bar>
       </BarChart>
@@ -527,6 +533,7 @@ export default function DashboardPage() {
   const [endpointTimeline, setEndpointTimeline] = useState<string>("90D");
   const [assetPage, setAssetPage] = useState(0);
   const [assetPageSize, setAssetPageSize] = useState(25);
+  const [assetFilter, setAssetFilter] = useState<{ type: string; value: string } | null>(null);
 
   const ct = (id: string, fallback: string) => chartTypes[id] || fallback;
   const setCt = (id: string, val: string) => setChartTypes(prev => ({ ...prev, [id]: val }));
@@ -1269,11 +1276,21 @@ export default function DashboardPage() {
           ) : (
             <>
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-                <MetricCard title="Total Inventory" value={assetsData?.summary?.totalInventory || assetsData?.summary?.totalAssets || 0} icon={HardDrive} color={C.blue} />
-                <MetricCard title="With Incidents" value={assetsData?.summary?.assetsWithEvents || 0} icon={ShieldAlert} color={C.red} />
-                <MetricCard title="Clean Assets" value={assetsData?.summary?.assetsWithoutEvents || 0} icon={Shield} color={C.green} />
-                <MetricCard title="Coverage" value={`${assetsData?.summary?.coveragePercent || 0}%`} icon={Target} color={C.purple} />
-                <MetricCard title="Critical Risk" value={assetsData?.summary?.criticalAssets || 0} icon={AlertTriangle} color={C.orange} />
+                <div className="cursor-pointer" onClick={() => { setAssetFilter(null); setAssetPage(0); }} data-testid="metric-total-inventory">
+                  <MetricCard title="Total Inventory" value={assetsData?.summary?.totalInventory || assetsData?.summary?.totalAssets || 0} icon={HardDrive} color={C.blue} />
+                </div>
+                <div className="cursor-pointer" onClick={() => { setAssetFilter({ type: "hasEvents", value: "yes" }); setAssetPage(0); }} data-testid="metric-with-incidents">
+                  <MetricCard title="With Incidents" value={assetsData?.summary?.assetsWithEvents || 0} icon={ShieldAlert} color={C.red} />
+                </div>
+                <div className="cursor-pointer" onClick={() => { setAssetFilter({ type: "hasEvents", value: "no" }); setAssetPage(0); }} data-testid="metric-clean-assets">
+                  <MetricCard title="Clean Assets" value={assetsData?.summary?.assetsWithoutEvents || 0} icon={Shield} color={C.green} />
+                </div>
+                <div data-testid="metric-coverage">
+                  <MetricCard title="Coverage" value={`${assetsData?.summary?.coveragePercent || 0}%`} icon={Target} color={C.purple} />
+                </div>
+                <div className="cursor-pointer" onClick={() => { setAssetFilter({ type: "risk", value: "critical" }); setAssetPage(0); }} data-testid="metric-critical-risk">
+                  <MetricCard title="Critical Risk" value={assetsData?.summary?.criticalAssets || 0} icon={AlertTriangle} color={C.orange} />
+                </div>
               </div>
 
               {(assetsData?.summary?.totalInventory > 0) && (
@@ -1297,6 +1314,17 @@ export default function DashboardPage() {
                 </Card>
               )}
 
+              {assetFilter && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-lg border border-primary/20">
+                  <span className="text-xs text-primary font-medium">
+                    Filtered by {assetFilter.type}: <strong>{assetFilter.value}</strong>
+                  </span>
+                  <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={() => { setAssetFilter(null); setAssetPage(0); }}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              )}
+
               <div className="grid lg:grid-cols-3 gap-4">
                 <ExpandableCard title="Assets by Group"
                   headerExtra={<ChartTypeSelector active={ct("assetsByGroup", "bar")} onChange={(v) => setCt("assetsByGroup", v)} />}>
@@ -1307,6 +1335,7 @@ export default function DashboardPage() {
                     height={250}
                     layout="vertical"
                     yAxisWidth={140}
+                    onItemClick={(item) => { setAssetFilter({ type: "group", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
 
@@ -1318,6 +1347,7 @@ export default function DashboardPage() {
                     dataKey="value"
                     height={250}
                     colors={{ Endpoint: C.blue, Server: C.purple }}
+                    onItemClick={(item) => { setAssetFilter({ type: "type", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
 
@@ -1329,6 +1359,7 @@ export default function DashboardPage() {
                     dataKey="value"
                     height={250}
                     colors={{ Windows: C.blue, Linux: C.green, macOS: C.purple, Unknown: C.yellow }}
+                    onItemClick={(item) => { setAssetFilter({ type: "os", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
               </div>
@@ -1341,6 +1372,7 @@ export default function DashboardPage() {
                     chartType={ct("agentVersionDist", "bar")}
                     dataKey="value"
                     height={220}
+                    onItemClick={(item) => { setAssetFilter({ type: "agentVersion", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
 
@@ -1353,6 +1385,7 @@ export default function DashboardPage() {
                     height={220}
                     layout="vertical"
                     yAxisWidth={180}
+                    onItemClick={(item) => { setAssetFilter({ type: "policy", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
 
@@ -1363,13 +1396,44 @@ export default function DashboardPage() {
                     chartType={ct("cloudDist", "pie")}
                     dataKey="value"
                     height={220}
+                    onItemClick={(item) => { setAssetFilter({ type: "cloud", value: item.name }); setAssetPage(0); }}
                   />
                 </ExpandableCard>
               </div>
 
-              <ExpandableCard title="Asset Inventory">
+              <ExpandableCard title={assetFilter ? `Asset Inventory — Filtered by ${assetFilter.type}: ${assetFilter.value}` : "Asset Inventory"}>
                 {(() => {
-                  const allAssets = assetsData?.assets || [];
+                  const rawAssets = assetsData?.assets || [];
+                  const allAssets = assetFilter ? rawAssets.filter((a: any) => {
+                    const fv = assetFilter.value.toLowerCase();
+                    switch (assetFilter.type) {
+                      case "group": return (a.groups || []).some((g: string) => g.toLowerCase() === fv) || (a.endpointGroup || "").toLowerCase() === fv;
+                      case "type": return (a.assetType || "").toLowerCase() === fv;
+                      case "os": {
+                        const osArr = a.os || [];
+                        const opSys = a.operatingSystem || "";
+                        return osArr.some((o: string) => {
+                          const on = o.toLowerCase();
+                          if (fv === "windows") return on.includes("windows");
+                          if (fv === "linux") return on.includes("linux") || on.includes("ubuntu") || on.includes("centos") || on.includes("rhel");
+                          if (fv === "macos") return on.includes("mac") || on.includes("macos");
+                          return on === fv;
+                        }) || (() => {
+                          const ops = opSys.toLowerCase();
+                          if (fv === "windows") return ops.includes("windows");
+                          if (fv === "linux") return ops.includes("linux") || ops.includes("ubuntu") || ops.includes("centos");
+                          if (fv === "macos") return ops.includes("mac");
+                          return ops === fv;
+                        })();
+                      }
+                      case "risk": return (a.riskLevel || "").toLowerCase() === fv;
+                      case "agentVersion": return (a.agentVersion || "").toLowerCase() === fv;
+                      case "policy": return (a.preventionPolicy || "").toLowerCase() === fv;
+                      case "cloud": return (a.cloudProvider || "").toLowerCase() === fv;
+                      case "hasEvents": return fv === "yes" ? (a.eventCount > 0 || a.incidentCount > 0) : (a.eventCount === 0 && a.incidentCount === 0);
+                      default: return true;
+                    }
+                  }) : rawAssets;
                   const totalAssets = allAssets.length;
                   const totalPages = Math.ceil(totalAssets / assetPageSize);
                   const pagedAssets = allAssets.slice(assetPage * assetPageSize, (assetPage + 1) * assetPageSize);

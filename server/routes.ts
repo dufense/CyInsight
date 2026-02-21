@@ -1304,25 +1304,31 @@ export async function registerRoutes(
       };
       const reportTypeLabel = reportLabels[rType] || "Executive Summary";
 
-      const prompt = `You are a senior cybersecurity analyst preparing a ${reportTypeLabel} report for ${tenant?.name || "the client"}.
+      const prompt = `You are a senior cybersecurity analyst at a top-tier MSSP preparing a professional ${reportTypeLabel} report for ${tenant?.name || "the client"}.
 
-Based on the following security data, generate a comprehensive ${reportTypeLabel} report:
+Based on the following security data, generate a comprehensive, presentation-quality ${reportTypeLabel} report:
 
 ${promptContext}
 
-Generate a JSON response with:
-1. "executiveSummary": A 3-4 paragraph professional executive summary specific to ${reportTypeLabel}
-2. "findings": An array of 4-6 key findings, each with "title", "description", "severity" (critical/high/medium/low)
-3. "recommendations": An array of 4-6 actionable recommendations, each with "title", "description", "priority" (high/medium/low)
-4. "metrics": An object with key metrics relevant to ${reportTypeLabel}
+Generate a JSON response with these sections (all required):
+1. "executiveSummary": A 4-5 paragraph professional executive summary. Start with a brief overview of the reporting period and scope. Include quantitative highlights. End with overall risk posture assessment.
+2. "keyHighlights": An array of 3-4 objects with "label" (short metric name like "Total Incidents"), "value" (number or string), "trend" (up/down/stable), "trendDetail" (brief explanation like "+15% from last period")
+3. "findings": An array of 6-8 key findings, each with "title", "description" (2-3 sentences with specifics), "severity" (critical/high/medium/low), "impact" (business impact description), "affectedSystems" (string describing affected scope)
+4. "recommendations": An array of 6-8 actionable recommendations, each with "title", "description" (2-3 sentences), "priority" (critical/high/medium/low), "effort" (low/medium/high), "timeline" (immediate/short-term/long-term), "category" (one of: "Process", "Technology", "People", "Governance")
+5. "riskMatrix": An array of 4-6 risk items with "risk" (name), "likelihood" (1-5), "impact" (1-5), "currentMitigation" (brief), "residualRisk" (low/medium/high/critical)
+6. "metrics": An object with 8-12 key metrics as key-value pairs relevant to ${reportTypeLabel}
+7. "trendAnalysis": A 2-3 paragraph analysis of trends observed in the data, covering patterns, emerging threats, and changes over time
+8. "complianceNotes": A brief paragraph about compliance implications (NIST, ISO 27001, SOC2, PCI-DSS as applicable)
+9. "sections": An array of 3-5 detailed report sections, each with "title", "content" (2-3 paragraphs of professional narrative), "chartData" (array of {name, value} for visualization)
+10. "conclusion": A 2-paragraph professional conclusion summarizing the overall security posture and next steps
 
-Be specific and professional. Reference actual data patterns and threats.`;
+Be extremely specific and professional. Reference actual data, specific threat names, IP addresses, and asset names where available. Use industry terminology. Write as if presenting to a CISO or board of directors.`;
 
       const response = await openai.chat.completions.create({
         model: "gpt-5-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        max_completion_tokens: 4096,
+        max_completion_tokens: 8192,
       });
 
       const reportData = JSON.parse(response.choices[0]?.message?.content || "{}");
@@ -1347,7 +1353,15 @@ Be specific and professional. Reference actual data patterns and threats.`;
         executiveSummary: reportData.executiveSummary || "",
         findings: reportData.findings || [],
         recommendations: reportData.recommendations || [],
-        metrics: reportData.metrics || {},
+        metrics: {
+          ...(reportData.metrics || {}),
+          keyHighlights: reportData.keyHighlights || [],
+          riskMatrix: reportData.riskMatrix || [],
+          trendAnalysis: reportData.trendAnalysis || "",
+          complianceNotes: reportData.complianceNotes || "",
+          sections: reportData.sections || [],
+          conclusion: reportData.conclusion || "",
+        },
         status: "published",
         filePath,
         fileName,
@@ -3256,7 +3270,13 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (riskScore && riskScore > a.riskScore) a.riskScore = riskScore;
         if (mitreTactic) a.mitreTactics.add(mitreTactic.split(",")[0]?.trim());
         if (logSource) a.logSources.add(logSource.split(",")[0]?.trim());
-        if (ip) a.ips.add(ip);
+        if (ip) {
+          const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+          const ipv6Regex = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+          if (ipv4Regex.test(ip) || ipv6Regex.test(ip)) {
+            a.ips.add(ip);
+          }
+        }
         if (group) a.groups.add(group);
         if (os) a.osSet.add(os);
         if (memMB && memMB > a.memoryMB) a.memoryMB = memMB;
@@ -3269,12 +3289,25 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         let memMB = 0;
         let cpuC = 0;
         let group: string | null = null;
+        let extractedIp: string | null = null;
         const raw = evt.rawPayload as any;
         if (raw) {
           const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
           if (payload["OS"] || payload["Operating System"]) os = payload["OS"] || payload["Operating System"];
           if (payload["Memory"]) { const m = parseInt(payload["Memory"]); if (!isNaN(m)) memMB = m; }
           if (payload["CPU"] || payload["Processors"]) { const c = parseInt(payload["CPU"] || payload["Processors"]); if (!isNaN(c)) cpuC = c; }
+          const ipFields = ["IP Address", "IP", "IPv4 Address", "Source IP", "Destination IP", "Host IP", "Host Ip", "hostIp", "src_ip", "dst_ip", "ip_address"];
+          for (const ipf of ipFields) {
+            if (payload[ipf] && String(payload[ipf]).trim()) {
+              const ipVal = String(payload[ipf]).trim();
+              const ipv4Test = /^(\d{1,3}\.){3}\d{1,3}$/;
+              const ipv6Test = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+              if (ipv4Test.test(ipVal) || ipv6Test.test(ipVal)) {
+                extractedIp = ipVal;
+                break;
+              }
+            }
+          }
           const egGroup = extractEndpointGroup(payload);
           if (egGroup) group = egGroup;
           else if (payload["Scan Group Name"]) group = payload["Scan Group Name"];
@@ -3284,11 +3317,12 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           if (egFromLog) group = egFromLog[1];
           else if (!evt.logSource.includes("tag_id")) group = evt.logSource.split(",")[0]?.trim() || null;
         }
+        const ipToPass = extractedIp || evt.target;
         if (evt.asset) {
-          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast, group, os, memMB, cpuC));
+          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, ipToPass, false, rawFirst, rawLast, group, os, memMB, cpuC));
         }
         if (evt.target && evt.target !== evt.asset) {
-          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast, group, os, memMB, cpuC);
+          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, ipToPass, false, rawFirst, rawLast, group, os, memMB, cpuC);
         }
       }
 
@@ -3325,6 +3359,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         }
         const a = assetMap[key];
         if (inv.ipAddress) a.ips.add(inv.ipAddress);
+        if (inv.ipv6Address) a.ips.add(inv.ipv6Address);
         if (inv.endpointGroup) a.groups.add(inv.endpointGroup);
         if (inv.operatingSystem) a.osSet.add(inv.operatingSystem);
         if (inv.endpointType) a.assetType = inv.endpointType === "Server" ? "Server" : "Endpoint";
