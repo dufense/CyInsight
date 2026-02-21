@@ -16,11 +16,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-const ACCEPTED_FORMATS = [".csv", ".xlsx", ".xls", ".pdf"];
+const ACCEPTED_FORMATS = [".csv", ".xlsx", ".xls", ".tsv", ".pdf"];
 
 function getFileIcon(name: string) {
   const ext = name.split(".").pop()?.toLowerCase();
-  if (ext === "csv") return FileSpreadsheet;
+  if (ext === "csv" || ext === "tsv") return FileSpreadsheet;
   if (ext === "xlsx" || ext === "xls") return FileSpreadsheet;
   if (ext === "pdf") return FileText;
   return File;
@@ -36,6 +36,8 @@ export default function ImportPage() {
     total: number;
     skipped: number;
     message: string;
+    incidentsCreated?: number;
+    eventsCreated?: number;
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
@@ -83,8 +85,9 @@ export default function ImportPage() {
 
       const data = await response.json();
       setResult(data);
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard", currentTenant.id] });
-      queryClient.invalidateQueries({ queryKey: ["/api/security-events", currentTenant.id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
       toast({
         title: "Import successful",
         description: data.message,
@@ -131,12 +134,12 @@ export default function ImportPage() {
               <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
               <p className="text-sm font-medium">Drop file here or click to browse</p>
               <p className="text-xs text-muted-foreground mt-1">
-                Supports CSV, Excel (.xlsx/.xls), and PDF formats
+                Supports CSV, TSV, Excel (.xlsx/.xls), and PDF formats
               </p>
               <input
                 id="file-input"
                 type="file"
-                accept=".csv,.xlsx,.xls,.pdf"
+                accept=".csv,.tsv,.xlsx,.xls,.pdf"
                 className="hidden"
                 onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
                 data-testid="input-file-import"
@@ -182,10 +185,17 @@ export default function ImportPage() {
                   <CheckCircle2 className="w-5 h-5 text-chart-2 shrink-0" />
                   <div className="space-y-1">
                     <p className="text-sm font-medium">{result.message}</p>
-                    <div className="flex items-center gap-3">
-                      <Badge variant="secondary" className="text-[10px]">
-                        {result.imported} imported
-                      </Badge>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {result.incidentsCreated !== undefined && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {result.incidentsCreated} incidents
+                        </Badge>
+                      )}
+                      {result.eventsCreated !== undefined && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {result.eventsCreated} security events
+                        </Badge>
+                      )}
                       {result.skipped > 0 && (
                         <Badge variant="outline" className="text-[10px]">
                           {result.skipped} skipped
@@ -211,21 +221,21 @@ export default function ImportPage() {
               <div className="p-3 rounded-md bg-muted/30">
                 <div className="flex items-center gap-2 mb-2">
                   <FileSpreadsheet className="w-4 h-4 text-chart-2" />
-                  <span className="text-xs font-medium">CSV / Excel Format</span>
+                  <span className="text-xs font-medium">Supported XDR / SIEM Formats</span>
                 </div>
                 <p className="text-[10px] text-muted-foreground mb-2">
-                  Include these columns in your spreadsheet:
+                  Auto-detects columns from Palo Alto Cortex XDR, CrowdStrike, and other platforms:
                 </p>
                 <div className="grid grid-cols-2 gap-1">
                   {[
-                    { col: "eventType", desc: "email, endpoint, vulnerability" },
-                    { col: "severity", desc: "critical, high, medium, low, info" },
-                    { col: "threat", desc: "Threat name (e.g., Emotet)" },
-                    { col: "target", desc: "Target system/email" },
-                    { col: "attacker", desc: "Attacker IP/email" },
-                    { col: "asset", desc: "Affected asset name" },
-                    { col: "app", desc: "Application name" },
-                    { col: "description", desc: "Event description" },
+                    { col: "Incident Name", desc: "Alert title / threat name" },
+                    { col: "Severity", desc: "critical, high, medium, low" },
+                    { col: "Status", desc: "Open, In Progress, Resolved, Closed" },
+                    { col: "Case Description", desc: "Detailed incident description" },
+                    { col: "Asset Names / Host", desc: "Affected endpoints or hosts" },
+                    { col: "MITRE ATT&CK", desc: "Tactic & technique mapping" },
+                    { col: "Assignee", desc: "Assigned analyst or responder" },
+                    { col: "Total Risk / Score", desc: "Risk score (numeric)" },
                   ].map(({ col, desc }) => (
                     <div key={col} className="text-[10px]">
                       <code className="bg-muted px-1 rounded text-primary">{col}</code>
@@ -238,10 +248,12 @@ export default function ImportPage() {
               <div className="p-3 rounded-md bg-muted/30">
                 <div className="flex items-center gap-2 mb-2">
                   <FileText className="w-4 h-4 text-orange-500" />
-                  <span className="text-xs font-medium">PDF Format</span>
+                  <span className="text-xs font-medium">Supported File Types</span>
                 </div>
                 <p className="text-[10px] text-muted-foreground">
-                  PDF text will be extracted and parsed. For best results, use structured tables with comma, tab, or pipe-separated values. Each line becomes one security event.
+                  <strong>Excel (.xlsx/.xls)</strong> — Tabular and vertical incident report formats with smart header detection.
+                  <br /><strong>CSV / TSV</strong> — Comma or tab-separated exports from any security platform.
+                  <br /><strong>PDF</strong> — Text extraction with line-by-line parsing.
                 </p>
               </div>
 
@@ -249,7 +261,7 @@ export default function ImportPage() {
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-primary shrink-0 mt-0.5" />
                   <p className="text-[10px] text-muted-foreground">
-                    Imported events will be associated with {currentTenant?.name || "the current tenant"} and will appear in the dashboard analytics, charts, and report generation.
+                    Imported data creates both <strong>incidents</strong> and <strong>security events</strong> for {currentTenant?.name || "the current tenant"}, enriching dashboards, analytics, and reports.
                   </p>
                 </div>
               </div>

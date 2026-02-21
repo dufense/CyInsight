@@ -21,7 +21,7 @@ import {
 import OpenAI from "openai";
 import { z } from "zod";
 import multer from "multer";
-import * as XLSX from "xlsx";
+import XLSX from "xlsx";
 import * as fs from "fs";
 import * as path from "path";
 import bcrypt from "bcryptjs";
@@ -1677,21 +1677,107 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       let rows: any[] = [];
 
-      if (ext === ".csv") {
-        const workbook = XLSX.readFile(savedPath);
+      const parseSpreadsheet = (filePath: string): any[] => {
+        const workbook = XLSX.readFile(filePath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+        if (!rawData || rawData.length === 0) return [];
+
+        let headerRowIdx = 0;
+        for (let i = 0; i < Math.min(5, rawData.length); i++) {
+          const row = rawData[i];
+          if (!row || row.length <= 2) continue;
+          const cellCount = row.filter((c: any) => c !== null && c !== undefined && String(c).trim() !== "").length;
+          if (cellCount >= 3) {
+            headerRowIdx = i;
+            break;
+          }
+        }
+
+        const headers = rawData[headerRowIdx].map((h: any) => String(h || "").trim());
+        const dataRows: any[] = [];
+        for (let i = headerRowIdx + 1; i < rawData.length; i++) {
+          const row = rawData[i];
+          if (!row || row.length === 0) continue;
+          const obj: any = {};
+          headers.forEach((h: string, idx: number) => {
+            if (h && row[idx] !== undefined && row[idx] !== null) {
+              obj[h] = row[idx];
+            }
+          });
+          if (Object.keys(obj).length > 0) dataRows.push(obj);
+        }
+        return dataRows;
+      }
+
+      const cleanStr = (s: any): string => String(s || "").replace(/\u00A0/g, " ").trim();
+
+      const isVerticalFormat = (filePath: string): boolean => {
+        const workbook = XLSX.readFile(filePath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+        if (!rawData || rawData.length < 3) return false;
+        const firstCell = cleanStr(rawData[0]?.[0]).toLowerCase();
+        return firstCell.includes("incident details") || firstCell.includes("severity");
+      }
+
+      const parseVerticalFormat = (filePath: string): any[] => {
+        const workbook = XLSX.readFile(filePath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+        const incidents: any[] = [];
+        let current: any = {};
+
+        for (const row of rawData) {
+          const key = cleanStr(row?.[0]).toLowerCase();
+          const value = row?.[1] !== undefined ? cleanStr(row[1]) : "";
+
+          if (key.includes("incident details") && Object.keys(current).length > 1) {
+            incidents.push(current);
+            current = {};
+            continue;
+          }
+          if (key.includes("severity")) current.severity = value;
+          else if (key.includes("alert id")) current.alertId = value;
+          else if (key.includes("incident name")) current.title = value;
+          else if (key.includes("description")) {
+            current.description = (current.description ? current.description + "\n" : "") + value;
+          }
+          else if (key.includes("host name")) current.hostName = value;
+          else if (key.includes("host ip") || key.includes("targeted host ip")) current.hostIp = value;
+          else if (key.includes("operating system")) current.os = value;
+          else if (key.includes("user")) current.user = value;
+          else if (key.includes("scan group")) current.scanGroup = value;
+          else if (key.includes("recommend")) current.recommendation = value;
+          else if (key.includes("action required")) current.action = value;
+          else if (key.includes("process path")) current.processPath = value;
+          else if (key.includes("command line") || key.includes("cmdline")) current.commandLine = value;
+          else if (key.includes("virus total")) current.virusTotal = value;
+          else if (key.includes("auto remediation")) current.autoRemediation = value;
+          else if (!key && value && current.description) {
+            current.description += "\n" + value;
+          }
+        }
+        if (Object.keys(current).length > 1) incidents.push(current);
+        return incidents;
+      }
+
+      if (ext === ".csv" || ext === ".tsv") {
+        const workbook = XLSX.readFile(savedPath, { type: "file" });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         rows = XLSX.utils.sheet_to_json(sheet);
       } else if (ext === ".xlsx" || ext === ".xls") {
-        const workbook = XLSX.readFile(savedPath);
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        rows = XLSX.utils.sheet_to_json(sheet);
+        if (isVerticalFormat(savedPath)) {
+          rows = parseVerticalFormat(savedPath);
+        } else {
+          rows = parseSpreadsheet(savedPath);
+        }
       } else if (ext === ".pdf") {
         const pdfParseModule = await import("pdf-parse");
         const pdfParse = (pdfParseModule as any).default || pdfParseModule;
         const buffer = fs.readFileSync(savedPath);
         const pdfData = await pdfParse(buffer);
         const lines = pdfData.text.split("\n").filter((l: string) => l.trim());
-
         rows = lines.map((line: string) => {
           const parts = line.split(/[,\t|]/).map((p: string) => p.trim());
           return {
@@ -1704,50 +1790,210 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           };
         });
       } else {
-        return res.status(400).json({ message: "Unsupported file format. Use .csv, .xlsx, .xls, or .pdf" });
+        return res.status(400).json({ message: "Unsupported file format. Use .csv, .xlsx, .xls, .tsv, or .pdf" });
       }
 
-      const validEventTypes = ["email", "endpoint", "vulnerability"];
       const validSeverities = ["critical", "high", "medium", "low", "info"];
+      const validEventTypes = ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"];
+      const validIncidentStatuses = ["open", "investigating", "resolved", "closed"];
 
-      const events = rows.map((row: any) => {
-        const eventType = validEventTypes.includes(String(row.eventType || row.event_type || "").toLowerCase())
-          ? String(row.eventType || row.event_type || "endpoint").toLowerCase()
-          : "endpoint";
-        const severity = validSeverities.includes(String(row.severity || "").toLowerCase())
-          ? String(row.severity || "medium").toLowerCase()
-          : "medium";
+      const getField = (row: any, ...keys: string[]): string => {
+        for (const k of keys) {
+          if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+            return String(row[k]).trim();
+          }
+        }
+        return "";
+      }
 
-        return {
+      const parseSeverity = (val: string): "critical" | "high" | "medium" | "low" | "info" => {
+        const v = val.toLowerCase().trim();
+        if (validSeverities.includes(v)) return v as any;
+        return "medium";
+      }
+
+      const parseIncidentStatus = (val: string): "open" | "investigating" | "resolved" | "closed" => {
+        const v = val.toLowerCase().trim();
+        if (v.includes("closed") || v.includes("resolved")) return "resolved";
+        if (v.includes("progress") || v.includes("investigating")) return "investigating";
+        if (v.includes("open") || v.includes("new")) return "open";
+        return "open";
+      }
+
+      const detectEventType = (row: any): "email" | "endpoint" | "vulnerability" | "casb" | "waf" | "dlp" | "sse" | "network" | "identity" | "cloud" => {
+        const explicit = getField(row, "eventType", "event_type", "Event Type").toLowerCase();
+        if (validEventTypes.includes(explicit)) return explicit as any;
+
+        const desc = (getField(row, "Case Description", "description", "Description", "Incident Name", "title") + " " +
+                      getField(row, "MITRE ATT&CK Tactic", "mitreTactic") + " " +
+                      getField(row, "MITRE ATT&CK Technique", "mitreTechnique")).toLowerCase();
+        if (desc.includes("email") || desc.includes("phish") || desc.includes("spam") || desc.includes("mimecast")) return "email";
+        if (desc.includes("cloud") || desc.includes("aws") || desc.includes("azure") || desc.includes("s3")) return "cloud";
+        if (desc.includes("waf") || desc.includes("web shell") || desc.includes("web application")) return "waf";
+        if (desc.includes("identity") || desc.includes("valid accounts") || desc.includes("credential") || desc.includes("login") || desc.includes("console")) return "identity";
+        if (desc.includes("network") || desc.includes("ssh") || desc.includes("tunnel") || desc.includes("protocol") || desc.includes("lateral")) return "network";
+        if (desc.includes("vulnerability") || desc.includes("cve-") || desc.includes("log4")) return "vulnerability";
+        if (desc.includes("dlp") || desc.includes("data loss") || desc.includes("upload")) return "dlp";
+        return "endpoint";
+      }
+
+      const isValidDate = (d: Date): boolean => {
+        if (isNaN(d.getTime())) return false;
+        const year = d.getFullYear();
+        return year >= 2000 && year <= 2100;
+      };
+
+      const parseExcelDate = (val: any): Date => {
+        if (!val) return new Date();
+        if (typeof val === "number") {
+          if (val > 0 && val < 200000) {
+            const d = new Date((val - 25569) * 86400000);
+            if (isValidDate(d)) return d;
+          }
+          return new Date();
+        }
+        const s = String(val).trim();
+        const parsed = new Date(s);
+        if (isValidDate(parsed)) return parsed;
+        const match = s.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})\s+([\d:]+)/i);
+        if (match) {
+          const d = new Date(`${match[1]} ${match[2]}, ${match[3]} ${match[4]}`);
+          if (isValidDate(d)) return d;
+        }
+        return new Date();
+      }
+
+      const extractAssets = (row: any): string => {
+        const parts: string[] = [];
+        const assetNames = getField(row, "Asset Names", "Asset IDs", "Hosts Windows", "Hosts Linux", "hostName", "Host Name");
+        if (assetNames) {
+          const cleaned = assetNames.replace(/[\[\]']/g, "").split(",").map((s: string) => s.trim()).filter(Boolean).slice(0, 10);
+          parts.push(...cleaned);
+        }
+        const hostRisk = getField(row, "Host/Risk");
+        if (hostRisk) {
+          const hostMatch = hostRisk.match(/^([^/]+)/);
+          if (hostMatch) parts.push(hostMatch[1]);
+        }
+        return parts.join(", ").substring(0, 500) || "";
+      }
+
+      const extractMitre = (row: any, field: string): string => {
+        const val = getField(row, field);
+        if (!val) return "";
+        return val.replace(/[\[\]']/g, "").split(",").map((s: string) => s.trim()).filter(Boolean).join(", ").substring(0, 200);
+      }
+
+      let incidentsCreated = 0;
+      let eventsCreated = 0;
+
+      const incidentBatch: any[] = [];
+      const eventBatch: any[] = [];
+
+      for (const row of rows) {
+        const title = getField(row, "Incident Name", "title", "Case Description", "threat", "Threat")
+                      .substring(0, 500);
+        if (!title) continue;
+
+        const severity = parseSeverity(getField(row, "Severity", "severity"));
+        const description = getField(row, "Case Description", "description", "Description", "details")
+                            .substring(0, 2000) || title;
+        const statusRaw = getField(row, "Status", "status");
+        const status = parseIncidentStatus(statusRaw);
+        const assets = extractAssets(row);
+        const assignee = getField(row, "Assignee", "assignedTo", "assigned_to", "user", "User");
+        const recommendation = getField(row, "Recommendation", "recommendation", "Recommended Response", "action", "Action Required");
+        const source = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource") || "Import";
+        const category = getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "category") || null;
+        const dateRaw = getField(row, "Last Updated", "First Seen", "Last Seen", "occurredAt", "occurred_at", "date", "timestamp");
+        const occurredAt = parseExcelDate(dateRaw);
+
+        incidentBatch.push({
           tenantId: tid,
-          eventType: eventType as "email" | "endpoint" | "vulnerability",
-          severity: severity as "critical" | "high" | "medium" | "low" | "info",
-          threat: String(row.threat || row.Threat || row.threat_name || "").substring(0, 500) || null,
-          target: String(row.target || row.Target || row.recipient || row.system || "").substring(0, 500) || null,
-          attacker: String(row.attacker || row.Attacker || row.sender || row.source_ip || "").substring(0, 500) || null,
-          asset: String(row.asset || row.Asset || row.hostname || "").substring(0, 500) || null,
-          app: String(row.app || row.App || row.application || "").substring(0, 255) || null,
-          description: String(row.description || row.Description || row.details || "").substring(0, 2000) || null,
-          occurredAt: row.occurredAt || row.occurred_at || row.date || row.timestamp ? new Date(row.occurredAt || row.occurred_at || row.date || row.timestamp) : new Date(),
-        };
-      }).filter((e: any) => e.threat || e.target || e.description);
+          title,
+          description,
+          severity,
+          status,
+          source: source.substring(0, 100),
+          category: category ? category.substring(0, 100) : null,
+          affectedAssets: assets || null,
+          recommendation: recommendation ? recommendation.substring(0, 2000) : null,
+          assignedTo: assignee ? assignee.substring(0, 255) : null,
+          resolvedAt: status === "resolved" ? occurredAt : null,
+        });
 
-      let imported = 0;
-      if (events.length > 0) {
-        const batchSize = 100;
-        for (let i = 0; i < events.length; i += batchSize) {
-          const batch = events.slice(i, i + batchSize);
+        const eventType = detectEventType(row);
+        const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
+        const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
+        const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score");
+        const riskScore = riskScoreRaw ? parseInt(riskScoreRaw) || null : null;
+        const logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Tags");
+        const hostIp = getField(row, "Host Ip", "hostIp", "Targeted Host IP");
+        const comments = getField(row, "Comments", "Resolution Reason");
+
+        eventBatch.push({
+          tenantId: tid,
+          eventType,
+          severity,
+          threat: title.substring(0, 500),
+          target: (assets || hostIp).substring(0, 500) || null,
+          attacker: null,
+          asset: assets ? assets.split(",")[0]?.trim().substring(0, 500) : null,
+          app: getField(row, "app", "App", "Business Application Names").substring(0, 255) || null,
+          description: (description + (comments ? "\n" + comments : "")).substring(0, 2000),
+          threatVector: null,
+          mitreTactic: mitreTactic.substring(0, 200) || null,
+          mitreTechnique: mitreTechnique.substring(0, 200) || null,
+          action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required").substring(0, 100) || null,
+          sourceType: getField(row, "Asset Types", "sourceType").substring(0, 100) || null,
+          logSource: logSource.substring(0, 200) || null,
+          sender: null,
+          recipient: null,
+          protocol: getField(row, "protocol").substring(0, 50) || null,
+          country: getField(row, "Asset Regions", "country").substring(0, 100) || null,
+          riskScore,
+          rawPayload: null,
+          occurredAt,
+        });
+      }
+
+      const batchSize = 100;
+      let skippedRows = 0;
+      for (let i = 0; i < incidentBatch.length; i += batchSize) {
+        const batch = incidentBatch.slice(i, i + batchSize);
+        for (const inc of batch) {
+          try {
+            await storage.createIncident(inc);
+            incidentsCreated++;
+          } catch (e) {
+            skippedRows++;
+          }
+        }
+      }
+      for (let i = 0; i < eventBatch.length; i += batchSize) {
+        const batch = eventBatch.slice(i, i + batchSize);
+        try {
           await storage.createSecurityEvents(batch);
-          imported += batch.length;
+          eventsCreated += batch.length;
+        } catch (e) {
+          for (const evt of batch) {
+            try {
+              await storage.createSecurityEvents([evt]);
+              eventsCreated++;
+            } catch (e2) {
+              // skip invalid event
+            }
+          }
         }
       }
 
       res.json({
-        message: `Successfully imported ${imported} security events`,
-        imported,
+        message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events`,
+        incidentsCreated,
+        eventsCreated,
+        imported: incidentsCreated + eventsCreated,
         total: rows.length,
-        skipped: rows.length - imported,
-        fileSaved: savedPath,
+        skipped: rows.length - incidentsCreated,
       });
     } catch (error: any) {
       console.error("Import error:", error);
