@@ -26,6 +26,7 @@ import ImportPage from "@/pages/import";
 import KnowledgeBasePage from "@/pages/knowledge-base";
 import AdminPortalPage from "@/pages/admin-portal";
 import SecurityIntegrationsPage from "@/pages/security-integrations";
+import AssetDetailPage from "@/pages/asset-detail";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -50,6 +51,7 @@ function AuthenticatedRouter() {
       <Route path="/knowledge-base" component={KnowledgeBasePage} />
       <Route path="/import" component={ImportPage} />
       <Route path="/integrations" component={SecurityIntegrationsPage} />
+      <Route path="/assets/:tenantId/:assetName" component={AssetDetailPage} />
       <Route component={NotFound} />
     </Switch>
   );

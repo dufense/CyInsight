@@ -2590,6 +2590,36 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
+  function excelSerialToDate(serial: number): Date | null {
+    if (!serial || serial < 1) return null;
+    const epoch = new Date(1899, 11, 30);
+    return new Date(epoch.getTime() + serial * 86400000);
+  }
+
+  function extractDatesFromPayload(raw: any): { firstSeen: Date | null; lastSeen: Date | null } {
+    if (!raw) return { firstSeen: null, lastSeen: null };
+    const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+    let firstSeen: Date | null = null;
+    let lastSeen: Date | null = null;
+    if (payload["First Seen"]) {
+      const v = Number(payload["First Seen"]);
+      if (!isNaN(v) && v > 40000) firstSeen = excelSerialToDate(v);
+      else {
+        const d = new Date(payload["First Seen"]);
+        if (!isNaN(d.getTime())) firstSeen = d;
+      }
+    }
+    if (payload["Last Seen"]) {
+      const v = Number(payload["Last Seen"]);
+      if (!isNaN(v) && v > 40000) lastSeen = excelSerialToDate(v);
+      else {
+        const d = new Date(payload["Last Seen"]);
+        if (!isNaN(d.getTime())) lastSeen = d;
+      }
+    }
+    return { firstSeen, lastSeen };
+  }
+
   app.get("/api/assets/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
       const tenantId = parseInt(req.params.tenantId);
@@ -2616,14 +2646,16 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         logSources: Set<string>; ips: Set<string>;
       }> = {};
 
-      const addAsset = (name: string, severity: string, eventType: string, date: Date, riskScore: number | null, mitreTactic: string | null, logSource: string | null, ip: string | null, isIncident: boolean) => {
+      const addAsset = (name: string, severity: string, eventType: string, date: Date, riskScore: number | null, mitreTactic: string | null, logSource: string | null, ip: string | null, isIncident: boolean, rawFirstSeen?: Date | null, rawLastSeen?: Date | null) => {
         const key = name.toLowerCase().trim();
         if (!key || key.length < 2) return;
+        const effectiveFirstSeen = rawFirstSeen || date;
+        const effectiveLastSeen = rawLastSeen || date;
         if (!assetMap[key]) {
           assetMap[key] = {
             name, eventCount: 0, incidentCount: 0,
             criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
-            eventTypes: new Set(), firstSeen: date, lastSeen: date,
+            eventTypes: new Set(), firstSeen: effectiveFirstSeen, lastSeen: effectiveLastSeen,
             riskScore: 0, mitreTactics: new Set(),
             logSources: new Set(), ips: new Set(),
           };
@@ -2635,8 +2667,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         else if (severity === "medium") a.mediumCount++;
         else a.lowCount++;
         a.eventTypes.add(eventType);
-        if (date < a.firstSeen) a.firstSeen = date;
-        if (date > a.lastSeen) a.lastSeen = date;
+        if (effectiveFirstSeen < a.firstSeen) a.firstSeen = effectiveFirstSeen;
+        if (effectiveLastSeen > a.lastSeen) a.lastSeen = effectiveLastSeen;
         if (riskScore && riskScore > a.riskScore) a.riskScore = riskScore;
         if (mitreTactic) a.mitreTactics.add(mitreTactic.split(",")[0]?.trim());
         if (logSource) a.logSources.add(logSource.split(",")[0]?.trim());
@@ -2644,11 +2676,12 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       };
 
       for (const evt of events) {
+        const { firstSeen: rawFirst, lastSeen: rawLast } = extractDatesFromPayload(evt.rawPayload);
         if (evt.asset) {
-          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false));
+          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast));
         }
         if (evt.target && evt.target !== evt.asset) {
-          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false);
+          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast);
         }
       }
 
@@ -2700,6 +2733,230 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       res.json({ assets: assets.slice(0, 200), summary });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch assets" });
+    }
+  });
+
+  app.get("/api/assets/:tenantId/detail/:assetName", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      const assetName = decodeURIComponent(req.params.assetName);
+      await assertTenantAccess(req, tenantId);
+
+      const tenant = await storage.getTenant(tenantId);
+      let events, incidentsList;
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const tenantIds = [tenantId, ...children.map(c => c.id)];
+        events = await storage.getSecurityEventsForTenants(tenantIds);
+        incidentsList = await storage.getIncidentsForTenants(tenantIds);
+      } else {
+        events = await storage.getSecurityEvents(tenantId);
+        incidentsList = await storage.getIncidents(tenantId);
+      }
+
+      const assetKey = assetName.toLowerCase().trim();
+      const matchedEvents = events.filter(e =>
+        (e.asset && e.asset.toLowerCase().includes(assetKey)) ||
+        (e.target && e.target.toLowerCase().includes(assetKey))
+      );
+      const matchedIncidents = incidentsList.filter(i =>
+        i.affectedAssets && i.affectedAssets.toLowerCase().includes(assetKey)
+      );
+
+      let firstSeen: Date | null = null;
+      let lastSeen: Date | null = null;
+      const ips = new Set<string>();
+      const macs = new Set<string>();
+      const osSet = new Set<string>();
+      const loggedInUsers = new Set<string>();
+      const softwareSet = new Set<string>();
+      const hardwareSet = new Set<string>();
+      const protocols = new Set<string>();
+      const countries = new Set<string>();
+      const logSources = new Set<string>();
+      const mitreTactics = new Set<string>();
+      const mitreTechniques = new Set<string>();
+      const eventTypes = new Set<string>();
+      const actions = new Set<string>();
+      const detectionSources = new Set<string>();
+      let maxRiskScore = 0;
+      let totalRiskScore = 0;
+      let riskCount = 0;
+      let criticalCount = 0, highCount = 0, mediumCount = 0, lowCount = 0;
+      const severityTimeline: { date: string; critical: number; high: number; medium: number; low: number }[] = [];
+      const severityByDate: Record<string, { critical: number; high: number; medium: number; low: number }> = {};
+
+      const securityControls = new Set<string>();
+      const vulnerabilities: any[] = [];
+      const iocIndicators: any[] = [];
+
+      for (const evt of matchedEvents) {
+        const { firstSeen: rawFirst, lastSeen: rawLast } = extractDatesFromPayload(evt.rawPayload);
+        const evtFirst = rawFirst || evt.occurredAt;
+        const evtLast = rawLast || evt.occurredAt;
+        if (!firstSeen || evtFirst < firstSeen) firstSeen = evtFirst;
+        if (!lastSeen || evtLast > lastSeen) lastSeen = evtLast;
+
+        if (evt.target) ips.add(evt.target);
+        if (evt.protocol) protocols.add(evt.protocol);
+        if (evt.country) countries.add(evt.country);
+        if (evt.logSource) evt.logSource.split(",").forEach(s => logSources.add(s.trim()));
+        if (evt.mitreTactic) evt.mitreTactic.split(",").forEach(t => mitreTactics.add(t.trim()));
+        if (evt.mitreTechnique) evt.mitreTechnique.split(",").forEach(t => mitreTechniques.add(t.trim()));
+        if (evt.eventType) eventTypes.add(evt.eventType);
+        if (evt.action) actions.add(evt.action);
+        if (evt.sourceType) detectionSources.add(evt.sourceType);
+        if (evt.riskScore) {
+          if (evt.riskScore > maxRiskScore) maxRiskScore = evt.riskScore;
+          totalRiskScore += evt.riskScore;
+          riskCount++;
+        }
+        if (evt.severity === "critical") criticalCount++;
+        else if (evt.severity === "high") highCount++;
+        else if (evt.severity === "medium") mediumCount++;
+        else lowCount++;
+
+        const dateKey = (rawFirst || evt.occurredAt).toISOString().split("T")[0];
+        if (!severityByDate[dateKey]) severityByDate[dateKey] = { critical: 0, high: 0, medium: 0, low: 0 };
+        severityByDate[dateKey][evt.severity as keyof typeof severityByDate[string]]++;
+
+        const raw = evt.rawPayload as any;
+        if (raw) {
+          const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+          if (payload["Host/Risk"]) {
+            const parts = payload["Host/Risk"].split("/");
+            if (parts.length > 0) hardwareSet.add(parts[0].trim());
+          }
+          if (payload["Network/Risk"]) {
+            const net = payload["Network/Risk"].split("/")[0]?.trim();
+            if (net) ips.add(net);
+          }
+          if (payload["File/Risk"]) softwareSet.add(payload["File/Risk"].split("/")[0]?.trim());
+          if (payload["Auto-Remediation"] && payload["Auto-Remediation"] !== "No Auto-Remediation") {
+            securityControls.add(payload["Auto-Remediation"]);
+          }
+          if (payload["Last EPS Auto-Remediation Action"]) {
+            securityControls.add(`EPS: ${payload["Last EPS Auto-Remediation Action"]}`);
+          }
+          if (payload["Scan Group Name"]) securityControls.add(`Scan Group: ${payload["Scan Group Name"]}`);
+          if (payload["Total Risk"]) {
+            const tr = parseInt(payload["Total Risk"]);
+            if (!isNaN(tr) && tr > maxRiskScore) maxRiskScore = tr;
+          }
+          if (payload["MAC Address"]) macs.add(payload["MAC Address"]);
+          if (payload["OS"] || payload["Operating System"]) osSet.add(payload["OS"] || payload["Operating System"]);
+          if (payload["User"] || payload["Username"] || payload["Logged In User"]) {
+            loggedInUsers.add(payload["User"] || payload["Username"] || payload["Logged In User"]);
+          }
+          if (payload["Incident Name"] && payload["Incident Name"].toLowerCase().includes("vulnerab")) {
+            vulnerabilities.push({
+              name: payload["Incident Name"],
+              severity: evt.severity,
+              status: payload["Status"] || "Unknown",
+              riskScore: payload["Total Risk"] || evt.riskScore,
+            });
+          }
+        }
+
+        if (evt.eventType === "vulnerability") {
+          vulnerabilities.push({
+            name: evt.threat || evt.description?.substring(0, 100) || "Unknown Vulnerability",
+            severity: evt.severity,
+            status: evt.action || "Detected",
+            riskScore: evt.riskScore,
+          });
+        }
+
+        if (evt.sender) iocIndicators.push({ type: "email", value: evt.sender, source: evt.eventType });
+        if (evt.attacker) iocIndicators.push({ type: "ip", value: evt.attacker, source: evt.eventType });
+      }
+
+      for (const inc of matchedIncidents) {
+        if (!firstSeen || inc.createdAt < firstSeen) firstSeen = inc.createdAt;
+        if (!lastSeen || inc.createdAt > lastSeen) lastSeen = inc.createdAt;
+        if (inc.sourceIp) ips.add(inc.sourceIp);
+        if (inc.destinationIp) ips.add(inc.destinationIp);
+        if (inc.detectionSource) detectionSources.add(inc.detectionSource);
+        if (inc.mitreTactic) mitreTactics.add(inc.mitreTactic);
+        if (inc.mitreTechnique) mitreTechniques.add(inc.mitreTechnique);
+        if (inc.iocData) {
+          const iocs = Array.isArray(inc.iocData) ? inc.iocData : [];
+          for (const ioc of iocs) {
+            iocIndicators.push({ type: ioc.type || "unknown", value: ioc.value || ioc.indicator, reputation: ioc.reputation, country: ioc.country, source: "incident" });
+          }
+        }
+      }
+
+      for (const [date, counts] of Object.entries(severityByDate)) {
+        severityTimeline.push({ date, ...counts });
+      }
+      severityTimeline.sort((a, b) => a.date.localeCompare(b.date));
+
+      const avgRiskScore = riskCount > 0 ? Math.round(totalRiskScore / riskCount) : 0;
+
+      const detail = {
+        name: assetName,
+        firstSeen,
+        lastSeen,
+        totalEvents: matchedEvents.length,
+        totalIncidents: matchedIncidents.length,
+        riskScore: maxRiskScore,
+        avgRiskScore,
+        riskLevel: criticalCount > 0 ? "critical" : highCount > 2 ? "high" : mediumCount > 5 ? "medium" : "low",
+        severityCounts: { critical: criticalCount, high: highCount, medium: mediumCount, low: lowCount },
+        network: {
+          ips: Array.from(ips).slice(0, 50),
+          macs: Array.from(macs).slice(0, 20),
+          protocols: Array.from(protocols).slice(0, 20),
+          countries: Array.from(countries).slice(0, 20),
+        },
+        system: {
+          os: Array.from(osSet).slice(0, 10),
+          loggedInUsers: Array.from(loggedInUsers).slice(0, 30),
+          software: Array.from(softwareSet).slice(0, 50),
+          hardware: Array.from(hardwareSet).slice(0, 30),
+        },
+        security: {
+          logSources: Array.from(logSources).slice(0, 30),
+          mitreTactics: Array.from(mitreTactics).slice(0, 20),
+          mitreTechniques: Array.from(mitreTechniques).slice(0, 30),
+          eventTypes: Array.from(eventTypes),
+          actions: Array.from(actions).slice(0, 20),
+          detectionSources: Array.from(detectionSources).slice(0, 20),
+          securityControls: Array.from(securityControls).slice(0, 30),
+        },
+        vulnerabilities: vulnerabilities.slice(0, 50),
+        iocIndicators: iocIndicators.slice(0, 50),
+        severityTimeline,
+        recentEvents: matchedEvents.slice(0, 30).map(e => ({
+          id: e.id,
+          eventType: e.eventType,
+          severity: e.severity,
+          threat: e.threat,
+          description: e.description?.substring(0, 200),
+          occurredAt: e.occurredAt,
+          mitreTactic: e.mitreTactic,
+          action: e.action,
+          riskScore: e.riskScore,
+        })),
+        recentIncidents: matchedIncidents.slice(0, 20).map(i => ({
+          id: i.id,
+          title: i.title,
+          severity: i.severity,
+          status: i.status,
+          category: i.category,
+          mitreTactic: i.mitreTactic,
+          mitreTechnique: i.mitreTechnique,
+          killChainPhase: i.killChainPhase,
+          confidenceScore: i.confidenceScore,
+          classification: i.classification,
+          createdAt: i.createdAt,
+        })),
+      };
+
+      res.json(detail);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch asset details" });
     }
   });
 

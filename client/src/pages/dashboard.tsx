@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { useTenant } from "@/lib/tenant-context";
 import {
   AlertTriangle, Shield, Ticket, TrendingUp, TrendingDown, Activity, ArrowUpRight,
@@ -425,6 +426,7 @@ function FlexChart({
 }
 
 export default function DashboardPage() {
+  const [, navigate] = useLocation();
   const { currentTenant } = useTenant();
   const { data: stats, isLoading } = useQuery<any>({
     queryKey: ["/api/dashboard", currentTenant?.id],
@@ -1135,8 +1137,8 @@ export default function DashboardPage() {
                       </TableHeader>
                       <TableBody>
                         {(assetsData?.assets || []).slice(0, 20).map((asset: any, idx: number) => (
-                          <TableRow key={idx} data-testid={`asset-row-${idx}`}>
-                            <TableCell className="text-[11px] font-medium">{asset.name}</TableCell>
+                          <TableRow key={idx} data-testid={`asset-row-${idx}`} className="cursor-pointer hover:bg-muted/50 transition-colors" onClick={() => navigate(`/assets/${currentTenant?.id}/${encodeURIComponent(asset.name)}`)}>
+                            <TableCell className="text-[11px] font-medium text-primary hover:underline">{asset.name}</TableCell>
                             <TableCell className="text-[11px] font-mono">{asset.eventCount}</TableCell>
                             <TableCell className="text-[11px] font-mono">{asset.incidentCount}</TableCell>
                             <TableCell>
