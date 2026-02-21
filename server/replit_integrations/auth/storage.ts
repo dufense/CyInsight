@@ -19,21 +19,23 @@ class AuthStorage implements IAuthStorage {
     if (userData.email) {
       const [existingByEmail] = await db.select().from(users).where(eq(users.email, userData.email));
       if (existingByEmail && existingByEmail.id !== userData.id) {
+        const { id: _id, ...updateData } = userData;
         const [updated] = await db
           .update(users)
-          .set({ ...userData, updatedAt: new Date() })
+          .set({ ...updateData, updatedAt: new Date() })
           .where(eq(users.id, existingByEmail.id))
           .returning();
         return updated;
       }
     }
+    const { id: _id, ...updateFields } = userData;
     const [user] = await db
       .insert(users)
       .values(userData)
       .onConflictDoUpdate({
         target: users.id,
         set: {
-          ...userData,
+          ...updateFields,
           updatedAt: new Date(),
         },
       })

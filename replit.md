@@ -89,10 +89,11 @@ executive_summary, endpoint, email, vulnerability, compliance, threat_intelligen
 
 ## Multi-Level Tenant Hierarchy
 Tenants table has `type` field (mssp/customer) and `parentId` (nullable, references parent MSSP).
-First user auto-provisions as mss_admin with auto-created MSSP tenant.
+First user auto-provisions as platform_admin with auto-created MSSP tenant.
 Customer tenants can be created via POST /api/tenants by MSS admins.
 
 ## Roles
+- `platform_admin` - Super-admin with full visibility across ALL MSSPs and their customers, can create MSSP tenants
 - `mss_admin` - Full platform access, can manage MSSP and all child customer tenants
 - `mss_analyst` - Operational access to incidents, tickets, projects, reports within MSSP scope
 - `customer` - Dashboard-only view with ticket submission, limited to own tenant

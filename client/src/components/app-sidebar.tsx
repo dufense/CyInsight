@@ -15,6 +15,7 @@ import {
   Briefcase,
   CalendarClock,
   BookOpen,
+  Globe,
 } from "lucide-react";
 import {
   Sidebar,
@@ -41,6 +42,19 @@ import { Badge } from "@/components/ui/badge";
 import { useTenant } from "@/lib/tenant-context";
 import { useAuth } from "@/hooks/use-auth";
 
+const platformAdminNavItems = [
+  { title: "Platform Overview", url: "/platform", icon: Globe },
+  { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  { title: "Incidents", url: "/incidents", icon: AlertTriangle },
+  { title: "Tickets", url: "/tickets", icon: Ticket },
+  { title: "Projects", url: "/projects", icon: FolderKanban },
+  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
+  { title: "Services & SLA", url: "/services", icon: Briefcase },
+  { title: "Shift Roster", url: "/shift-roster", icon: CalendarClock },
+  { title: "Reports", url: "/reports", icon: FileText },
+  { title: "Import Data", url: "/import", icon: Upload },
+];
+
 const mssNavItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   { title: "Incidents", url: "/incidents", icon: AlertTriangle },
@@ -61,11 +75,11 @@ const customerNavItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
-  const { tenants, hierarchy, currentTenant, setCurrentTenant, userRole } = useTenant();
+  const { tenants, hierarchy, currentTenant, setCurrentTenant, userRole, isPlatformAdmin } = useTenant();
   const { user, logout } = useAuth();
 
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
-  const navItems = isMSS ? mssNavItems : customerNavItems;
+  const isMSS = isPlatformAdmin || userRole === "mss_admin" || userRole === "mss_analyst";
+  const navItems = isPlatformAdmin ? platformAdminNavItems : isMSS ? mssNavItems : customerNavItems;
 
   const currentTenantType = currentTenant?.type || "customer";
   const isViewingMSSP = currentTenantType === "mssp";

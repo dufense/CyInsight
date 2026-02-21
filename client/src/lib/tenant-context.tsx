@@ -14,6 +14,7 @@ interface TenantContextType {
   isLoading: boolean;
   userRole: string;
   parentMSSP: Tenant | null;
+  isPlatformAdmin: boolean;
 }
 
 const TenantContext = createContext<TenantContextType>({
@@ -24,12 +25,13 @@ const TenantContext = createContext<TenantContextType>({
   isLoading: true,
   userRole: "customer",
   parentMSSP: null,
+  isPlatformAdmin: false,
 });
 
 export function TenantProvider({ children }: { children: ReactNode }) {
   const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
 
-  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null }>({
+  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean }>({
     queryKey: ["/api/user/profile"],
   });
 
@@ -56,7 +58,10 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     }
   }, [tenants, currentTenant, userProfile]);
 
-  const parentMSSP = hierarchy.length > 0 ? hierarchy[0] : null;
+  const isPlatAdmin = userProfile?.isPlatformAdmin || false;
+  const parentMSSP = isPlatAdmin
+    ? (currentTenant ? hierarchy.find(h => h.id === currentTenant.parentId || h.id === currentTenant.id) || hierarchy[0] : hierarchy[0])
+    : (hierarchy.length > 0 ? hierarchy[0] : null);
 
   return (
     <TenantContext.Provider
@@ -68,6 +73,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         isLoading: tenantsLoading,
         userRole: userProfile?.role || "customer",
         parentMSSP,
+        isPlatformAdmin: userProfile?.isPlatformAdmin || false,
       }}
     >
       {children}

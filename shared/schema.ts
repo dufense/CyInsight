@@ -7,7 +7,7 @@ export * from "./models/auth";
 export * from "./models/chat";
 
 export const tenantTypeEnum = pgEnum("tenant_type", ["mssp", "customer"]);
-export const roleEnum = pgEnum("user_role", ["mss_admin", "mss_analyst", "customer"]);
+export const roleEnum = pgEnum("user_role", ["platform_admin", "mss_admin", "mss_analyst", "customer"]);
 export const severityEnum = pgEnum("severity", ["critical", "high", "medium", "low", "info"]);
 export const incidentStatusEnum = pgEnum("incident_status", ["open", "investigating", "contained", "resolved", "closed"]);
 export const ticketStatusEnum = pgEnum("ticket_status", ["open", "in_progress", "waiting", "resolved", "closed"]);

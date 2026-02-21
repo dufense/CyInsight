@@ -22,6 +22,7 @@ import ShiftRosterPage from "@/pages/shift-roster";
 import ReportsPage from "@/pages/reports";
 import ImportPage from "@/pages/import";
 import KnowledgeBasePage from "@/pages/knowledge-base";
+import PlatformOverviewPage from "@/pages/platform-overview";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -36,6 +37,7 @@ function AuthenticatedRouter() {
   return (
     <Switch>
       <Route path="/" component={DashboardPage} />
+      <Route path="/platform" component={PlatformOverviewPage} />
       <Route path="/dashboard" component={DashboardPage} />
       <Route path="/incidents" component={IncidentsPage} />
       <Route path="/tickets" component={TicketsPage} />
