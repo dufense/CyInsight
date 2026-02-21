@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -136,7 +136,7 @@ interface AIInsightsResponse {
 }
 
 export default function IncidentsPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, userRole, isMSS } = useTenant();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<string>("all");
@@ -144,8 +144,6 @@ export default function IncidentsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [insightsData, setInsightsData] = useState<Record<number, AIInsightsResponse>>({});
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   const { data: incidents = [], isLoading } = useQuery<Incident[]>({
     queryKey: ["/api/incidents", currentTenant?.id],
@@ -199,6 +197,20 @@ export default function IncidentsPage() {
     },
     onError: () => {
       toast({ title: "Error", description: "Failed to fetch AI insights.", variant: "destructive" });
+    },
+  });
+
+  const singleEnrichMutation = useMutation({
+    mutationFn: async (incidentId: number) => {
+      const res = await apiRequest("POST", `/api/ai/enrich-incident/${incidentId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/incidents", currentTenant?.id] });
+      toast({ title: "Enriched", description: "Incident enriched with MITRE, Kill Chain, detection source, and IOC data." });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to enrich incident.", variant: "destructive" });
     },
   });
 
@@ -481,14 +493,16 @@ export default function IncidentsPage() {
                 <TableRow>
                   <TableHead className="w-[30px]"></TableHead>
                   <TableHead className="w-[50px]">ID</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead className="w-[100px]">Severity</TableHead>
-                  <TableHead className="w-[120px]">Status</TableHead>
-                  <TableHead className="w-[100px]">Classification</TableHead>
-                  <TableHead className="w-[130px]">Frameworks</TableHead>
-                  <TableHead className="w-[100px]">Source</TableHead>
-                  <TableHead className="w-[180px]">Time</TableHead>
-                  {isMSS && <TableHead className="w-[100px]">Actions</TableHead>}
+                  <TableHead className="w-[90px]">Type</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead className="w-[120px]">Source</TableHead>
+                  <TableHead className="w-[120px]">Destination</TableHead>
+                  <TableHead className="w-[90px]">Severity</TableHead>
+                  <TableHead className="w-[100px]">Status</TableHead>
+                  <TableHead className="w-[90px]">Classification</TableHead>
+                  <TableHead className="w-[110px]">Action Taken</TableHead>
+                  <TableHead className="w-[100px]">Frameworks</TableHead>
+                  {isMSS && <TableHead className="w-[80px]">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -500,9 +514,8 @@ export default function IncidentsPage() {
                   const withinRetention = daysOld <= 90;
 
                   return (
-                    <>
+                    <Fragment key={incident.id}>
                       <TableRow
-                        key={incident.id}
                         data-testid={`row-incident-${incident.id}`}
                         className="cursor-pointer"
                         onClick={() => toggleRow(incident.id)}
@@ -516,7 +529,18 @@ export default function IncidentsPage() {
                         </TableCell>
                         <TableCell className="font-mono text-xs">#{incident.id}</TableCell>
                         <TableCell>
+                          <Badge variant="outline" className="text-[10px]" data-testid={`badge-type-${incident.id}`}>
+                            {incident.incidentType || incident.category || "General"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
                           <span className="text-xs font-medium">{incident.title}</span>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground font-mono" data-testid={`text-source-${incident.id}`}>
+                          {incident.sourceIp || incident.source || "--"}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground font-mono" data-testid={`text-dest-${incident.id}`}>
+                          {incident.destinationIp || "--"}
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className={`text-[10px] ${SEVERITY_STYLES[incident.severity]}`} data-testid={`badge-severity-${incident.id}`}>
@@ -564,6 +588,9 @@ export default function IncidentsPage() {
                             )}
                           </div>
                         </TableCell>
+                        <TableCell className="text-xs text-muted-foreground" data-testid={`text-action-${incident.id}`}>
+                          {incident.actionTaken || "--"}
+                        </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1 flex-wrap">
                             {incident.mitreTactic && (
@@ -590,36 +617,9 @@ export default function IncidentsPage() {
                                 </TooltipContent>
                               </Tooltip>
                             )}
-                            {incident.isTruePositive === true && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Badge variant="outline" className="text-[9px] bg-green-500/10 text-green-700 dark:text-green-400" data-testid={`badge-tp-${incident.id}`}>
-                                    TP
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipContent><p className="text-xs">True Positive</p></TooltipContent>
-                              </Tooltip>
-                            )}
-                            {incident.isTruePositive === false && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Badge variant="outline" className="text-[9px] bg-red-500/10 text-red-700 dark:text-red-400" data-testid={`badge-fp-${incident.id}`}>
-                                    FP
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipContent><p className="text-xs">False Positive</p></TooltipContent>
-                              </Tooltip>
-                            )}
-                            {!incident.mitreTactic && !incident.killChainPhase && incident.isTruePositive == null && (
+                            {!incident.mitreTactic && !incident.killChainPhase && (
                               <span className="text-[10px] text-muted-foreground">--</span>
                             )}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{incident.source || "--"}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground" data-testid={`text-time-${incident.id}`}>
-                          <div className="flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            {formatTimestamp(incident.createdAt)}
                           </div>
                         </TableCell>
                         {isMSS && (
@@ -628,7 +628,7 @@ export default function IncidentsPage() {
                               value={incident.status}
                               onValueChange={(status) => updateMutation.mutate({ id: incident.id, status })}
                             >
-                              <SelectTrigger className="h-7 text-[10px] w-[100px]">
+                              <SelectTrigger className="h-7 text-[10px] w-[80px]">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
@@ -645,7 +645,7 @@ export default function IncidentsPage() {
 
                       {isExpanded && (
                         <TableRow key={`expanded-${incident.id}`} data-testid={`expanded-incident-${incident.id}`}>
-                          <TableCell colSpan={isMSS ? 10 : 9} className="p-0">
+                          <TableCell colSpan={isMSS ? 12 : 11} className="p-0">
                             <div className="p-4 space-y-4 bg-muted/30">
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div className="space-y-3">
@@ -672,10 +672,20 @@ export default function IncidentsPage() {
                                 </div>
                                 <div className="space-y-3">
                                   <div>
-                                    <p className="text-xs font-medium text-muted-foreground mb-1">Source</p>
-                                    <p className="text-sm" data-testid={`text-source-${incident.id}`}>
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Event Source</p>
+                                    <p className="text-sm" data-testid={`text-eventsource-${incident.id}`}>
                                       {incident.source || "--"}
                                     </p>
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <p className="text-xs font-medium text-muted-foreground mb-1">Source IP</p>
+                                      <p className="text-sm font-mono">{incident.sourceIp || "--"}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-medium text-muted-foreground mb-1">Destination IP</p>
+                                      <p className="text-sm font-mono">{incident.destinationIp || "--"}</p>
+                                    </div>
                                   </div>
                                   <div>
                                     <p className="text-xs font-medium text-muted-foreground mb-1">Recommendation</p>
@@ -914,6 +924,73 @@ export default function IncidentsPage() {
                                   </CardContent>
                                 </Card>
 
+                                <Card data-testid={`panel-detection-source-${incident.id}`}>
+                                  <CardHeader className="p-3 pb-2">
+                                    <CardTitle className="text-xs flex items-center gap-1.5">
+                                      <Search className="w-3.5 h-3.5 text-purple-600" />
+                                      Detection Source
+                                    </CardTitle>
+                                  </CardHeader>
+                                  <CardContent className="p-3 pt-0 space-y-2">
+                                    <div className="space-y-1.5">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-muted-foreground">Tool:</span>
+                                        <Badge variant="outline" className="text-[10px] bg-purple-500/10 text-purple-700 dark:text-purple-400" data-testid={`text-detection-source-${incident.id}`}>
+                                          {incident.detectionSource || incident.source || "Unknown"}
+                                        </Badge>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-muted-foreground">Type:</span>
+                                        <span className="text-xs">{incident.incidentType || incident.category || "General"}</span>
+                                      </div>
+                                      {incident.sourceIp && (
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] text-muted-foreground">Source IP:</span>
+                                          <span className="text-xs font-mono">{incident.sourceIp}</span>
+                                        </div>
+                                      )}
+                                      {incident.destinationIp && (
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] text-muted-foreground">Dest IP:</span>
+                                          <span className="text-xs font-mono">{incident.destinationIp}</span>
+                                        </div>
+                                      )}
+                                      {incident.actionTaken && (
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] text-muted-foreground">Action:</span>
+                                          <Badge variant="outline" className="text-[10px]">{incident.actionTaken}</Badge>
+                                        </div>
+                                      )}
+                                    </div>
+                                    {isMSS && (
+                                      <div className="space-y-2 pt-2 border-t" onClick={(e) => e.stopPropagation()}>
+                                        <Input
+                                          className="h-7 text-[10px]"
+                                          placeholder="Detection source tool"
+                                          defaultValue={incident.detectionSource || ""}
+                                          onBlur={(e) => {
+                                            if (e.target.value !== (incident.detectionSource || "")) {
+                                              updateMutation.mutate({ id: incident.id, detectionSource: e.target.value || null });
+                                            }
+                                          }}
+                                          data-testid={`input-detection-source-${incident.id}`}
+                                        />
+                                        <Input
+                                          className="h-7 text-[10px]"
+                                          placeholder="Action taken"
+                                          defaultValue={incident.actionTaken || ""}
+                                          onBlur={(e) => {
+                                            if (e.target.value !== (incident.actionTaken || "")) {
+                                              updateMutation.mutate({ id: incident.id, actionTaken: e.target.value || null });
+                                            }
+                                          }}
+                                          data-testid={`input-action-taken-${incident.id}`}
+                                        />
+                                      </div>
+                                    )}
+                                  </CardContent>
+                                </Card>
+
                                 {incident.iocData && (
                                   <Card data-testid={`panel-ioc-${incident.id}`}>
                                     <CardHeader className="p-3 pb-2">
@@ -946,7 +1023,31 @@ export default function IncidentsPage() {
                                 )}
                               </div>
 
-                              <div className="border-t pt-4">
+                              <div className="border-t pt-4 flex items-center gap-2 flex-wrap">
+                                {isMSS && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      singleEnrichMutation.mutate(incident.id);
+                                    }}
+                                    disabled={singleEnrichMutation.isPending && singleEnrichMutation.variables === incident.id}
+                                    data-testid={`button-ai-enrich-${incident.id}`}
+                                  >
+                                    {singleEnrichMutation.isPending && singleEnrichMutation.variables === incident.id ? (
+                                      <>
+                                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                                        Enriching...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Zap className="w-3.5 h-3.5 mr-1.5" />
+                                        AI Enrich
+                                      </>
+                                    )}
+                                  </Button>
+                                )}
                                 {!insights && (
                                   <Button
                                     size="sm"
@@ -1056,7 +1157,7 @@ export default function IncidentsPage() {
                           </TableCell>
                         </TableRow>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </TableBody>

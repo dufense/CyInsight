@@ -618,7 +618,7 @@ export async function registerRoutes(
       const access = await assertTenantAccess(req, existing.tenantId);
       assertMSSRole(access);
 
-      const { status, mitreTactic, mitreTechniqueId, mitreTechnique, killChainPhase, confidenceScore, isTruePositive, classification, ...rest } = req.body;
+      const { status, mitreTactic, mitreTechniqueId, mitreTechnique, killChainPhase, confidenceScore, isTruePositive, classification, detectionSource, actionTaken, incidentType, sourceIp, destinationIp, ...rest } = req.body;
       const updateData: Record<string, any> = {};
       if (status !== undefined) updateData.status = status;
       if (mitreTactic !== undefined) updateData.mitreTactic = mitreTactic;
@@ -628,6 +628,11 @@ export async function registerRoutes(
       if (confidenceScore !== undefined) updateData.confidenceScore = confidenceScore;
       if (isTruePositive !== undefined) updateData.isTruePositive = isTruePositive;
       if (classification !== undefined) updateData.classification = classification;
+      if (detectionSource !== undefined) updateData.detectionSource = detectionSource;
+      if (actionTaken !== undefined) updateData.actionTaken = actionTaken;
+      if (incidentType !== undefined) updateData.incidentType = incidentType;
+      if (sourceIp !== undefined) updateData.sourceIp = sourceIp;
+      if (destinationIp !== undefined) updateData.destinationIp = destinationIp;
       if (Object.keys(updateData).length === 0) return res.status(400).json({ message: "No valid fields to update" });
 
       const incident = await storage.updateIncident(id, updateData);
@@ -2231,8 +2236,8 @@ Return JSON array matching incident indices. Example: [{"index":0,"mitreTactic":
             temperature: 0.2,
             messages: [{
               role: "system",
-              content: `You are a senior SOC analyst. For each incident, provide MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, and IOC reputation analysis.
-Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"delivery|exploitation|...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`
+              content: `You are a senior SOC analyst. For each incident, provide MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, IOC reputation analysis, detection source tool, incident type, and recommended action taken.
+Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"delivery|exploitation|...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|phishing|brute_force|data_exfiltration|dos|unauthorized_access|insider_threat|vulnerability|misconfiguration|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`
             }, { role: "user", content: summaries }],
             response_format: { type: "json_object" },
           });
@@ -2255,6 +2260,9 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
                 updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
               }
               if (r.iocReputation) updateData.iocData = r.iocReputation;
+              if (r.detectionSource) updateData.detectionSource = r.detectionSource;
+              if (r.incidentType) updateData.incidentType = r.incidentType;
+              if (r.actionTaken) updateData.actionTaken = r.actionTaken;
               if (Object.keys(updateData).length > 0) {
                 try { await storage.updateIncident(batch[idx].id, updateData); enriched++; } catch {}
               }
@@ -2268,6 +2276,54 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
       res.json({ message: `Enriched ${enriched} incidents with MITRE/Kill Chain/IOC data`, enriched });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to enrich incidents" });
+    }
+  });
+
+  app.post("/api/ai/enrich-incident/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const id = parseInt(req.params.id);
+      const incident = await storage.getIncident(id);
+      if (!incident) return res.status(404).json({ message: "Incident not found" });
+      await assertTenantAccess(req, incident.tenantId);
+
+      const summary = `Title: ${incident.title}\nSeverity: ${incident.severity}\nStatus: ${incident.status}\nDescription: ${(incident.description || "").substring(0, 500)}\nSource: ${incident.source || ""}\nAssets: ${incident.affectedAssets || ""}\nCategory: ${incident.category || ""}`;
+
+      const aiRes = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.2,
+        messages: [{
+          role: "system",
+          content: `You are a senior SOC analyst. Enrich this single incident with MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, detection source, incident type, action taken, and IOC reputation.
+Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|phishing|brute_force|data_exfiltration|dos|unauthorized_access|insider_threat|vulnerability|misconfiguration|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}`
+        }, { role: "user", content: summary }],
+        response_format: { type: "json_object" },
+      });
+
+      const content = aiRes.choices[0]?.message?.content;
+      if (!content) return res.status(500).json({ message: "No AI response" });
+
+      const r = JSON.parse(content);
+      const updateData: any = {};
+      if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
+      if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
+      if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
+      if (r.killChainPhase) updateData.killChainPhase = r.killChainPhase;
+      if (r.confidenceScore !== undefined) updateData.confidenceScore = Math.min(100, Math.max(0, r.confidenceScore));
+      if (r.classification) {
+        updateData.classification = r.classification;
+        updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
+      }
+      if (r.iocReputation) updateData.iocData = r.iocReputation;
+      if (r.detectionSource) updateData.detectionSource = r.detectionSource;
+      if (r.incidentType) updateData.incidentType = r.incidentType;
+      if (r.actionTaken) updateData.actionTaken = r.actionTaken;
+
+      const updated = await storage.updateIncident(id, updateData);
+      res.json(updated);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to enrich incident" });
     }
   });
 

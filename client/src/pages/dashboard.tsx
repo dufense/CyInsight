@@ -499,15 +499,15 @@ export default function DashboardPage() {
       <Tabs defaultValue="soc" data-testid="dashboard-tabs">
         <div className="overflow-x-auto">
           <TabsList className="mb-4 w-auto inline-flex">
-            <TabsTrigger value="soc" data-testid="tab-soc" className="text-xs">SOC Overview</TabsTrigger>
+            <TabsTrigger value="soc" data-testid="tab-soc" className="text-xs">Overview</TabsTrigger>
+            <TabsTrigger value="assets" data-testid="tab-assets" className="text-xs">Asset Inventory</TabsTrigger>
+            <TabsTrigger value="vuln" data-testid="tab-vuln" className="text-xs">Vulnerability</TabsTrigger>
             <TabsTrigger value="threats" data-testid="tab-threats" className="text-xs">Threat Intel</TabsTrigger>
             <TabsTrigger value="email" data-testid="tab-email" className="text-xs">Email Security</TabsTrigger>
-            <TabsTrigger value="endpoint" data-testid="tab-endpoint" className="text-xs">Endpoint</TabsTrigger>
-            <TabsTrigger value="cloud" data-testid="tab-cloud" className="text-xs">Cloud & WAF</TabsTrigger>
-            <TabsTrigger value="network" data-testid="tab-network" className="text-xs">Network & Identity</TabsTrigger>
+            <TabsTrigger value="cloud" data-testid="tab-cloud" className="text-xs">Web Security</TabsTrigger>
+            <TabsTrigger value="network" data-testid="tab-network" className="text-xs">Network</TabsTrigger>
+            <TabsTrigger value="endpoint" data-testid="tab-endpoint" className="text-xs">Web App</TabsTrigger>
             <TabsTrigger value="logs" data-testid="tab-logs" className="text-xs">Log Sources</TabsTrigger>
-            <TabsTrigger value="vuln" data-testid="tab-vuln" className="text-xs">Vulnerabilities</TabsTrigger>
-            <TabsTrigger value="assets" data-testid="tab-assets" className="text-xs">Asset Inventory</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis" className="text-xs">Threat Analysis</TabsTrigger>
           </TabsList>
         </div>

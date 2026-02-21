@@ -166,13 +166,11 @@ function ReportViewer({ report }: { report: Report }) {
 }
 
 export default function ReportsPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, isMSS } = useTenant();
   const { toast } = useToast();
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [viewingReport, setViewingReport] = useState<Report | null>(null);
   const [selectedReportType, setSelectedReportType] = useState("executive_summary");
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   const { data: reports = [], isLoading } = useQuery<Report[]>({
     queryKey: ["/api/reports", currentTenant?.id],

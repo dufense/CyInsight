@@ -379,15 +379,13 @@ function SlaDashboard({ services }: { services: Service[] }) {
 }
 
 export default function ServicesPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, isMSS } = useTenant();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("active");
   const [serviceDialogOpen, setServiceDialogOpen] = useState(false);
   const [slaDialogOpen, setSlaDialogOpen] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState<number | null>(null);
   const [expandedServiceId, setExpandedServiceId] = useState<number | null>(null);
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   const { data: services = [], isLoading } = useQuery<Service[]>({
     queryKey: ["/api/services", currentTenant?.id],

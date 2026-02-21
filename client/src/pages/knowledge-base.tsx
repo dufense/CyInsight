@@ -206,7 +206,7 @@ function DocumentCard({ doc, onClick, isMSS, onDelete, onToggleVisibility }: {
 }
 
 export default function KnowledgeBasePage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, isMSS } = useTenant();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");
@@ -220,8 +220,6 @@ export default function KnowledgeBasePage() {
   const [formTags, setFormTags] = useState("");
   const [formCustomerVisible, setFormCustomerVisible] = useState(false);
   const [aiContext, setAiContext] = useState("");
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   const { data: documents = [], isLoading } = useQuery<Document[]>({
     queryKey: ["/api/documents", currentTenant?.id],

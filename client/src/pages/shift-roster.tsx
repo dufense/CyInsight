@@ -448,10 +448,8 @@ function TeamTab({
 }
 
 export default function ShiftRosterPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, isMSS } = useTenant();
   const [activeTab, setActiveTab] = useState("implementation");
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
 
   return (
     <div className="h-full overflow-y-auto">
