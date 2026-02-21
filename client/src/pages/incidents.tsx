@@ -1,5 +1,6 @@
 import { useState, Fragment } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { useTenant } from "@/lib/tenant-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -22,6 +23,7 @@ import {
   Eye,
   CheckCircle2,
   XCircle,
+  X,
   Activity,
   CalendarClock,
   Globe,
@@ -78,27 +80,16 @@ const STATUS_STYLES: Record<string, string> = {
   closed: "bg-muted text-muted-foreground",
 };
 
-const INCIDENT_TYPE_STYLES: Record<string, string> = {
-  "Device Control": "bg-blue-500/10 text-blue-700 dark:text-blue-400",
-  "Malware": "bg-red-500/10 text-red-700 dark:text-red-400",
-  "Fileless Attack": "bg-purple-500/10 text-purple-700 dark:text-purple-400",
-  "Process Monitoring": "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
-  "Unauthorized Access": "bg-orange-500/10 text-orange-700 dark:text-orange-400",
-  "Defense Evasion": "bg-rose-500/10 text-rose-700 dark:text-rose-400",
-  "Deception Alert": "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-  "Auto Response": "bg-green-500/10 text-green-700 dark:text-green-400",
-  "Credential Abuse": "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
-  "Network Reconnaissance": "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400",
-  "Email Threat": "bg-pink-500/10 text-pink-700 dark:text-pink-400",
-  "Web Attack": "bg-red-600/10 text-red-800 dark:text-red-300",
-  "Data Exfiltration": "bg-violet-500/10 text-violet-700 dark:text-violet-400",
-  "Ransomware": "bg-destructive/10 text-destructive",
-  "Endpoint Security": "bg-slate-500/10 text-slate-700 dark:text-slate-400",
-  "Network Security": "bg-teal-500/10 text-teal-700 dark:text-teal-400",
-};
-
-function getIncidentTypeBadgeStyle(type: string): string {
-  return INCIDENT_TYPE_STYLES[type] || "bg-muted text-muted-foreground";
+function getTypeBadgeBySeverity(severity: string, isFalsePositive?: boolean | null): string {
+  if (isFalsePositive === false) return "bg-green-600 text-white dark:bg-green-700";
+  switch (severity) {
+    case "critical": return "bg-red-800 text-white dark:bg-red-900";
+    case "high": return "bg-red-600 text-white dark:bg-red-700";
+    case "medium": return "bg-orange-500 text-white dark:bg-orange-600";
+    case "low": return "bg-blue-500 text-white dark:bg-blue-600";
+    case "info": return "bg-green-500 text-white dark:bg-green-600";
+    default: return "bg-muted text-muted-foreground";
+  }
 }
 
 function formatRelativeTime(dateStr: string | Date): string {
@@ -161,9 +152,13 @@ interface AIInsightsResponse {
 export default function IncidentsPage() {
   const { currentTenant, userRole, isMSS } = useTenant();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [nameFilter, setNameFilter] = useState<string>("all");
+  const [actionFilter, setActionFilter] = useState<string>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [insightsData, setInsightsData] = useState<Record<number, AIInsightsResponse>>({});
@@ -241,8 +236,22 @@ export default function IncidentsPage() {
     const matchesSearch = !search || inc.title.toLowerCase().includes(search.toLowerCase());
     const matchesSeverity = severityFilter === "all" || inc.severity === severityFilter;
     const matchesStatus = statusFilter === "all" || inc.status === statusFilter;
-    return matchesSearch && matchesSeverity && matchesStatus;
+    const matchesType = typeFilter === "all" || (inc.incidentType || inc.category || "General") === typeFilter;
+    const matchesName = nameFilter === "all" || inc.title === nameFilter;
+    const matchesAction = actionFilter === "all" || (inc.actionTaken || "") === actionFilter;
+    return matchesSearch && matchesSeverity && matchesStatus && matchesType && matchesName && matchesAction;
   });
+
+  const activeFilterCount = [typeFilter, nameFilter, actionFilter].filter(f => f !== "all").length;
+
+  const clearAllFilters = () => {
+    setSeverityFilter("all");
+    setStatusFilter("all");
+    setTypeFilter("all");
+    setNameFilter("all");
+    setActionFilter("all");
+    setSearch("");
+  };
 
   const stats = {
     total: incidents.length,
@@ -496,6 +505,46 @@ export default function IncidentsPage() {
         </Select>
       </div>
 
+      {(activeFilterCount > 0 || severityFilter !== "all" || statusFilter !== "all") && (
+        <div className="flex items-center gap-2 flex-wrap" data-testid="active-filters-bar">
+          <span className="text-xs text-muted-foreground">Active filters:</span>
+          {typeFilter !== "all" && (
+            <Badge variant="secondary" className="text-xs gap-1 pr-1" data-testid="filter-chip-type">
+              Type: {typeFilter}
+              <button onClick={() => setTypeFilter("all")} className="ml-1 hover:text-destructive"><X className="w-3 h-3" /></button>
+            </Badge>
+          )}
+          {nameFilter !== "all" && (
+            <Badge variant="secondary" className="text-xs gap-1 pr-1" data-testid="filter-chip-name">
+              Name: {nameFilter.length > 30 ? nameFilter.substring(0, 30) + "..." : nameFilter}
+              <button onClick={() => setNameFilter("all")} className="ml-1 hover:text-destructive"><X className="w-3 h-3" /></button>
+            </Badge>
+          )}
+          {severityFilter !== "all" && (
+            <Badge variant="secondary" className="text-xs gap-1 pr-1" data-testid="filter-chip-severity">
+              Severity: {severityFilter}
+              <button onClick={() => setSeverityFilter("all")} className="ml-1 hover:text-destructive"><X className="w-3 h-3" /></button>
+            </Badge>
+          )}
+          {statusFilter !== "all" && (
+            <Badge variant="secondary" className="text-xs gap-1 pr-1" data-testid="filter-chip-status">
+              Status: {statusFilter}
+              <button onClick={() => setStatusFilter("all")} className="ml-1 hover:text-destructive"><X className="w-3 h-3" /></button>
+            </Badge>
+          )}
+          {actionFilter !== "all" && (
+            <Badge variant="secondary" className="text-xs gap-1 pr-1" data-testid="filter-chip-action">
+              Action: {actionFilter.length > 30 ? actionFilter.substring(0, 30) + "..." : actionFilter}
+              <button onClick={() => setActionFilter("all")} className="ml-1 hover:text-destructive"><X className="w-3 h-3" /></button>
+            </Badge>
+          )}
+          <Button variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" onClick={clearAllFilters} data-testid="button-clear-filters">
+            Clear all
+          </Button>
+          <span className="text-xs text-muted-foreground ml-auto">{filtered.length} of {incidents.length} incidents</span>
+        </div>
+      )}
+
       {isLoading ? (
         <Card><CardContent className="p-6"><Skeleton className="h-64" /></CardContent></Card>
       ) : filtered.length === 0 ? (
@@ -551,27 +600,57 @@ export default function IncidentsPage() {
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">#{incident.id}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={`text-[10px] ${getIncidentTypeBadgeStyle(incident.incidentType || incident.category || "General")}`} data-testid={`badge-type-${incident.id}`}>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Badge
+                            className={`text-[10px] cursor-pointer hover:opacity-80 transition-opacity border-0 ${getTypeBadgeBySeverity(incident.severity, incident.isTruePositive)}`}
+                            data-testid={`badge-type-${incident.id}`}
+                            onClick={() => setTypeFilter(incident.incidentType || incident.category || "General")}
+                          >
                             {incident.incidentType || incident.category || "General"}
                           </Badge>
                         </TableCell>
-                        <TableCell>
-                          <span className="text-xs font-medium">{incident.title}</span>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <span
+                            className="text-xs font-medium cursor-pointer hover:underline hover:text-primary transition-colors"
+                            data-testid={`text-name-${incident.id}`}
+                            onClick={() => setNameFilter(incident.title)}
+                          >
+                            {incident.title}
+                          </span>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground" data-testid={`text-source-${incident.id}`}>
                           {incident.sourceIp || incident.source || "--"}
                         </TableCell>
-                        <TableCell className="text-xs text-muted-foreground font-mono" data-testid={`text-dest-${incident.id}`}>
-                          {incident.destinationIp || "--"}
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          {incident.destinationIp ? (
+                            <span
+                              className="text-xs font-mono cursor-pointer hover:underline text-primary transition-colors"
+                              data-testid={`text-dest-${incident.id}`}
+                              onClick={() => setLocation(`/assets/${currentTenant?.id}/${encodeURIComponent(incident.destinationIp!)}`)}
+                            >
+                              {incident.destinationIp}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground font-mono" data-testid={`text-dest-${incident.id}`}>--</span>
+                          )}
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={`text-[10px] ${SEVERITY_STYLES[incident.severity]}`} data-testid={`badge-severity-${incident.id}`}>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] cursor-pointer hover:opacity-80 transition-opacity ${SEVERITY_STYLES[incident.severity]}`}
+                            data-testid={`badge-severity-${incident.id}`}
+                            onClick={() => setSeverityFilter(incident.severity)}
+                          >
                             {incident.severity}
                           </Badge>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={`text-[10px] ${STATUS_STYLES[incident.status]}`} data-testid={`badge-status-${incident.id}`}>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] cursor-pointer hover:opacity-80 transition-opacity ${STATUS_STYLES[incident.status]}`}
+                            data-testid={`badge-status-${incident.id}`}
+                            onClick={() => setStatusFilter(incident.status)}
+                          >
                             {incident.status}
                           </Badge>
                         </TableCell>
@@ -611,8 +690,18 @@ export default function IncidentsPage() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="text-xs text-muted-foreground" data-testid={`text-action-${incident.id}`}>
-                          {incident.actionTaken || "--"}
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          {incident.actionTaken ? (
+                            <span
+                              className="text-xs text-muted-foreground cursor-pointer hover:underline hover:text-primary transition-colors"
+                              data-testid={`text-action-${incident.id}`}
+                              onClick={() => setActionFilter(incident.actionTaken!)}
+                            >
+                              {incident.actionTaken}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground" data-testid={`text-action-${incident.id}`}>--</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1 flex-wrap">

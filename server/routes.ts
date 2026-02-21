@@ -2279,7 +2279,15 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
               }
               if (r.iocReputation) updateData.iocData = r.iocReputation;
               if (r.detectionSource) updateData.detectionSource = r.detectionSource;
-              if (r.incidentType) updateData.incidentType = r.incidentType;
+              if (r.incidentType && !batch[idx].incidentType) {
+                const aiTypeMap: Record<string, string> = {
+                  malware: "Malware", phishing: "Email Threat", brute_force: "Credential Abuse",
+                  data_exfiltration: "Data Exfiltration", dos: "Network Security", unauthorized_access: "Unauthorized Access",
+                  insider_threat: "Insider Threat", vulnerability: "Vulnerability Exploit", misconfiguration: "Misconfiguration",
+                  other: "Security Alert",
+                };
+                updateData.incidentType = aiTypeMap[r.incidentType] || r.incidentType;
+              }
               if (r.actionTaken) updateData.actionTaken = r.actionTaken;
               if (Object.keys(updateData).length > 0) {
                 try { await storage.updateIncident(batch[idx].id, updateData); enriched++; } catch {}
@@ -2335,7 +2343,15 @@ Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":".
       }
       if (r.iocReputation) updateData.iocData = r.iocReputation;
       if (r.detectionSource) updateData.detectionSource = r.detectionSource;
-      if (r.incidentType) updateData.incidentType = r.incidentType;
+      if (r.incidentType) {
+        const aiTypeMap: Record<string, string> = {
+          malware: "Malware", phishing: "Email Threat", brute_force: "Credential Abuse",
+          data_exfiltration: "Data Exfiltration", dos: "Network Security", unauthorized_access: "Unauthorized Access",
+          insider_threat: "Insider Threat", vulnerability: "Vulnerability Exploit", misconfiguration: "Misconfiguration",
+          other: "Security Alert",
+        };
+        updateData.incidentType = aiTypeMap[r.incidentType] || r.incidentType;
+      }
       if (r.actionTaken) updateData.actionTaken = r.actionTaken;
 
       const updated = await storage.updateIncident(id, updateData);
