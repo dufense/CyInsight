@@ -5,7 +5,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Tenant, TenantUser, License } from "@shared/schema";
 import {
   Building2, Users, Shield, KeyRound, Globe, Plus, Search,
-  Edit2, Trash2, ChevronRight, Activity, Calendar, AlertTriangle,
+  Edit2, Trash2, ChevronRight, ChevronDown, Activity, Calendar, AlertTriangle,
   UserPlus, Check, Loader2,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -184,6 +184,7 @@ function TenantsTab() {
   const [editTenant, setEditTenant] = useState<Tenant | null>(null);
   const [formType, setFormType] = useState<"mssp" | "customer">("mssp");
   const [parentId, setParentId] = useState<string>("");
+  const [expandedMssps, setExpandedMssps] = useState<Set<number>>(new Set());
 
   const { data: allTenants = [], isLoading } = useQuery<Tenant[]>({
     queryKey: ["/api/tenant-admin/tenants"],
@@ -259,13 +260,41 @@ function TenantsTab() {
     }
   };
 
-  const filtered = search
-    ? allTenants.filter(t => t.name.toLowerCase().includes(search.toLowerCase()) || t.industry?.toLowerCase().includes(search.toLowerCase()))
-    : allTenants;
-
-  const getUserCount = (tenantId: number) => {
-    return 0;
+  const toggleExpand = (id: number) => {
+    setExpandedMssps(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
+
+  const openAddCustomer = (mssp: Tenant) => {
+    setEditTenant(null);
+    setFormType("customer");
+    setParentId(String(mssp.id));
+    setDialogOpen(true);
+  };
+
+  const searchLower = search.toLowerCase();
+  const matchesSearch = (t: Tenant) =>
+    !search || t.name.toLowerCase().includes(searchLower) || t.industry?.toLowerCase().includes(searchLower);
+
+  const getChildren = (pid: number) => allTenants.filter(t => t.parentId === pid);
+
+  const topLevel = allTenants.filter(t => t.type === "mssp" || !t.parentId).filter(t => {
+    if (matchesSearch(t)) return true;
+    if (t.type === "mssp") return getChildren(t.id).some(c => matchesSearch(c));
+    return false;
+  });
+
+  const getFilteredChildren = (pid: number) => {
+    const children = getChildren(pid);
+    if (!search) return children;
+    return children.filter(c => matchesSearch(c));
+  };
+
+  const totalCount = allTenants.length;
 
   return (
     <div className="space-y-4">
@@ -311,53 +340,90 @@ function TenantsTab() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map(t => {
+              {topLevel.map(t => {
                 const parent = t.parentId ? allTenants.find(p => p.id === t.parentId) : null;
-                return (
-                  <TableRow key={t.id} className="hover:bg-muted/30" data-testid={`row-tenant-${t.id}`}>
+                const children = t.type === "mssp" ? getFilteredChildren(t.id) : [];
+                const allChildren = t.type === "mssp" ? getChildren(t.id) : [];
+                const isExpanded = expandedMssps.has(t.id);
+                const renderRow = (tenant: Tenant, isChild: boolean, parentTenant?: Tenant | null) => (
+                  <TableRow key={tenant.id} className={`hover:bg-muted/30 ${isChild ? "bg-muted/20" : ""}`} data-testid={`row-tenant-${tenant.id}`}>
                     <TableCell>
-                      <div className="flex items-center gap-2">
-                        {t.type === "mssp" ? (
+                      <div className={`flex items-center gap-2 ${isChild ? "pl-8" : ""}`}>
+                        {!isChild && tenant.type === "mssp" && children.length > 0 ? (
+                          <button
+                            onClick={() => toggleExpand(tenant.id)}
+                            className="p-0.5 rounded hover:bg-muted shrink-0"
+                            data-testid={`button-expand-tenant-${tenant.id}`}
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                            )}
+                          </button>
+                        ) : !isChild && tenant.type === "mssp" ? (
+                          <span className="w-5 shrink-0" />
+                        ) : isChild ? (
+                          <span className="w-0.5 h-4 bg-border rounded shrink-0 -ml-4 mr-1.5" />
+                        ) : null}
+                        {tenant.type === "mssp" ? (
                           <Shield className="w-4 h-4 text-primary shrink-0" />
                         ) : (
                           <Building2 className="w-4 h-4 text-muted-foreground shrink-0" />
                         )}
-                        <span className="font-medium text-sm">{t.name}</span>
+                        <span className="font-medium text-sm">{tenant.name}</span>
+                        {!isChild && tenant.type === "mssp" && (
+                          <Badge variant="secondary" className="text-[9px] px-1.5 py-0 ml-1">
+                            {children.length} customer{children.length !== 1 ? "s" : ""}
+                          </Badge>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={t.type === "mssp" ? "default" : "secondary"} className="text-[10px]">
-                        {t.type.toUpperCase()}
+                      <Badge variant={tenant.type === "mssp" ? "default" : "secondary"} className="text-[10px]">
+                        {tenant.type.toUpperCase()}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      {t.industry ? (
-                        <Badge variant="outline" className="text-[10px] font-normal">{t.industry}</Badge>
+                      {tenant.industry ? (
+                        <Badge variant="outline" className="text-[10px] font-normal">{tenant.industry}</Badge>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     <TableCell>
-                      <span className="text-xs text-muted-foreground">{parent?.name || "—"}</span>
+                      <span className="text-xs text-muted-foreground">{parentTenant?.name || parent?.name || "—"}</span>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={t.isActive ? "outline" : "destructive"} className="text-[10px]">
-                        {t.isActive ? "Active" : "Inactive"}
+                      <Badge variant={tenant.isActive ? "outline" : "destructive"} className="text-[10px]">
+                        {tenant.isActive ? "Active" : "Inactive"}
                       </Badge>
                     </TableCell>
                     <TableCell>
                       <span className="text-xs text-muted-foreground">
-                        {t.createdAt ? formatDate(t.createdAt) : "—"}
+                        {tenant.createdAt ? formatDate(tenant.createdAt) : "—"}
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
+                        {tenant.type === "mssp" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs gap-1"
+                            onClick={() => openAddCustomer(tenant)}
+                            data-testid={`button-add-customer-${tenant.id}`}
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add Customer
+                          </Button>
+                        )}
                         <Button
                           size="icon"
                           variant="ghost"
                           className="w-7 h-7"
-                          onClick={() => { setEditTenant(t); setDialogOpen(true); }}
-                          data-testid={`button-edit-tenant-${t.id}`}
+                          onClick={() => { setEditTenant(tenant); setDialogOpen(true); }}
+                          data-testid={`button-edit-tenant-${tenant.id}`}
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </Button>
@@ -367,22 +433,22 @@ function TenantsTab() {
                               size="icon"
                               variant="ghost"
                               className="w-7 h-7 text-destructive hover:text-destructive"
-                              data-testid={`button-delete-tenant-${t.id}`}
+                              data-testid={`button-delete-tenant-${tenant.id}`}
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </AlertDialogTrigger>
                           <AlertDialogContent>
                             <AlertDialogHeader>
-                              <AlertDialogTitle>Delete Tenant</AlertDialogTitle>
+                              <AlertDialogTitle>Delete {isChild ? "Customer" : "Tenant"}</AlertDialogTitle>
                               <AlertDialogDescription>
-                                Are you sure you want to delete "{t.name}"? This action cannot be undone and will remove all associated data.
+                                Are you sure you want to delete "{tenant.name}"? This action cannot be undone and will remove all associated data.
                               </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
                               <AlertDialogCancel>Cancel</AlertDialogCancel>
                               <AlertDialogAction
-                                onClick={() => deleteMutation.mutate(t.id)}
+                                onClick={() => deleteMutation.mutate(tenant.id)}
                                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                               >
                                 Delete
@@ -390,10 +456,15 @@ function TenantsTab() {
                             </AlertDialogFooter>
                           </AlertDialogContent>
                         </AlertDialog>
-                        <ChevronRight className="w-4 h-4 text-muted-foreground" />
                       </div>
                     </TableCell>
                   </TableRow>
+                );
+                return (
+                  <>
+                    {renderRow(t, false)}
+                    {isExpanded && children.map(child => renderRow(child, true, t))}
+                  </>
                 );
               })}
             </TableBody>
@@ -404,7 +475,14 @@ function TenantsTab() {
       <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) setEditTenant(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editTenant ? "Edit Tenant" : "Add Tenant"}</DialogTitle>
+            <DialogTitle>
+              {editTenant ? "Edit Tenant" : formType === "customer" ? "Add Customer" : "Add Tenant"}
+            </DialogTitle>
+            {!editTenant && formType === "customer" && parentId && (
+              <p className="text-sm text-muted-foreground">
+                Creating customer under: <span className="font-medium text-foreground">{mssps.find(m => String(m.id) === parentId)?.name}</span>
+              </p>
+            )}
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
@@ -772,11 +850,34 @@ function UsersTab() {
                   <SelectValue placeholder="Select organization" />
                 </SelectTrigger>
                 <SelectContent>
-                  {allTenants.map(t => (
+                  {allTenants.filter(t => t.type === "mssp").map(mssp => {
+                    const customers = allTenants.filter(c => c.parentId === mssp.id);
+                    return (
+                      <div key={mssp.id}>
+                        <SelectItem value={String(mssp.id)}>
+                          <div className="flex items-center gap-2">
+                            <Shield className="w-3 h-3 text-primary" />
+                            <span>{mssp.name}</span>
+                            <span className="text-muted-foreground text-[10px]">MSSP</span>
+                          </div>
+                        </SelectItem>
+                        {customers.map(c => (
+                          <SelectItem key={c.id} value={String(c.id)}>
+                            <div className="flex items-center gap-2 pl-4">
+                              <Building2 className="w-3 h-3 text-muted-foreground" />
+                              <span>{c.name}</span>
+                              <span className="text-muted-foreground text-[10px]">Customer</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </div>
+                    );
+                  })}
+                  {allTenants.filter(t => t.type !== "mssp" && !t.parentId).map(t => (
                     <SelectItem key={t.id} value={String(t.id)}>
                       <div className="flex items-center gap-2">
-                        {t.type === "mssp" ? <Shield className="w-3 h-3" /> : <Building2 className="w-3 h-3" />}
-                        {t.name}
+                        <Building2 className="w-3 h-3" />
+                        <span>{t.name}</span>
                       </div>
                     </SelectItem>
                   ))}
@@ -1056,8 +1157,36 @@ function LicensesTab() {
               <Select name="tenantId" defaultValue={editLicense ? String(editLicense.tenantId) : ""} required>
                 <SelectTrigger data-testid="select-license-tenant"><SelectValue placeholder="Select tenant" /></SelectTrigger>
                 <SelectContent>
-                  {allTenants.map(t => (
-                    <SelectItem key={t.id} value={String(t.id)}>{t.name} ({t.type})</SelectItem>
+                  {allTenants.filter(t => t.type === "mssp").map(mssp => {
+                    const customers = allTenants.filter(c => c.parentId === mssp.id);
+                    return (
+                      <div key={mssp.id}>
+                        <SelectItem value={String(mssp.id)}>
+                          <div className="flex items-center gap-2">
+                            <Shield className="w-3 h-3 text-primary shrink-0" />
+                            <span>{mssp.name}</span>
+                            <span className="text-muted-foreground text-[10px]">MSSP</span>
+                          </div>
+                        </SelectItem>
+                        {customers.map(c => (
+                          <SelectItem key={c.id} value={String(c.id)}>
+                            <div className="flex items-center gap-2 pl-4">
+                              <Building2 className="w-3 h-3 text-muted-foreground shrink-0" />
+                              <span>{c.name}</span>
+                              <span className="text-muted-foreground text-[10px]">Customer</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </div>
+                    );
+                  })}
+                  {allTenants.filter(t => t.type !== "mssp" && !t.parentId).map(t => (
+                    <SelectItem key={t.id} value={String(t.id)}>
+                      <div className="flex items-center gap-2">
+                        <Building2 className="w-3 h-3 text-muted-foreground shrink-0" />
+                        <span>{t.name}</span>
+                      </div>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
