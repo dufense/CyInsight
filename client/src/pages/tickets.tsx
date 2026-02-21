@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -19,6 +19,11 @@ import {
   Sparkles,
   Send,
   Bot,
+  Star,
+  Paperclip,
+  Download,
+  Upload,
+  MessageCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -235,12 +240,14 @@ function TicketCard({
   onStatusChange,
   services,
   onAiResponse,
+  onClick,
 }: {
   ticket: Ticket;
   isMSS: boolean;
   onStatusChange: (id: number, status: string) => void;
   services: Service[];
   onAiResponse?: (ticketId: number) => void;
+  onClick?: () => void;
 }) {
   const Icon = STATUS_ICONS[ticket.status] || AlertCircle;
   const serviceName = ticket.serviceId
@@ -248,7 +255,11 @@ function TicketCard({
     : null;
 
   return (
-    <Card className="hover-elevate" data-testid={`card-ticket-${ticket.id}`}>
+    <Card
+      className="hover-elevate cursor-pointer"
+      data-testid={`card-ticket-${ticket.id}`}
+      onClick={onClick}
+    >
       <CardContent className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
@@ -301,11 +312,10 @@ function TicketCard({
             </div>
           </div>
           {isMSS && (
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7"
                 title="AI Response"
                 onClick={() => onAiResponse?.(ticket.id)}
                 data-testid={`button-ai-response-${ticket.id}`}
@@ -316,7 +326,7 @@ function TicketCard({
                 value={ticket.status}
                 onValueChange={(status) => onStatusChange(ticket.id, status)}
               >
-                <SelectTrigger className="h-7 text-[10px] w-[110px]">
+                <SelectTrigger className="h-7 text-[10px] w-[110px]" data-testid={`select-status-${ticket.id}`}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -335,16 +345,366 @@ function TicketCard({
   );
 }
 
+function deriveSentiment(rating: number): string {
+  if (rating <= 2) return "negative";
+  if (rating === 3) return "neutral";
+  return "positive";
+}
+
+function TicketDetailDialog({
+  ticket,
+  open,
+  onOpenChange,
+  services,
+}: {
+  ticket: Ticket;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  services: Service[];
+}) {
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [newComment, setNewComment] = useState("");
+  const [feedbackRating, setFeedbackRating] = useState(0);
+  const [feedbackComment, setFeedbackComment] = useState("");
+
+  const serviceName = ticket.serviceId
+    ? services.find((s) => s.id === ticket.serviceId)?.name
+    : null;
+
+  const { data: comments = [], isLoading: commentsLoading } = useQuery<any[]>({
+    queryKey: ["/api/tickets", ticket.id, "comments"],
+    queryFn: async () => {
+      const res = await fetch(`/api/tickets/${ticket.id}/comments`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch comments");
+      return res.json();
+    },
+    enabled: open,
+  });
+
+  const { data: attachments = [], isLoading: attachmentsLoading } = useQuery<any[]>({
+    queryKey: ["/api/tickets", ticket.id, "attachments"],
+    queryFn: async () => {
+      const res = await fetch(`/api/tickets/${ticket.id}/attachments`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch attachments");
+      return res.json();
+    },
+    enabled: open,
+  });
+
+  const isFeedbackVisible = ticket.status === "closed" || ticket.status === "resolved";
+
+  const { data: existingFeedback, isLoading: feedbackLoading } = useQuery<any>({
+    queryKey: ["/api/tickets", ticket.id, "feedback"],
+    queryFn: async () => {
+      const res = await fetch(`/api/tickets/${ticket.id}/feedback`, { credentials: "include" });
+      if (!res.ok) {
+        if (res.status === 404) return null;
+        throw new Error("Failed to fetch feedback");
+      }
+      return res.json();
+    },
+    enabled: open && isFeedbackVisible,
+  });
+
+  const postCommentMutation = useMutation({
+    mutationFn: async (content: string) => {
+      const res = await apiRequest("POST", `/api/tickets/${ticket.id}/comments`, { content });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickets", ticket.id, "comments"] });
+      setNewComment("");
+      toast({ title: "Comment added" });
+    },
+  });
+
+  const uploadAttachmentMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(`/api/tickets/${ticket.id}/attachments`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickets", ticket.id, "attachments"] });
+      toast({ title: "File uploaded" });
+    },
+  });
+
+  const submitFeedbackMutation = useMutation({
+    mutationFn: async (data: { rating: number; sentiment: string; comments: string }) => {
+      const res = await apiRequest("POST", `/api/tickets/${ticket.id}/feedback`, data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickets", ticket.id, "feedback"] });
+      setFeedbackRating(0);
+      setFeedbackComment("");
+      toast({ title: "Feedback submitted", description: "Thank you for your feedback." });
+    },
+  });
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      uploadAttachmentMutation.mutate(file);
+      e.target.value = "";
+    }
+  };
+
+  const StatusIcon = STATUS_ICONS[ticket.status] || AlertCircle;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col" data-testid={`dialog-ticket-detail-${ticket.id}`}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 flex-wrap">
+            <span className="font-mono text-xs text-muted-foreground">TKT-{String(ticket.id).padStart(4, "0")}</span>
+            <span>{ticket.title}</span>
+          </DialogTitle>
+        </DialogHeader>
+        <ScrollArea className="flex-1 pr-4">
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge variant="outline" className={`text-[10px] ${PRIORITY_STYLES[ticket.priority]}`} data-testid={`badge-detail-priority-${ticket.id}`}>
+                  {ticket.priority}
+                </Badge>
+                <Badge variant="secondary" className="text-[10px]" data-testid={`badge-detail-status-${ticket.id}`}>
+                  <StatusIcon className="w-3 h-3 mr-1" />
+                  {ticket.status.replace("_", " ")}
+                </Badge>
+                {serviceName && (
+                  <Badge variant="secondary" className="text-[10px]">{serviceName}</Badge>
+                )}
+                {ticket.slaBreached && (
+                  <Badge variant="destructive" className="text-[10px]">
+                    <ShieldAlert className="w-3 h-3 mr-1" />
+                    SLA Breached
+                  </Badge>
+                )}
+              </div>
+              {ticket.description && (
+                <p className="text-sm text-muted-foreground" data-testid={`text-detail-description-${ticket.id}`}>{ticket.description}</p>
+              )}
+              <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
+                <span data-testid={`text-detail-created-${ticket.id}`}>Created: {new Date(ticket.createdAt).toLocaleString()}</span>
+                {ticket.updatedAt && <span>Updated: {new Date(ticket.updatedAt).toLocaleString()}</span>}
+                {ticket.firstResponseAt && <span>First Response: {timeAgo(ticket.firstResponseAt)}</span>}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <MessageCircle className="w-4 h-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">Comments</h3>
+              </div>
+              {commentsLoading ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-10" />
+                  <Skeleton className="h-10" />
+                </div>
+              ) : comments.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No comments yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {comments.map((comment: any, idx: number) => (
+                    <Card key={comment.id || idx} data-testid={`card-comment-${comment.id || idx}`}>
+                      <CardContent className="p-3">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-xs font-medium">{comment.authorName || comment.author || "User"}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ""}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">{comment.content || comment.text || comment.body}</p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Textarea
+                  placeholder="Write a comment..."
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  rows={2}
+                  className="text-sm flex-1"
+                  data-testid={`textarea-new-comment-${ticket.id}`}
+                />
+                <Button
+                  size="sm"
+                  disabled={!newComment.trim() || postCommentMutation.isPending}
+                  onClick={() => postCommentMutation.mutate(newComment.trim())}
+                  data-testid={`button-post-comment-${ticket.id}`}
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <Paperclip className="w-4 h-4 text-muted-foreground" />
+                  <h3 className="text-sm font-medium">Attachments</h3>
+                </div>
+                <div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={handleFileUpload}
+                    data-testid={`input-file-upload-${ticket.id}`}
+                  />
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={uploadAttachmentMutation.isPending}
+                    onClick={() => fileInputRef.current?.click()}
+                    data-testid={`button-upload-attachment-${ticket.id}`}
+                  >
+                    {uploadAttachmentMutation.isPending ? (
+                      <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 mr-1.5" />
+                    )}
+                    Upload
+                  </Button>
+                </div>
+              </div>
+              {attachmentsLoading ? (
+                <Skeleton className="h-10" />
+              ) : attachments.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No attachments.</p>
+              ) : (
+                <div className="space-y-2">
+                  {attachments.map((att: any, idx: number) => (
+                    <div
+                      key={att.id || idx}
+                      className="flex items-center justify-between gap-2 p-2 rounded-md border"
+                      data-testid={`attachment-item-${att.id || idx}`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Paperclip className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                        <span className="text-xs truncate">{att.filename || att.name || `File ${idx + 1}`}</span>
+                      </div>
+                      <a
+                        href={att.url || att.downloadUrl || `/api/tickets/${ticket.id}/attachments/${att.id}/download`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid={`link-download-attachment-${att.id || idx}`}
+                      >
+                        <Button variant="ghost" size="icon">
+                          <Download className="w-3.5 h-3.5" />
+                        </Button>
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {isFeedbackVisible && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Star className="w-4 h-4 text-muted-foreground" />
+                  <h3 className="text-sm font-medium">Customer Feedback</h3>
+                </div>
+                {feedbackLoading ? (
+                  <Skeleton className="h-16" />
+                ) : existingFeedback && existingFeedback.rating ? (
+                  <Card data-testid={`card-existing-feedback-${ticket.id}`}>
+                    <CardContent className="p-3 space-y-2">
+                      <div className="flex items-center gap-1">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <Star
+                            key={star}
+                            className={`w-4 h-4 ${star <= existingFeedback.rating ? "text-chart-1 fill-chart-1" : "text-muted-foreground"}`}
+                            data-testid={`star-existing-${ticket.id}-${star}`}
+                          />
+                        ))}
+                        <Badge variant="secondary" className="ml-2 text-[10px]">{existingFeedback.sentiment}</Badge>
+                      </div>
+                      {existingFeedback.comments && (
+                        <p className="text-xs text-muted-foreground" data-testid={`text-existing-feedback-comment-${ticket.id}`}>{existingFeedback.comments}</p>
+                      )}
+                      <p className="text-[10px] text-muted-foreground">Feedback already submitted</p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-1" data-testid={`rating-stars-${ticket.id}`}>
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setFeedbackRating(star)}
+                          className="p-0.5"
+                          data-testid={`button-star-${ticket.id}-${star}`}
+                        >
+                          <Star
+                            className={`w-5 h-5 transition-colors ${star <= feedbackRating ? "text-chart-1 fill-chart-1" : "text-muted-foreground"}`}
+                          />
+                        </button>
+                      ))}
+                      {feedbackRating > 0 && (
+                        <span className="text-xs text-muted-foreground ml-2">{deriveSentiment(feedbackRating)}</span>
+                      )}
+                    </div>
+                    <Textarea
+                      placeholder="Share your feedback..."
+                      value={feedbackComment}
+                      onChange={(e) => setFeedbackComment(e.target.value)}
+                      rows={2}
+                      className="text-sm"
+                      data-testid={`textarea-feedback-${ticket.id}`}
+                    />
+                    <Button
+                      size="sm"
+                      disabled={feedbackRating === 0 || submitFeedbackMutation.isPending}
+                      onClick={() =>
+                        submitFeedbackMutation.mutate({
+                          rating: feedbackRating,
+                          sentiment: deriveSentiment(feedbackRating),
+                          comments: feedbackComment,
+                        })
+                      }
+                      data-testid={`button-submit-feedback-${ticket.id}`}
+                    >
+                      {submitFeedbackMutation.isPending ? (
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Send className="w-3.5 h-3.5 mr-1.5" />
+                      )}
+                      Submit Feedback
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function TicketsPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, userRole, isMSS } = useTenant();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("open");
   const [serviceFilter, setServiceFilter] = useState<string>("all");
   const [createServiceId, setCreateServiceId] = useState<string>("");
-
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
+  const [detailTicket, setDetailTicket] = useState<Ticket | null>(null);
 
   const { data: tickets = [], isLoading } = useQuery<Ticket[]>({
     queryKey: ["/api/tickets", currentTenant?.id],
@@ -652,6 +1012,7 @@ export default function TicketsPage() {
                     setAiResponseDialogOpen(true);
                     aiResponseMutation.mutate(ticketId);
                   }}
+                  onClick={() => setDetailTicket(ticket)}
                 />
               ))}
             </div>
@@ -713,6 +1074,15 @@ export default function TicketsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {detailTicket && (
+        <TicketDetailDialog
+          ticket={detailTicket}
+          open={!!detailTicket}
+          onOpenChange={(open) => { if (!open) setDetailTicket(null); }}
+          services={services}
+        />
+      )}
     </div>
   );
 }

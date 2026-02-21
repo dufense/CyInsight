@@ -2,7 +2,7 @@ import {
   tenants, tenantUsers, incidents, tickets, ticketComments,
   projects, tasks, reports, securityEvents,
   services, slaDefinitions, teamMembers, shiftRosters, documents,
-  superadmins, licenses,
+  superadmins, licenses, ticketFeedback, ticketAttachments,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -19,6 +19,8 @@ import {
   type Document, type InsertDocument,
   type Superadmin, type InsertSuperadmin,
   type License, type InsertLicense,
+  type TicketFeedback, type InsertTicketFeedback,
+  type TicketAttachment, type InsertTicketAttachment,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql, gte, lte } from "drizzle-orm";
@@ -117,6 +119,14 @@ export interface IStorage {
   getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]>;
   updateTenantUser(id: number, data: Partial<InsertTenantUser>): Promise<TenantUser>;
   deleteTenantUser(id: number): Promise<void>;
+
+  getTicketFeedback(ticketId: number): Promise<TicketFeedback[]>;
+  getTicketFeedbackByUser(ticketId: number, userId: string): Promise<TicketFeedback | undefined>;
+  createTicketFeedback(data: InsertTicketFeedback): Promise<TicketFeedback>;
+
+  getTicketAttachments(ticketId: number): Promise<TicketAttachment[]>;
+  createTicketAttachment(data: InsertTicketAttachment): Promise<TicketAttachment>;
+  deleteTicketAttachment(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -765,6 +775,33 @@ export class DatabaseStorage implements IStorage {
 
   async deleteTenantUser(id: number): Promise<void> {
     await db.delete(tenantUsers).where(eq(tenantUsers.id, id));
+  }
+
+  async getTicketFeedback(ticketId: number): Promise<TicketFeedback[]> {
+    return db.select().from(ticketFeedback).where(eq(ticketFeedback.ticketId, ticketId)).orderBy(desc(ticketFeedback.createdAt));
+  }
+
+  async getTicketFeedbackByUser(ticketId: number, userId: string): Promise<TicketFeedback | undefined> {
+    const [fb] = await db.select().from(ticketFeedback).where(and(eq(ticketFeedback.ticketId, ticketId), eq(ticketFeedback.userId, userId)));
+    return fb;
+  }
+
+  async createTicketFeedback(data: InsertTicketFeedback): Promise<TicketFeedback> {
+    const [fb] = await db.insert(ticketFeedback).values(data).returning();
+    return fb;
+  }
+
+  async getTicketAttachments(ticketId: number): Promise<TicketAttachment[]> {
+    return db.select().from(ticketAttachments).where(eq(ticketAttachments.ticketId, ticketId)).orderBy(desc(ticketAttachments.createdAt));
+  }
+
+  async createTicketAttachment(data: InsertTicketAttachment): Promise<TicketAttachment> {
+    const [att] = await db.insert(ticketAttachments).values(data).returning();
+    return att;
+  }
+
+  async deleteTicketAttachment(id: number): Promise<void> {
+    await db.delete(ticketAttachments).where(eq(ticketAttachments.id, id));
   }
 }
 

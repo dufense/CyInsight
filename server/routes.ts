@@ -15,6 +15,8 @@ import {
   insertShiftRosterSchema,
   insertDocumentSchema,
   insertLicenseSchema,
+  insertTicketFeedbackSchema,
+  insertTicketAttachmentSchema,
 } from "@shared/schema";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -52,7 +54,8 @@ async function getUserTenantAccess(req: any): Promise<{
   }
 
   const isPlatformAdmin = tenantUser.role === "platform_admin";
-  const isMSS = isPlatformAdmin || tenantUser.role === "mss_admin" || tenantUser.role === "mss_analyst";
+  const mssRoles = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+  const isMSS = mssRoles.includes(tenantUser.role);
   return { userId, role: tenantUser.role, tenantId: tenantUser.tenantId, isMSS, isPlatformAdmin };
 }
 
@@ -399,7 +402,14 @@ export async function registerRoutes(
         }
       }
 
-      res.json({ role: tenantUser.role, tenantId: tenantUser.tenantId, isPlatformAdmin: tenantUser.role === "platform_admin" });
+      const mssRolesCheck = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+      res.json({
+        role: tenantUser.role,
+        tenantId: tenantUser.tenantId,
+        isPlatformAdmin: tenantUser.role === "platform_admin",
+        isMSS: mssRolesCheck.includes(tenantUser.role),
+        isAdmin: ["platform_admin", "mss_admin", "soc_manager"].includes(tenantUser.role),
+      });
     } catch (error) {
       console.error("Error fetching user profile:", error);
       res.status(500).json({ message: "Failed to fetch profile" });
@@ -631,6 +641,211 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Validation error", errors: error.errors });
       }
       res.status(error.status || 500).json({ message: error.message || "Failed to create comment" });
+    }
+  });
+
+  app.get("/api/tickets/:id/feedback", isAuthenticated, async (req: any, res) => {
+    try {
+      const ticketId = parseInt(req.params.id);
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+      await assertTenantAccess(req, ticket.tenantId);
+      const feedback = await storage.getTicketFeedback(ticketId);
+      res.json(feedback);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch feedback" });
+    }
+  });
+
+  app.post("/api/tickets/:id/feedback", isAuthenticated, async (req: any, res) => {
+    try {
+      const ticketId = parseInt(req.params.id);
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+
+      const access = await assertTenantAccess(req, ticket.tenantId);
+
+      if (ticket.status !== "closed" && ticket.status !== "resolved") {
+        return res.status(400).json({ message: "Feedback can only be submitted for closed or resolved tickets" });
+      }
+
+      const existing = await storage.getTicketFeedbackByUser(ticketId, access.userId);
+      if (existing) {
+        return res.status(400).json({ message: "You have already submitted feedback for this ticket" });
+      }
+
+      const validated = insertTicketFeedbackSchema.parse({
+        ...req.body,
+        ticketId,
+        userId: access.userId,
+      });
+      const feedback = await storage.createTicketFeedback(validated);
+      res.status(201).json(feedback);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Validation error", errors: error.errors });
+      }
+      res.status(error.status || 500).json({ message: error.message || "Failed to submit feedback" });
+    }
+  });
+
+  app.get("/api/tickets/:id/attachments", isAuthenticated, async (req: any, res) => {
+    try {
+      const ticketId = parseInt(req.params.id);
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+      await assertTenantAccess(req, ticket.tenantId);
+      const attachments = await storage.getTicketAttachments(ticketId);
+      res.json(attachments);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch attachments" });
+    }
+  });
+
+  app.post("/api/tickets/:id/attachments", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const ticketId = parseInt(req.params.id);
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+
+      const access = await assertTenantAccess(req, ticket.tenantId);
+
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+
+      const destPath = path.join(UPLOADS_DIR, `ticket_${ticketId}_${Date.now()}_${req.file.originalname}`);
+      fs.renameSync(req.file.path, destPath);
+
+      const attachment = await storage.createTicketAttachment({
+        ticketId,
+        fileName: req.file.originalname,
+        filePath: destPath,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        uploadedBy: access.userId,
+      });
+      res.status(201).json(attachment);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to upload attachment" });
+    }
+  });
+
+  app.get("/api/attachments/download/:attachmentId", isAuthenticated, async (req: any, res) => {
+    try {
+      const attachmentId = parseInt(req.params.attachmentId);
+      const ticketId = parseInt(req.query.ticketId as string);
+      if (!ticketId) return res.status(400).json({ message: "ticketId query param required" });
+
+      const ticket = await storage.getTicket(ticketId);
+      if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+      await assertTenantAccess(req, ticket.tenantId);
+
+      const attachments = await storage.getTicketAttachments(ticketId);
+      const att = attachments.find(a => a.id === attachmentId);
+      if (!att) return res.status(404).json({ message: "Attachment not found" });
+
+      if (fs.existsSync(att.filePath)) {
+        res.download(att.filePath, att.fileName);
+      } else {
+        res.status(404).json({ message: "File not found" });
+      }
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to download attachment" });
+    }
+  });
+
+  app.get("/api/admin/users", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      if (!access.isMSS || access.role === "customer") {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+      const tenantIdFilter = req.query.tenantId ? parseInt(req.query.tenantId) : null;
+      if (tenantIdFilter) {
+        await assertTenantAccess(req, tenantIdFilter);
+        const users = await storage.getTenantUsersByTenant(tenantIdFilter);
+        return res.json(users);
+      }
+      if (access.isPlatformAdmin) {
+        const users = await storage.getAllTenantUsers();
+        return res.json(users);
+      }
+      if (access.tenantId) {
+        const userTenant = await storage.getTenant(access.tenantId);
+        if (userTenant && userTenant.type === "mssp") {
+          const children = await storage.getChildTenants(userTenant.id);
+          const allTenantIds = [userTenant.id, ...children.map(c => c.id)];
+          const allUsers: any[] = [];
+          for (const tid of allTenantIds) {
+            const tusers = await storage.getTenantUsersByTenant(tid);
+            allUsers.push(...tusers);
+          }
+          return res.json(allUsers);
+        }
+        const users = await storage.getTenantUsersByTenant(access.tenantId);
+        return res.json(users);
+      }
+      res.json([]);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch users" });
+    }
+  });
+
+  app.post("/api/admin/users", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      if (!adminRoles.includes(access.role)) {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+
+      const { userId, tenantId, role, email, displayName } = req.body;
+      if (!userId || !tenantId || !role) {
+        return res.status(400).json({ message: "userId, tenantId, and role are required" });
+      }
+
+      await assertTenantAccess(req, tenantId);
+
+      const existing = await storage.getTenantUser(userId, tenantId);
+      if (existing) {
+        return res.status(400).json({ message: "User already exists in this tenant" });
+      }
+
+      const tu = await storage.createTenantUser({ userId, tenantId, role });
+      res.status(201).json(tu);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to create user" });
+    }
+  });
+
+  app.patch("/api/admin/users/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      if (!adminRoles.includes(access.role)) {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+      const id = parseInt(req.params.id);
+      const updated = await storage.updateTenantUser(id, req.body);
+      res.json(updated);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update user" });
+    }
+  });
+
+  app.delete("/api/admin/users/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      if (!adminRoles.includes(access.role)) {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+      const id = parseInt(req.params.id);
+      await storage.deleteTenantUser(id);
+      res.json({ message: "User deleted" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to delete user" });
     }
   });
 

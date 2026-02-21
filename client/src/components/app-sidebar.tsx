@@ -15,8 +15,7 @@ import {
   Briefcase,
   CalendarClock,
   BookOpen,
-  Globe,
-  KeyRound,
+  Settings,
 } from "lucide-react";
 import {
   Sidebar,
@@ -43,10 +42,9 @@ import { Badge } from "@/components/ui/badge";
 import { useTenant } from "@/lib/tenant-context";
 import { useAuth } from "@/hooks/use-auth";
 
-const platformAdminNavItems = [
-  { title: "Platform Overview", url: "/platform", icon: Globe },
-  { title: "Tenant Admin", url: "/tenant-admin", icon: KeyRound },
+const adminNavItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  { title: "Admin Center", url: "/admin-center", icon: Settings },
   { title: "Incidents", url: "/incidents", icon: AlertTriangle },
   { title: "Tickets", url: "/tickets", icon: Ticket },
   { title: "Projects", url: "/projects", icon: FolderKanban },
@@ -72,6 +70,7 @@ const mssNavItems = [
 const customerNavItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   { title: "Tickets", url: "/tickets", icon: Ticket },
+  { title: "Projects", url: "/projects", icon: FolderKanban },
   { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
 ];
 
@@ -80,8 +79,11 @@ export function AppSidebar() {
   const { tenants, hierarchy, currentTenant, setCurrentTenant, userRole, isPlatformAdmin } = useTenant();
   const { user, logout } = useAuth();
 
-  const isMSS = isPlatformAdmin || userRole === "mss_admin" || userRole === "mss_analyst";
-  const navItems = isPlatformAdmin ? platformAdminNavItems : isMSS ? mssNavItems : customerNavItems;
+  const mssRoles = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+  const isMSS = mssRoles.includes(userRole);
+  const isAdmin = adminRoles.includes(userRole);
+  const navItems = isAdmin ? adminNavItems : isMSS ? mssNavItems : customerNavItems;
 
   const currentTenantType = currentTenant?.type || "customer";
   const isViewingMSSP = currentTenantType === "mssp";

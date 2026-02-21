@@ -73,7 +73,7 @@ function isOverdue(dateStr: string | Date | null | undefined): boolean {
   return new Date(dateStr) < new Date();
 }
 
-function TaskCard({ task, onMove }: { task: ProjectTask; onMove: (id: number, status: string) => void }) {
+function TaskCard({ task, onMove, readOnly }: { task: ProjectTask; onMove: (id: number, status: string) => void; readOnly?: boolean }) {
   const daysAgo = getDaysAgo(task.createdAt);
   const overdue = task.status !== "done" && isOverdue(task.dueDate);
 
@@ -110,19 +110,25 @@ function TaskCard({ task, onMove }: { task: ProjectTask; onMove: (id: number, st
           <Clock className="w-2.5 h-2.5" />
           <span>Created {daysAgo === 0 ? "today" : `${daysAgo}d ago`}</span>
         </div>
-        <Select
-          value={task.status}
-          onValueChange={(status) => onMove(task.id, status)}
-        >
-          <SelectTrigger className="h-6 text-[10px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {KANBAN_COLUMNS.map(col => (
-              <SelectItem key={col.id} value={col.id}>{col.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {readOnly ? (
+          <Badge variant="outline" className="text-[10px]">
+            {KANBAN_COLUMNS.find(col => col.id === task.status)?.label || task.status}
+          </Badge>
+        ) : (
+          <Select
+            value={task.status}
+            onValueChange={(status) => onMove(task.id, status)}
+          >
+            <SelectTrigger className="h-6 text-[10px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {KANBAN_COLUMNS.map(col => (
+                <SelectItem key={col.id} value={col.id}>{col.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </CardContent>
     </Card>
   );
@@ -196,14 +202,14 @@ function ActivityDashboard({ projects, allTasksByProject }: { projects: Project[
 }
 
 export default function ProjectsPage() {
-  const { currentTenant, userRole } = useTenant();
+  const { currentTenant, userRole, isMSS } = useTenant();
   const { toast } = useToast();
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
 
-  const isMSS = userRole === "mss_admin" || userRole === "mss_analyst";
+  const isCustomer = userRole === "customer";
 
   const { data: projects = [], isLoading: projectsLoading } = useQuery<Project[]>({
     queryKey: ["/api/projects", currentTenant?.id],
@@ -618,6 +624,7 @@ export default function ProjectsPage() {
                           key={task.id}
                           task={task}
                           onMove={(id, status) => updateTaskMutation.mutate({ id, status })}
+                          readOnly={isCustomer}
                         />
                       ))}
                     </div>

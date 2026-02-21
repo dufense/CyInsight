@@ -25,6 +25,7 @@ import ImportPage from "@/pages/import";
 import KnowledgeBasePage from "@/pages/knowledge-base";
 import PlatformOverviewPage from "@/pages/platform-overview";
 import TenantAdminPage from "@/pages/tenant-admin";
+import AdminCenterPage from "@/pages/admin-center";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -39,9 +40,8 @@ function AuthenticatedRouter() {
   return (
     <Switch>
       <Route path="/" component={DashboardPage} />
-      <Route path="/platform" component={PlatformOverviewPage} />
-      <Route path="/tenant-admin" component={TenantAdminPage} />
       <Route path="/dashboard" component={DashboardPage} />
+      <Route path="/admin-center" component={AdminCenterPage} />
       <Route path="/incidents" component={IncidentsPage} />
       <Route path="/tickets" component={TicketsPage} />
       <Route path="/projects" component={ProjectsPage} />

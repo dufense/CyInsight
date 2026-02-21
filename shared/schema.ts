@@ -7,7 +7,7 @@ export * from "./models/auth";
 export * from "./models/chat";
 
 export const tenantTypeEnum = pgEnum("tenant_type", ["mssp", "customer"]);
-export const roleEnum = pgEnum("user_role", ["platform_admin", "mss_admin", "mss_analyst", "customer"]);
+export const roleEnum = pgEnum("user_role", ["platform_admin", "mss_admin", "mss_analyst", "customer", "security_engineer", "service_desk", "security_analyst", "soc_manager"]);
 export const severityEnum = pgEnum("severity", ["critical", "high", "medium", "low", "info"]);
 export const incidentStatusEnum = pgEnum("incident_status", ["open", "investigating", "contained", "resolved", "closed"]);
 export const ticketStatusEnum = pgEnum("ticket_status", ["open", "in_progress", "waiting", "resolved", "closed"]);
@@ -331,8 +331,39 @@ export const licensesRelations = relations(licenses, ({ one }) => ({
   tenant: one(tenants, { fields: [licenses.tenantId], references: [tenants.id] }),
 }));
 
+export const ticketFeedback = pgTable("ticket_feedback", {
+  id: serial("id").primaryKey(),
+  ticketId: integer("ticket_id").notNull().references(() => tickets.id),
+  userId: varchar("user_id").notNull(),
+  rating: integer("rating").notNull(),
+  sentiment: varchar("sentiment", { length: 50 }),
+  comments: text("comments"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const ticketFeedbackRelations = relations(ticketFeedback, ({ one }) => ({
+  ticket: one(tickets, { fields: [ticketFeedback.ticketId], references: [tickets.id] }),
+}));
+
+export const ticketAttachments = pgTable("ticket_attachments", {
+  id: serial("id").primaryKey(),
+  ticketId: integer("ticket_id").notNull().references(() => tickets.id),
+  fileName: varchar("file_name", { length: 500 }).notNull(),
+  filePath: text("file_path").notNull(),
+  fileSize: integer("file_size"),
+  mimeType: varchar("mime_type", { length: 100 }),
+  uploadedBy: varchar("uploaded_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const ticketAttachmentsRelations = relations(ticketAttachments, ({ one }) => ({
+  ticket: one(tickets, { fields: [ticketAttachments.ticketId], references: [tickets.id] }),
+}));
+
 export const insertSuperadminSchema = createInsertSchema(superadmins).omit({ id: true, createdAt: true, lastLoginAt: true });
 export const insertLicenseSchema = createInsertSchema(licenses).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTicketFeedbackSchema = createInsertSchema(ticketFeedback).omit({ id: true, createdAt: true });
+export const insertTicketAttachmentSchema = createInsertSchema(ticketAttachments).omit({ id: true, createdAt: true });
 
 export const insertTenantSchema = createInsertSchema(tenants).omit({ id: true, createdAt: true });
 export const insertTenantUserSchema = createInsertSchema(tenantUsers).omit({ id: true, createdAt: true });
@@ -381,3 +412,7 @@ export type Superadmin = typeof superadmins.$inferSelect;
 export type InsertSuperadmin = z.infer<typeof insertSuperadminSchema>;
 export type License = typeof licenses.$inferSelect;
 export type InsertLicense = z.infer<typeof insertLicenseSchema>;
+export type TicketFeedback = typeof ticketFeedback.$inferSelect;
+export type InsertTicketFeedback = z.infer<typeof insertTicketFeedbackSchema>;
+export type TicketAttachment = typeof ticketAttachments.$inferSelect;
+export type InsertTicketAttachment = z.infer<typeof insertTicketAttachmentSchema>;
