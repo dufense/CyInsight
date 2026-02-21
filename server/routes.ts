@@ -2710,9 +2710,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         eventTypes: Set<string>; firstSeen: Date; lastSeen: Date;
         riskScore: number; mitreTactics: Set<string>;
         logSources: Set<string>; ips: Set<string>;
+        groups: Set<string>; osSet: Set<string>;
+        assetType: string; memoryMB: number; cpuCores: number;
       }> = {};
 
-      const addAsset = (name: string, severity: string, eventType: string, date: Date, riskScore: number | null, mitreTactic: string | null, logSource: string | null, ip: string | null, isIncident: boolean, rawFirstSeen?: Date | null, rawLastSeen?: Date | null) => {
+      const classifyAssetType = (name: string, groups: Set<string>): string => {
+        const n = name.toLowerCase();
+        if (n.includes("srv") || n.includes("server") || n.includes("db") || n.includes("api") || n.includes("app-") || n.includes("feed") || n.includes("archive") || n.includes("slave") || n.includes("master") || n.includes("veeam") || n.includes("dc-") || n.includes("dcv")) return "Server";
+        for (const g of groups) {
+          const gl = g.toLowerCase();
+          if (gl.includes("server") || gl.includes("aws") || gl.includes("linux")) return "Server";
+        }
+        return "Endpoint";
+      };
+
+      const addAsset = (name: string, severity: string, eventType: string, date: Date, riskScore: number | null, mitreTactic: string | null, logSource: string | null, ip: string | null, isIncident: boolean, rawFirstSeen?: Date | null, rawLastSeen?: Date | null, group?: string | null, os?: string | null, memMB?: number, cpuC?: number) => {
         const key = name.toLowerCase().trim();
         if (!key || key.length < 2) return;
         const effectiveFirstSeen = rawFirstSeen || date;
@@ -2724,6 +2736,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             eventTypes: new Set(), firstSeen: effectiveFirstSeen, lastSeen: effectiveLastSeen,
             riskScore: 0, mitreTactics: new Set(),
             logSources: new Set(), ips: new Set(),
+            groups: new Set(), osSet: new Set(),
+            assetType: "Endpoint", memoryMB: 0, cpuCores: 0,
           };
         }
         const a = assetMap[key];
@@ -2739,35 +2753,99 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (mitreTactic) a.mitreTactics.add(mitreTactic.split(",")[0]?.trim());
         if (logSource) a.logSources.add(logSource.split(",")[0]?.trim());
         if (ip) a.ips.add(ip);
+        if (group) a.groups.add(group);
+        if (os) a.osSet.add(os);
+        if (memMB && memMB > a.memoryMB) a.memoryMB = memMB;
+        if (cpuC && cpuC > a.cpuCores) a.cpuCores = cpuC;
       };
 
       for (const evt of events) {
         const { firstSeen: rawFirst, lastSeen: rawLast } = extractDatesFromPayload(evt.rawPayload);
+        let os: string | null = null;
+        let memMB = 0;
+        let cpuC = 0;
+        let group: string | null = evt.logSource?.split(",")[0]?.trim() || null;
+        const raw = evt.rawPayload as any;
+        if (raw) {
+          const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+          if (payload["OS"] || payload["Operating System"]) os = payload["OS"] || payload["Operating System"];
+          if (payload["Memory"]) { const m = parseInt(payload["Memory"]); if (!isNaN(m)) memMB = m; }
+          if (payload["CPU"] || payload["Processors"]) { const c = parseInt(payload["CPU"] || payload["Processors"]); if (!isNaN(c)) cpuC = c; }
+          if (payload["Scan Group Name"]) group = payload["Scan Group Name"];
+        }
         if (evt.asset) {
-          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast));
+          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast, group, os, memMB, cpuC));
         }
         if (evt.target && evt.target !== evt.asset) {
-          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast);
+          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast, group, os, memMB, cpuC);
         }
       }
 
       for (const inc of incidents) {
         if (inc.affectedAssets) {
-          inc.affectedAssets.split(",").forEach(a => addAsset(a.trim(), inc.severity, inc.category || "incident", inc.createdAt, null, inc.category, inc.source, null, true));
+          const incGroup = inc.detectionSource || null;
+          inc.affectedAssets.split(",").forEach(a => addAsset(a.trim(), inc.severity, inc.category || "incident", inc.createdAt, null, inc.category, inc.source, null, true, null, null, incGroup));
         }
       }
 
       const assets = Object.values(assetMap)
-        .map(a => ({
-          ...a,
-          totalEvents: a.eventCount + a.incidentCount,
-          riskLevel: a.criticalCount > 0 ? "critical" : a.highCount > 2 ? "high" : a.mediumCount > 5 ? "medium" : "low",
-          eventTypes: Array.from(a.eventTypes),
-          mitreTactics: Array.from(a.mitreTactics),
-          logSources: Array.from(a.logSources),
-          ips: Array.from(a.ips),
-        }))
+        .map(a => {
+          a.assetType = classifyAssetType(a.name, a.groups);
+          return {
+            ...a,
+            totalEvents: a.eventCount + a.incidentCount,
+            riskLevel: a.criticalCount > 0 ? "critical" : a.highCount > 2 ? "high" : a.mediumCount > 5 ? "medium" : "low",
+            eventTypes: Array.from(a.eventTypes),
+            mitreTactics: Array.from(a.mitreTactics),
+            logSources: Array.from(a.logSources),
+            ips: Array.from(a.ips),
+            groups: Array.from(a.groups),
+            os: Array.from(a.osSet),
+            assetType: a.assetType,
+            memoryMB: a.memoryMB,
+            cpuCores: a.cpuCores,
+          };
+        })
         .sort((a, b) => b.totalEvents - a.totalEvents);
+
+      const groupCounts: Record<string, number> = {};
+      const typeCounts: Record<string, number> = { Endpoint: 0, Server: 0 };
+      const osCounts: Record<string, number> = {};
+      const memorySizeBuckets: Record<string, number> = { "0-2 GB": 0, "2-4 GB": 0, "4-8 GB": 0, "8-16 GB": 0, "16-32 GB": 0, "32+ GB": 0, "Unknown": 0 };
+      const cpuBuckets: Record<string, number> = { "1 Core": 0, "2 Cores": 0, "4 Cores": 0, "8 Cores": 0, "16+ Cores": 0, "Unknown": 0 };
+
+      for (const a of assets) {
+        if (a.groups.length > 0) {
+          for (const g of a.groups) { groupCounts[g] = (groupCounts[g] || 0) + 1; }
+        } else {
+          groupCounts["Unassigned"] = (groupCounts["Unassigned"] || 0) + 1;
+        }
+        typeCounts[a.assetType] = (typeCounts[a.assetType] || 0) + 1;
+        if (a.os.length > 0) {
+          for (const o of a.os) {
+            const normalized = o.includes("Windows") ? "Windows" : o.includes("Linux") || o.includes("Ubuntu") || o.includes("CentOS") || o.includes("RHEL") ? "Linux" : o.includes("Mac") || o.includes("macOS") ? "macOS" : o;
+            osCounts[normalized] = (osCounts[normalized] || 0) + 1;
+          }
+        } else {
+          osCounts["Unknown"] = (osCounts["Unknown"] || 0) + 1;
+        }
+        if (a.memoryMB > 0) {
+          const gb = a.memoryMB / 1024;
+          if (gb <= 2) memorySizeBuckets["0-2 GB"]++;
+          else if (gb <= 4) memorySizeBuckets["2-4 GB"]++;
+          else if (gb <= 8) memorySizeBuckets["4-8 GB"]++;
+          else if (gb <= 16) memorySizeBuckets["8-16 GB"]++;
+          else if (gb <= 32) memorySizeBuckets["16-32 GB"]++;
+          else memorySizeBuckets["32+ GB"]++;
+        } else { memorySizeBuckets["Unknown"]++; }
+        if (a.cpuCores > 0) {
+          if (a.cpuCores <= 1) cpuBuckets["1 Core"]++;
+          else if (a.cpuCores <= 2) cpuBuckets["2 Cores"]++;
+          else if (a.cpuCores <= 4) cpuBuckets["4 Cores"]++;
+          else if (a.cpuCores <= 8) cpuBuckets["8 Cores"]++;
+          else cpuBuckets["16+ Cores"]++;
+        } else { cpuBuckets["Unknown"]++; }
+      }
 
       const summary = {
         totalAssets: assets.length,
@@ -2783,6 +2861,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           { name: "Medium", value: assets.filter(a => a.riskLevel === "medium").length },
           { name: "Low", value: assets.filter(a => a.riskLevel === "low").length },
         ],
+        assetsByGroup: Object.entries(groupCounts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
+        assetsByType: Object.entries(typeCounts).map(([name, value]) => ({ name, value })).filter(v => v.value > 0),
+        assetsByOS: Object.entries(osCounts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
+        assetsByMemory: Object.entries(memorySizeBuckets).map(([name, value]) => ({ name, value })).filter(v => v.value > 0),
+        assetsByCPU: Object.entries(cpuBuckets).map(([name, value]) => ({ name, value })).filter(v => v.value > 0),
       };
 
       const eventTypeCounts: Record<string, Set<string>> = {};
@@ -2845,6 +2928,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const eventTypes = new Set<string>();
       const actions = new Set<string>();
       const detectionSources = new Set<string>();
+      const assetGroups = new Set<string>();
       let maxRiskScore = 0;
       let totalRiskScore = 0;
       let riskCount = 0;
@@ -2866,7 +2950,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (evt.target) ips.add(evt.target);
         if (evt.protocol) protocols.add(evt.protocol);
         if (evt.country) countries.add(evt.country);
-        if (evt.logSource) evt.logSource.split(",").forEach(s => logSources.add(s.trim()));
+        if (evt.logSource) evt.logSource.split(",").forEach(s => { logSources.add(s.trim()); assetGroups.add(s.trim()); });
         if (evt.mitreTactic) evt.mitreTactic.split(",").forEach(t => mitreTactics.add(t.trim()));
         if (evt.mitreTechnique) evt.mitreTechnique.split(",").forEach(t => mitreTechniques.add(t.trim()));
         if (evt.eventType) eventTypes.add(evt.eventType);
@@ -2904,7 +2988,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           if (payload["Last EPS Auto-Remediation Action"]) {
             securityControls.add(`EPS: ${payload["Last EPS Auto-Remediation Action"]}`);
           }
-          if (payload["Scan Group Name"]) securityControls.add(`Scan Group: ${payload["Scan Group Name"]}`);
+          if (payload["Scan Group Name"]) {
+            securityControls.add(`Scan Group: ${payload["Scan Group Name"]}`);
+            assetGroups.add(payload["Scan Group Name"]);
+          }
           if (payload["Total Risk"]) {
             const tr = parseInt(payload["Total Risk"]);
             if (!isNaN(tr) && tr > maxRiskScore) maxRiskScore = tr;
@@ -2942,7 +3029,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (!lastSeen || inc.createdAt > lastSeen) lastSeen = inc.createdAt;
         if (inc.sourceIp) ips.add(inc.sourceIp);
         if (inc.destinationIp) ips.add(inc.destinationIp);
-        if (inc.detectionSource) detectionSources.add(inc.detectionSource);
+        if (inc.detectionSource) {
+          detectionSources.add(inc.detectionSource);
+          assetGroups.add(inc.detectionSource);
+        }
         if (inc.mitreTactic) mitreTactics.add(inc.mitreTactic);
         if (inc.mitreTechnique) mitreTechniques.add(inc.mitreTechnique);
         if (inc.iocData) {
@@ -2991,6 +3081,17 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           detectionSources: Array.from(detectionSources).slice(0, 20),
           securityControls: Array.from(securityControls).slice(0, 30),
         },
+        groups: Array.from(assetGroups).map(g => {
+          const gl = g.toLowerCase();
+          let source = "EDR";
+          if (gl.includes("ad") || gl.includes("active directory") || gl.includes("domain") || gl.includes("ceo") || gl.includes("cfo") || gl.includes("it support") || gl.includes("it infra") || gl.includes("it application")) source = "AD";
+          else if (gl.includes("patch") || gl.includes("deploy") || gl.includes("update") || gl.includes("t_deploy")) source = "Patch Management";
+          else if (gl.includes("asset") || gl.includes("inventory") || gl.includes("cmdb")) source = "Asset Management";
+          else if (gl.includes("usb") || gl.includes("dlp") || gl.includes("test")) source = "DLP";
+          else if (gl.includes("network") || gl.includes("stt") || gl.includes("ndr")) source = "NDR";
+          else if (gl.includes("import") || gl.includes("scan")) source = "Scanner";
+          return { name: g, source };
+        }),
         vulnerabilities: vulnerabilities.slice(0, 50),
         iocIndicators: iocIndicators.slice(0, 50),
         severityTimeline,

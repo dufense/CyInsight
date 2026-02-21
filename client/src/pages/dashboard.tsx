@@ -508,7 +508,8 @@ export default function DashboardPage() {
             <TabsTrigger value="email" data-testid="tab-email" className="text-xs">Email Security</TabsTrigger>
             <TabsTrigger value="cloud" data-testid="tab-cloud" className="text-xs">Web Security</TabsTrigger>
             <TabsTrigger value="network" data-testid="tab-network" className="text-xs">Network</TabsTrigger>
-            <TabsTrigger value="endpoint" data-testid="tab-endpoint" className="text-xs">Web App</TabsTrigger>
+            <TabsTrigger value="endpoint" data-testid="tab-endpoint" className="text-xs">Endpoint</TabsTrigger>
+            <TabsTrigger value="webapp" data-testid="tab-webapp" className="text-xs">Web App</TabsTrigger>
             <TabsTrigger value="logs" data-testid="tab-logs" className="text-xs">Log Sources</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis" className="text-xs">Threat Analysis</TabsTrigger>
           </TabsList>
@@ -843,6 +844,104 @@ export default function DashboardPage() {
           </div>
         </TabsContent>
 
+        {/* Web App (WAF) */}
+        <TabsContent value="webapp" className="space-y-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <MetricCard title="WAF Events" value={s.wafTotal} icon={Globe} color={C.red} />
+            <MetricCard title="OWASP Top 10 Attacks" value={(() => {
+              const owaspPatterns = /sql injection|xss|cross-site|injection|broken auth|sensitive data|xxe|broken access|security misconfig|insecure deserialization|insufficient logging|ssrf/i;
+              return (s.wafAttackTypes || []).filter((a: any) => owaspPatterns.test(a.name)).reduce((sum: number, a: any) => sum + (a.count || 0), 0);
+            })()} icon={ShieldAlert} color={C.orange} />
+            <MetricCard title="Bot Attacks" value={(() => {
+              const botPatterns = /bot|crawler|scraper|spider|automation/i;
+              return (s.wafAttackTypes || []).filter((a: any) => botPatterns.test(a.name)).reduce((sum: number, a: any) => sum + (a.count || 0), 0);
+            })()} icon={Brain} color={C.purple} />
+            <MetricCard title="DDoS Events" value={(() => {
+              const ddosPatterns = /ddos|flood|slowloris|syn flood|udp flood|volumetric/i;
+              return (s.wafAttackTypes || []).filter((a: any) => ddosPatterns.test(a.name)).reduce((sum: number, a: any) => sum + (a.count || 0), 0);
+            })()} icon={Zap} color={C.red} />
+          </div>
+          <div className="grid lg:grid-cols-3 gap-4">
+            <Top10 title="OWASP Top 10 Categories" data={(() => {
+              const owaspMap: Record<string, string> = {
+                "SQL Injection": "A03:Injection", "XSS": "A07:XSS", "Cross-Site Scripting": "A07:XSS",
+                "Injection": "A03:Injection", "Broken Authentication": "A07:Auth Failure",
+                "Sensitive Data Exposure": "A02:Crypto Failure", "XXE": "A05:Misconfig",
+                "Broken Access Control": "A01:Access Control", "Security Misconfiguration": "A05:Misconfig",
+                "Insecure Deserialization": "A08:Integrity Failure", "SSRF": "A10:SSRF",
+                "Insufficient Logging": "A09:Logging Failure",
+              };
+              const categories: Record<string, number> = {};
+              (s.wafAttackTypes || []).forEach((a: any) => {
+                const cat = owaspMap[a.name];
+                if (cat) categories[cat] = (categories[cat] || 0) + (a.count || 0);
+              });
+              const result = Object.entries(categories).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+              if (result.length === 0) {
+                return [
+                  { name: "A01:Access Control", count: 0 }, { name: "A02:Crypto Failure", count: 0 },
+                  { name: "A03:Injection", count: 0 }, { name: "A05:Misconfig", count: 0 },
+                  { name: "A07:XSS", count: 0 }, { name: "A07:Auth Failure", count: 0 },
+                  { name: "A08:Integrity Failure", count: 0 }, { name: "A09:Logging Failure", count: 0 },
+                  { name: "A10:SSRF", count: 0 },
+                ];
+              }
+              return result;
+            })()} icon={ShieldAlert} />
+            <Top10 title="Application Bot Activity" data={(() => {
+              const botPatterns = /bot|crawler|scraper|spider|automation/i;
+              const filtered = (s.wafAttackTypes || []).filter((a: any) => botPatterns.test(a.name));
+              if (filtered.length > 0) return filtered;
+              return [
+                { name: "Scraper Bots", count: 0 }, { name: "Credential Stuffing Bots", count: 0 },
+                { name: "Spam Bots", count: 0 }, { name: "DDoS Bots", count: 0 },
+                { name: "Click Fraud Bots", count: 0 }, { name: "Content Scrapers", count: 0 },
+              ];
+            })()} icon={Brain} />
+            <Top10 title="App DDoS Attacks" data={(() => {
+              const ddosPatterns = /ddos|flood|slowloris|syn flood|udp flood|volumetric/i;
+              const filtered = (s.wafAttackTypes || []).filter((a: any) => ddosPatterns.test(a.name));
+              if (filtered.length > 0) return filtered;
+              return [
+                { name: "HTTP Flood", count: 0 }, { name: "Slowloris", count: 0 },
+                { name: "SYN Flood", count: 0 }, { name: "UDP Flood", count: 0 },
+                { name: "DNS Amplification", count: 0 }, { name: "Volumetric Attack", count: 0 },
+              ];
+            })()} icon={Zap} />
+          </div>
+          <div className="grid lg:grid-cols-2 gap-4">
+            <Card>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Action Distribution</CardTitle>
+                <ChartTypeSelector active={ct("webappWafActions", "pie")} onChange={(v) => setCt("webappWafActions", v)} />
+              </CardHeader>
+              <CardContent className="pt-0">
+                <FlexChart
+                  data={s.wafActions}
+                  chartType={ct("webappWafActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.red, allowed: C.green, challenged: C.orange, logged: C.blue }}
+                />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Protected Applications</CardTitle>
+                <ChartTypeSelector active={ct("webappTargets", "bar")} onChange={(v) => setCt("webappTargets", v)} />
+              </CardHeader>
+              <CardContent className="pt-0">
+                <FlexChart
+                  data={s.wafTargets}
+                  chartType={ct("webappTargets", "bar")}
+                  dataKey="count"
+                  height={220}
+                />
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
         {/* Cloud & WAF */}
         <TabsContent value="cloud" className="space-y-4">
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
@@ -1114,6 +1213,89 @@ export default function DashboardPage() {
                       dataKey="value"
                       height={220}
                       colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid lg:grid-cols-3 gap-4">
+                <Card>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Group</CardTitle>
+                    <ChartTypeSelector active={ct("assetsByGroup", "bar")} onChange={(v) => setCt("assetsByGroup", v)} />
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <FlexChart
+                      data={assetsData?.summary?.assetsByGroup || []}
+                      chartType={ct("assetsByGroup", "bar")}
+                      dataKey="value"
+                      height={250}
+                      layout="vertical"
+                      yAxisWidth={140}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Type</CardTitle>
+                    <ChartTypeSelector active={ct("assetsByType", "pie")} onChange={(v) => setCt("assetsByType", v)} />
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <FlexChart
+                      data={assetsData?.summary?.assetsByType || []}
+                      chartType={ct("assetsByType", "pie")}
+                      dataKey="value"
+                      height={250}
+                      colors={{ Endpoint: C.blue, Server: C.purple }}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by OS</CardTitle>
+                    <ChartTypeSelector active={ct("assetsByOS", "pie")} onChange={(v) => setCt("assetsByOS", v)} />
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <FlexChart
+                      data={assetsData?.summary?.assetsByOS || []}
+                      chartType={ct("assetsByOS", "pie")}
+                      dataKey="value"
+                      height={250}
+                      colors={{ Windows: C.blue, Linux: C.green, macOS: C.purple, Unknown: C.yellow }}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Memory Size</CardTitle>
+                    <ChartTypeSelector active={ct("assetsByMemory", "bar")} onChange={(v) => setCt("assetsByMemory", v)} />
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <FlexChart
+                      data={assetsData?.summary?.assetsByMemory || []}
+                      chartType={ct("assetsByMemory", "bar")}
+                      dataKey="value"
+                      height={220}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by CPU</CardTitle>
+                    <ChartTypeSelector active={ct("assetsByCPU", "bar")} onChange={(v) => setCt("assetsByCPU", v)} />
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <FlexChart
+                      data={assetsData?.summary?.assetsByCPU || []}
+                      chartType={ct("assetsByCPU", "bar")}
+                      dataKey="value"
+                      height={220}
                     />
                   </CardContent>
                 </Card>

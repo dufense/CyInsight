@@ -154,7 +154,7 @@ export default function AssetDetailPage() {
             </div>
             <div>
               <h1 className="text-xl font-bold" data-testid="text-asset-name">{d.name}</h1>
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <Badge variant="secondary" className="text-[10px]" style={{ backgroundColor: `${SEV[d.riskLevel] || C.blue}20`, color: SEV[d.riskLevel] || C.blue }}>
                   {d.riskLevel.toUpperCase()}
                 </Badge>
@@ -165,6 +165,26 @@ export default function AssetDetailPage() {
                   Last seen: {d.lastSeen ? new Date(d.lastSeen).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }) : "N/A"}
                 </span>
               </div>
+              {d.groups && d.groups.length > 0 && (
+                <div className="flex items-center gap-2 mt-1.5 flex-wrap" data-testid="asset-groups">
+                  <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Groups:</span>
+                  {d.groups.map((g: { name: string; source: string }, i: number) => {
+                    const sourceColors: Record<string, string> = {
+                      EDR: C.blue, AD: C.purple, "Patch Management": C.orange,
+                      "Asset Management": C.teal, DLP: C.red, NDR: C.green, Scanner: C.yellow,
+                    };
+                    const sc = sourceColors[g.source] || C.blue;
+                    return (
+                      <div key={i} className="flex items-center gap-1" data-testid={`asset-group-${i}`}>
+                        <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-5 font-medium" style={{ borderColor: `${sc}40`, color: sc, backgroundColor: `${sc}10` }}>
+                          {g.source}
+                        </Badge>
+                        <span className="text-[11px] font-medium" data-testid={`text-group-name-${i}`}>{g.name}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
