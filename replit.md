@@ -18,14 +18,14 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 - `client/src/App.tsx` - Main app with routing and auth flow
 - `client/src/components/app-sidebar.tsx` - Sidebar navigation with hierarchical tenant selector and role-based menu
 - `client/src/lib/tenant-context.tsx` - Multi-tenant context provider with hierarchy support, isMSS, isAdmin flags
-- `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 8 tabs
+- `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 9 tabs (incl. Asset Inventory)
 - `client/src/pages/tickets.tsx` - Ticketing with SLA indicators, activity dashboard, detail dialog with comments/attachments/feedback
 - `client/src/pages/projects.tsx` - Project management with activity dashboard, report generation, read-only mode for customers
 - `client/src/pages/knowledge-base.tsx` - Knowledge Base with document management and AI content generation
 - `client/src/pages/services.tsx` - Solutions & Services management with SLA tracking
 - `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
-- `client/src/pages/reports.tsx` - AI-powered report generation with 8 report types
-- `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF)
+- `client/src/pages/reports.tsx` - AI-powered report generation with 13 report types
+- `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF) with AI enrichment and column detection
 - `client/src/pages/admin-center.tsx` - Admin Center for tenant user management (create/edit/delete users with role assignment)
 
 ## Security Events Architecture
