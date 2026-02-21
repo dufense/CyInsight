@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Tenant } from "@shared/schema";
 
@@ -36,8 +36,30 @@ const TenantContext = createContext<TenantContextType>({
   assignedRoles: [],
 });
 
+const TENANT_STORAGE_KEY = "secureops_selected_tenant_id";
+
+function getSavedTenantId(): number | null {
+  try {
+    const saved = sessionStorage.getItem(TENANT_STORAGE_KEY);
+    return saved ? parseInt(saved, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveTenantId(id: number) {
+  try {
+    sessionStorage.setItem(TENANT_STORAGE_KEY, String(id));
+  } catch {}
+}
+
 export function TenantProvider({ children }: { children: ReactNode }) {
-  const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
+  const [currentTenant, setCurrentTenantState] = useState<Tenant | null>(null);
+
+  const setCurrentTenant = useCallback((tenant: Tenant) => {
+    setCurrentTenantState(tenant);
+    saveTenantId(tenant.id);
+  }, []);
 
   const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean; isMSS?: boolean; isAdmin?: boolean; canSwitchRoles?: boolean; assignedRoles?: string[] }>({
     queryKey: ["/api/user/profile"],
@@ -58,9 +80,21 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       if (currentTenant) {
         const stillValid = tenants.find(t => t.id === currentTenant.id);
         if (!stillValid) {
+          const savedId = getSavedTenantId();
+          const savedTenant = savedId ? tenants.find(t => t.id === savedId) : null;
+          if (savedTenant) {
+            setCurrentTenantState(savedTenant);
+            return;
+          }
           const userTenant = userProfile?.tenantId ? tenants.find(t => t.id === userProfile.tenantId) : null;
           setCurrentTenant(userTenant || tenants[0]);
         }
+        return;
+      }
+      const savedId = getSavedTenantId();
+      const savedTenant = savedId ? tenants.find(t => t.id === savedId) : null;
+      if (savedTenant) {
+        setCurrentTenantState(savedTenant);
         return;
       }
       if (userProfile?.tenantId) {
