@@ -2,6 +2,7 @@ import {
   tenants, tenantUsers, incidents, tickets, ticketComments,
   projects, tasks, reports, securityEvents,
   services, slaDefinitions, teamMembers, shiftRosters, documents,
+  superadmins, licenses,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -16,6 +17,8 @@ import {
   type TeamMember, type InsertTeamMember,
   type ShiftRoster, type InsertShiftRoster,
   type Document, type InsertDocument,
+  type Superadmin, type InsertSuperadmin,
+  type License, type InsertLicense,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql, gte, lte } from "drizzle-orm";
@@ -98,6 +101,22 @@ export interface IStorage {
   createDocument(data: InsertDocument): Promise<Document>;
   updateDocument(id: number, data: Partial<InsertDocument>): Promise<Document>;
   deleteDocument(id: number): Promise<void>;
+
+  getSuperadminByUsername(username: string): Promise<Superadmin | undefined>;
+  createSuperadmin(data: InsertSuperadmin): Promise<Superadmin>;
+  updateSuperadminLastLogin(id: number): Promise<void>;
+
+  getLicenses(): Promise<License[]>;
+  getLicensesByTenant(tenantId: number): Promise<License[]>;
+  getLicense(id: number): Promise<License | undefined>;
+  createLicense(data: InsertLicense): Promise<License>;
+  updateLicense(id: number, data: Partial<InsertLicense>): Promise<License>;
+  deleteLicense(id: number): Promise<void>;
+
+  updateTenant(id: number, data: Partial<InsertTenant>): Promise<Tenant>;
+  getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]>;
+  updateTenantUser(id: number, data: Partial<InsertTenantUser>): Promise<TenantUser>;
+  deleteTenantUser(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -678,6 +697,74 @@ export class DatabaseStorage implements IStorage {
 
   async deleteDocument(id: number): Promise<void> {
     await db.delete(documents).where(eq(documents.id, id));
+  }
+
+  async getSuperadminByUsername(username: string): Promise<Superadmin | undefined> {
+    const [admin] = await db.select().from(superadmins).where(eq(superadmins.username, username));
+    return admin;
+  }
+
+  async createSuperadmin(data: InsertSuperadmin): Promise<Superadmin> {
+    const [admin] = await db.insert(superadmins).values(data).returning();
+    return admin;
+  }
+
+  async updateSuperadminLastLogin(id: number): Promise<void> {
+    await db.update(superadmins).set({ lastLoginAt: new Date() }).where(eq(superadmins.id, id));
+  }
+
+  async getLicenses(): Promise<License[]> {
+    return db.select().from(licenses).orderBy(desc(licenses.createdAt));
+  }
+
+  async getLicensesByTenant(tenantId: number): Promise<License[]> {
+    return db.select().from(licenses).where(eq(licenses.tenantId, tenantId)).orderBy(desc(licenses.createdAt));
+  }
+
+  async getLicense(id: number): Promise<License | undefined> {
+    const [license] = await db.select().from(licenses).where(eq(licenses.id, id));
+    return license;
+  }
+
+  async createLicense(data: InsertLicense): Promise<License> {
+    const [license] = await db.insert(licenses).values(data).returning();
+    return license;
+  }
+
+  async updateLicense(id: number, data: Partial<InsertLicense>): Promise<License> {
+    const [license] = await db.update(licenses)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(licenses.id, id))
+      .returning();
+    return license;
+  }
+
+  async deleteLicense(id: number): Promise<void> {
+    await db.delete(licenses).where(eq(licenses.id, id));
+  }
+
+  async updateTenant(id: number, data: Partial<InsertTenant>): Promise<Tenant> {
+    const [tenant] = await db.update(tenants)
+      .set(data)
+      .where(eq(tenants.id, id))
+      .returning();
+    return tenant;
+  }
+
+  async getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]> {
+    return db.select().from(tenantUsers).where(eq(tenantUsers.tenantId, tenantId)).orderBy(tenantUsers.createdAt);
+  }
+
+  async updateTenantUser(id: number, data: Partial<InsertTenantUser>): Promise<TenantUser> {
+    const [tu] = await db.update(tenantUsers)
+      .set(data)
+      .where(eq(tenantUsers.id, id))
+      .returning();
+    return tu;
+  }
+
+  async deleteTenantUser(id: number): Promise<void> {
+    await db.delete(tenantUsers).where(eq(tenantUsers.id, id));
   }
 }
 

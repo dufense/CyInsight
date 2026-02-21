@@ -14,6 +14,7 @@ import {
   insertTeamMemberSchema,
   insertShiftRosterSchema,
   insertDocumentSchema,
+  insertLicenseSchema,
 } from "@shared/schema";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -21,6 +22,7 @@ import multer from "multer";
 import * as XLSX from "xlsx";
 import * as fs from "fs";
 import * as path from "path";
+import bcrypt from "bcryptjs";
 
 const upload = multer({ dest: "/tmp/uploads/" });
 const REPORTS_DIR = path.join(process.cwd(), "data", "reports");
@@ -100,6 +102,261 @@ export async function registerRoutes(
 ): Promise<Server> {
   await setupAuth(app);
   registerAuthRoutes(app);
+
+  async function seedSuperadmin() {
+    const existing = await storage.getSuperadminByUsername("admin");
+    if (!existing) {
+      const defaultPassword = process.env.SUPERADMIN_DEFAULT_PASSWORD || "Admin@123";
+      const hash = await bcrypt.hash(defaultPassword, 12);
+      await storage.createSuperadmin({
+        username: "admin",
+        passwordHash: hash,
+        displayName: "Super Administrator",
+        isActive: true,
+      });
+      console.log("Superadmin seeded (change default password after first login)");
+    }
+  }
+  seedSuperadmin().catch(console.error);
+
+  app.post("/api/superadmin/login", async (req: any, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ message: "Username and password required" });
+      }
+      const admin = await storage.getSuperadminByUsername(username);
+      if (!admin || !admin.isActive) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+      const valid = await bcrypt.compare(password, admin.passwordHash);
+      if (!valid) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+      await storage.updateSuperadminLastLogin(admin.id);
+      (req.session as any).superadminId = admin.id;
+      (req.session as any).isSuperAdmin = true;
+      res.json({ id: admin.id, username: admin.username, displayName: admin.displayName });
+    } catch (error) {
+      console.error("Superadmin login error:", error);
+      res.status(500).json({ message: "Login failed" });
+    }
+  });
+
+  app.get("/api/superadmin/session", (req: any, res) => {
+    if (req.session?.isSuperAdmin) {
+      res.json({ authenticated: true, superadminId: req.session.superadminId });
+    } else {
+      res.json({ authenticated: false });
+    }
+  });
+
+  app.post("/api/superadmin/logout", (req: any, res) => {
+    if (req.session) {
+      delete req.session.isSuperAdmin;
+      delete req.session.superadminId;
+    }
+    res.json({ success: true });
+  });
+
+  function isSuperAdmin(req: any, res: any, next: any) {
+    if (req.session?.isSuperAdmin) {
+      return next();
+    }
+    return res.status(401).json({ message: "Superadmin access required" });
+  }
+
+  function isSuperAdminOrPlatformAdmin(req: any, res: any, next: any) {
+    if (req.session?.isSuperAdmin) {
+      return next();
+    }
+    if (req.user?.claims?.sub) {
+      return next();
+    }
+    return res.status(401).json({ message: "Admin access required" });
+  }
+
+  async function assertAdminAccess(req: any): Promise<boolean> {
+    if (req.session?.isSuperAdmin) return true;
+    if (req.user?.claims?.sub) {
+      const access = await getUserTenantAccess(req);
+      return access.isPlatformAdmin;
+    }
+    return false;
+  }
+
+  app.get("/api/tenant-admin/tenants", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const allTenants = await storage.getTenants();
+      res.json(allTenants);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch tenants" });
+    }
+  });
+
+  app.post("/api/tenant-admin/tenants", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const { type, parentId } = req.body;
+      if (type === "customer" && parentId) {
+        const parent = await storage.getTenant(parentId);
+        if (!parent || parent.type !== "mssp") {
+          return res.status(400).json({ message: "Customer tenants must have an MSSP parent" });
+        }
+      }
+      if (type === "customer" && !parentId) {
+        return res.status(400).json({ message: "Customer tenants require a parent MSSP" });
+      }
+      const tenant = await storage.createTenant(req.body);
+      res.json(tenant);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to create tenant" });
+    }
+  });
+
+  app.patch("/api/tenant-admin/tenants/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const tenant = await storage.updateTenant(parseInt(req.params.id), req.body);
+      res.json(tenant);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to update tenant" });
+    }
+  });
+
+  app.get("/api/tenant-admin/tenant-users", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const allUsers = await storage.getAllTenantUsers();
+      const allTenants = await storage.getTenants();
+      const enriched = allUsers.map(u => ({
+        ...u,
+        tenantName: allTenants.find(t => t.id === u.tenantId)?.name || "Unknown",
+        tenantType: allTenants.find(t => t.id === u.tenantId)?.type || "unknown",
+      }));
+      res.json(enriched);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch tenant users" });
+    }
+  });
+
+  app.post("/api/tenant-admin/tenant-users", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const tu = await storage.createTenantUser(req.body);
+      res.json(tu);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to create tenant user" });
+    }
+  });
+
+  app.patch("/api/tenant-admin/tenant-users/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const tu = await storage.updateTenantUser(parseInt(req.params.id), req.body);
+      res.json(tu);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to update tenant user" });
+    }
+  });
+
+  app.delete("/api/tenant-admin/tenant-users/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      await storage.deleteTenantUser(parseInt(req.params.id));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete tenant user" });
+    }
+  });
+
+  app.get("/api/tenant-admin/licenses", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const allLicenses = await storage.getLicenses();
+      const allTenants = await storage.getTenants();
+      const enriched = allLicenses.map(l => ({
+        ...l,
+        tenantName: allTenants.find(t => t.id === l.tenantId)?.name || "Unknown",
+      }));
+      res.json(enriched);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch licenses" });
+    }
+  });
+
+  app.post("/api/tenant-admin/licenses", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const data = {
+        ...req.body,
+        startDate: new Date(req.body.startDate),
+        expiresAt: new Date(req.body.expiresAt),
+      };
+      const license = await storage.createLicense(data);
+      res.json(license);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to create license" });
+    }
+  });
+
+  app.patch("/api/tenant-admin/licenses/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const data = { ...req.body };
+      if (data.startDate) data.startDate = new Date(data.startDate);
+      if (data.expiresAt) data.expiresAt = new Date(data.expiresAt);
+      const license = await storage.updateLicense(parseInt(req.params.id), data);
+      res.json(license);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to update license" });
+    }
+  });
+
+  app.delete("/api/tenant-admin/licenses/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      await storage.deleteLicense(parseInt(req.params.id));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete license" });
+    }
+  });
+
+  app.get("/api/tenant-admin/stats", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const allTenants = await storage.getTenants();
+      const allUsers = await storage.getAllTenantUsers();
+      const allLicenses = await storage.getLicenses();
+      const mssps = allTenants.filter(t => t.type === "mssp");
+      const customers = allTenants.filter(t => t.type === "customer");
+      const activeLicenses = allLicenses.filter(l => l.status === "active");
+      res.json({
+        totalTenants: allTenants.length,
+        totalMSSPs: mssps.length,
+        totalCustomers: customers.length,
+        totalUsers: allUsers.length,
+        totalLicenses: allLicenses.length,
+        activeLicenses: activeLicenses.length,
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch stats" });
+    }
+  });
 
   app.get("/api/user/profile", isAuthenticated, async (req: any, res) => {
     try {

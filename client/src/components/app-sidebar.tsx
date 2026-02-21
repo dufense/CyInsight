@@ -16,6 +16,7 @@ import {
   CalendarClock,
   BookOpen,
   Globe,
+  KeyRound,
 } from "lucide-react";
 import {
   Sidebar,
@@ -44,6 +45,7 @@ import { useAuth } from "@/hooks/use-auth";
 
 const platformAdminNavItems = [
   { title: "Platform Overview", url: "/platform", icon: Globe },
+  { title: "Tenant Admin", url: "/tenant-admin", icon: KeyRound },
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   { title: "Incidents", url: "/incidents", icon: AlertTriangle },
   { title: "Tickets", url: "/tickets", icon: Ticket },

@@ -1,6 +1,11 @@
-import { Shield, BarChart3, Lock, Zap, ArrowRight, ChevronRight } from "lucide-react";
+import { useState } from "react";
+import { Shield, BarChart3, Lock, Zap, ArrowRight, ChevronRight, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
+import { queryClient } from "@/lib/queryClient";
 
 const features = [
   {
@@ -26,6 +31,36 @@ const features = [
 ];
 
 export default function LandingPage() {
+  const { toast } = useToast();
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [adminUsername, setAdminUsername] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  const handleAdminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    try {
+      const res = await fetch("/api/superadmin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username: adminUsername, password: adminPassword }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        toast({ title: "Login failed", description: data.message || "Invalid credentials", variant: "destructive" });
+        return;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["/api/superadmin/session"] });
+      window.location.reload();
+    } catch (error) {
+      toast({ title: "Login failed", description: "Connection error", variant: "destructive" });
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <nav className="fixed top-0 w-full z-50 border-b border-border/50 backdrop-blur-xl bg-background/80">
@@ -40,14 +75,64 @@ export default function LandingPage() {
             <a href="#features" className="text-sm text-muted-foreground transition-colors">Features</a>
             <a href="#platform" className="text-sm text-muted-foreground transition-colors">Platform</a>
           </div>
-          <a href="/api/login">
-            <Button size="sm" data-testid="button-login">
-              Sign In
-              <ArrowRight className="w-3.5 h-3.5 ml-1" />
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setShowAdminLogin(!showAdminLogin)} data-testid="button-admin-login-toggle">
+              <KeyRound className="w-3.5 h-3.5 mr-1" />
+              Admin
             </Button>
-          </a>
+            <a href="/api/login">
+              <Button size="sm" data-testid="button-login">
+                Sign In
+                <ArrowRight className="w-3.5 h-3.5 ml-1" />
+              </Button>
+            </a>
+          </div>
         </div>
       </nav>
+
+      {showAdminLogin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowAdminLogin(false)}>
+          <Card className="w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+            <CardContent className="p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="flex items-center justify-center w-8 h-8 rounded-md bg-red-600">
+                  <Shield className="w-4 h-4 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold">Super Admin Login</h2>
+                  <p className="text-[10px] text-muted-foreground">Tenant Administration Access</p>
+                </div>
+              </div>
+              <form onSubmit={handleAdminLogin} className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Username</Label>
+                  <Input
+                    value={adminUsername}
+                    onChange={e => setAdminUsername(e.target.value)}
+                    placeholder="admin"
+                    required
+                    data-testid="input-admin-username"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Password</Label>
+                  <Input
+                    type="password"
+                    value={adminPassword}
+                    onChange={e => setAdminPassword(e.target.value)}
+                    placeholder="Enter password"
+                    required
+                    data-testid="input-admin-password"
+                  />
+                </div>
+                <Button type="submit" className="w-full" size="sm" disabled={loginLoading} data-testid="button-admin-login-submit">
+                  {loginLoading ? "Signing in..." : "Sign In as Super Admin"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <section className="pt-32 pb-20 px-6">
         <div className="max-w-7xl mx-auto">

@@ -1,6 +1,7 @@
-import { Switch, Route } from "wouter";
+import { useState, useEffect } from "react";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
@@ -23,6 +24,7 @@ import ReportsPage from "@/pages/reports";
 import ImportPage from "@/pages/import";
 import KnowledgeBasePage from "@/pages/knowledge-base";
 import PlatformOverviewPage from "@/pages/platform-overview";
+import TenantAdminPage from "@/pages/tenant-admin";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -38,6 +40,7 @@ function AuthenticatedRouter() {
     <Switch>
       <Route path="/" component={DashboardPage} />
       <Route path="/platform" component={PlatformOverviewPage} />
+      <Route path="/tenant-admin" component={TenantAdminPage} />
       <Route path="/dashboard" component={DashboardPage} />
       <Route path="/incidents" component={IncidentsPage} />
       <Route path="/tickets" component={TicketsPage} />
@@ -78,8 +81,56 @@ function AuthenticatedLayout() {
   );
 }
 
+function SuperAdminLayout() {
+  const [, navigate] = useLocation();
+
+  const handleLogout = async () => {
+    await fetch("/api/superadmin/logout", { method: "POST", credentials: "include" });
+    queryClient.invalidateQueries({ queryKey: ["/api/superadmin/session"] });
+    navigate("/");
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="border-b">
+        <div className="flex items-center justify-between px-6 h-14">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center justify-center w-8 h-8 rounded-md bg-red-600">
+              <Shield className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold">SecureOps Super Admin</h1>
+              <p className="text-[10px] text-muted-foreground">Tenant Administration</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <Button size="sm" variant="outline" onClick={handleLogout} data-testid="button-superadmin-logout">
+              Logout
+            </Button>
+          </div>
+        </div>
+      </header>
+      <TenantAdminPage />
+    </div>
+  );
+}
+
+import { Shield } from "lucide-react";
+
 function AppContent() {
   const { user, isLoading } = useAuth();
+  const [location] = useLocation();
+
+  const { data: superadminSession } = useQuery<{ authenticated: boolean }>({
+    queryKey: ["/api/superadmin/session"],
+    queryFn: async () => {
+      const res = await fetch("/api/superadmin/session", { credentials: "include" });
+      return res.json();
+    },
+    retry: false,
+    staleTime: 1000 * 60 * 5,
+  });
 
   if (isLoading) {
     return (
@@ -90,6 +141,10 @@ function AppContent() {
         </div>
       </div>
     );
+  }
+
+  if (superadminSession?.authenticated) {
+    return <SuperAdminLayout />;
   }
 
   if (!user) {

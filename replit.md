@@ -68,7 +68,19 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 - AI-powered report generation (Daily Project Status, Weekly Project Summary)
 - Enhanced task cards with assignee, due dates, overdue indicators
 
+### Superadmin & Tenant Administration
+- Standalone superadmin login (username/password: admin/Admin@123)
+- Dedicated Tenant Admin page with 4 tabs:
+  - Platform Overview: Stats cards (tenants, users, licenses) + MSSP hierarchy view
+  - Tenants: Full CRUD for MSSP and customer tenants with search/filter
+  - Tenant Users: User management with role assignment across tenants
+  - License Management: License CRUD with type, status, dates, user/endpoint limits
+- Accessible to both superadmin and platform_admin users
+- Superadmin auth uses bcrypt-hashed password with session-based auth
+
 ## Database Tables
+- `superadmins` - Superadmin credentials (username, password_hash, display_name)
+- `licenses` - Tenant license management (tenant_id, license_type, max_users, status, dates)
 - `tenants` - Organizations (MSSP/customer hierarchy)
 - `tenant_users` - User-tenant-role mappings
 - `incidents` - Security incidents
@@ -99,6 +111,16 @@ Customer tenants can be created via POST /api/tenants by MSS admins.
 - `customer` - Dashboard-only view with ticket submission, limited to own tenant
 
 ## API Routes
+### Superadmin Auth
+- `POST /api/superadmin/login` - Superadmin login (username/password)
+- `GET /api/superadmin/session` - Check superadmin session
+- `POST /api/superadmin/logout` - Superadmin logout
+### Tenant Admin (superadmin/platform_admin only)
+- `GET /api/tenant-admin/stats` - Platform statistics
+- `GET/POST/PUT /api/tenant-admin/tenants` - Tenant CRUD
+- `GET/POST /api/tenant-admin/tenant-users` - Tenant user management
+- `GET/POST/PUT/DELETE /api/tenant-admin/licenses` - License management
+### Regular API
 - `GET /api/tenants` - List accessible tenants
 - `POST /api/tenants` - Create customer tenant (MSS role)
 - `GET /api/tenants/hierarchy` - Hierarchical tenant structure
