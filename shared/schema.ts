@@ -404,6 +404,96 @@ export const ticketAttachmentsRelations = relations(ticketAttachments, ({ one })
   ticket: one(tickets, { fields: [ticketAttachments.ticketId], references: [tickets.id] }),
 }));
 
+export const integrationCategoryEnum = pgEnum("integration_category", [
+  "edr_xdr", "sse_casb", "dlp", "email_security", "waf",
+  "tip_easm", "vulnerability_management", "directory_services",
+  "network_security", "endpoint_security", "siem", "soar", "other"
+]);
+
+export const integrationStatusEnum = pgEnum("integration_status", [
+  "connected", "disconnected", "error", "configuring", "disabled"
+]);
+
+export const securityIntegrations = pgTable("security_integrations", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  platformKey: varchar("platform_key", { length: 100 }).notNull(),
+  platformName: varchar("platform_name", { length: 200 }).notNull(),
+  category: integrationCategoryEnum("category").notNull(),
+  status: integrationStatusEnum("status").default("disconnected").notNull(),
+  apiBaseUrl: text("api_base_url"),
+  authType: varchar("auth_type", { length: 50 }),
+  pollingEnabled: boolean("polling_enabled").default(false).notNull(),
+  pollingIntervalMinutes: integer("polling_interval_minutes").default(15),
+  lastPollAt: timestamp("last_poll_at"),
+  lastPollStatus: varchar("last_poll_status", { length: 50 }),
+  lastPollMessage: text("last_poll_message"),
+  eventsImported: integer("events_imported").default(0).notNull(),
+  configJson: jsonb("config_json"),
+  description: text("description"),
+  logoUrl: text("logo_url"),
+  isEnabled: boolean("is_enabled").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const securityIntegrationsRelations = relations(securityIntegrations, ({ one }) => ({
+  tenant: one(tenants, { fields: [securityIntegrations.tenantId], references: [tenants.id] }),
+}));
+
+export const insertSecurityIntegrationSchema = createInsertSchema(securityIntegrations).omit({ id: true, createdAt: true, updatedAt: true, lastPollAt: true, lastPollStatus: true, lastPollMessage: true, eventsImported: true });
+
+export const SECURITY_PLATFORMS = [
+  { key: "crowdstrike", name: "CrowdStrike Falcon", category: "edr_xdr", authType: "oauth2", description: "Endpoint detection and response platform with threat intelligence" },
+  { key: "palo_alto_cortex", name: "Palo Alto Cortex XDR", category: "edr_xdr", authType: "api_key", description: "Extended detection and response across endpoints, network, and cloud" },
+  { key: "checkpoint_hec", name: "Check Point Harmony Email", category: "email_security", authType: "api_key", description: "Email and collaboration security platform" },
+  { key: "cynet", name: "Cynet 360", category: "edr_xdr", authType: "api_key", description: "Autonomous breach protection platform" },
+  { key: "deceptive_bytes", name: "Deceptive Bytes", category: "endpoint_security", authType: "api_key", description: "Active endpoint deception platform" },
+  { key: "netskope", name: "Netskope SSE", category: "sse_casb", authType: "api_key", description: "Security Service Edge with CASB, SWG, and ZTNA" },
+  { key: "zscaler", name: "Zscaler SSE", category: "sse_casb", authType: "api_key", description: "Cloud-native Security Service Edge platform" },
+  { key: "skyhigh", name: "SkyHigh Security SSE", category: "sse_casb", authType: "api_key", description: "Secure Service Edge for cloud and web security" },
+  { key: "forcepoint_dlp", name: "Forcepoint DLP", category: "dlp", authType: "api_key", description: "Data loss prevention and insider threat protection" },
+  { key: "forcepoint_swg", name: "Forcepoint SWG", category: "network_security", authType: "api_key", description: "Secure web gateway for web traffic protection" },
+  { key: "trellix_dlp", name: "Trellix DLP", category: "dlp", authType: "api_key", description: "Data loss prevention across endpoints and network" },
+  { key: "trellix_ndr", name: "Trellix NDR", category: "network_security", authType: "api_key", description: "Network detection and response platform" },
+  { key: "fortidlp", name: "FortiDLP", category: "dlp", authType: "api_key", description: "AI-driven data loss prevention solution" },
+  { key: "gtb_dlp", name: "GTB DLP", category: "dlp", authType: "api_key", description: "Enterprise data loss prevention solution" },
+  { key: "proofpoint_email", name: "Proofpoint Email Security", category: "email_security", authType: "api_key", description: "Advanced email threat protection and DLP" },
+  { key: "proofpoint_dlp", name: "Proofpoint DLP", category: "dlp", authType: "api_key", description: "Cloud-based data loss prevention" },
+  { key: "imperva_waf", name: "Imperva WAF", category: "waf", authType: "api_key", description: "Web application firewall and DDoS protection" },
+  { key: "radware_waf", name: "Radware WAF", category: "waf", authType: "api_key", description: "Web application firewall and bot management" },
+  { key: "f5_waf", name: "F5 WAF", category: "waf", authType: "api_key", description: "Advanced web application firewall" },
+  { key: "sophos_endpoint", name: "Sophos Endpoint", category: "endpoint_security", authType: "api_key", description: "Next-gen endpoint protection with EDR" },
+  { key: "trendmicro_endpoint", name: "Trend Micro Endpoint", category: "endpoint_security", authType: "api_key", description: "Endpoint security with XDR capabilities" },
+  { key: "cyble", name: "Cyble Vision", category: "tip_easm", authType: "api_key", description: "Threat intelligence and external attack surface management" },
+  { key: "recorded_future", name: "Recorded Future", category: "tip_easm", authType: "api_key", description: "Intelligence-driven threat intelligence platform" },
+  { key: "threatmon", name: "ThreatMon", category: "tip_easm", authType: "api_key", description: "Threat intelligence and attack surface monitoring" },
+  { key: "group_ib", name: "Group-IB", category: "tip_easm", authType: "api_key", description: "Threat intelligence and digital risk protection" },
+  { key: "rapid7", name: "Rapid7 InsightVM", category: "vulnerability_management", authType: "api_key", description: "Vulnerability management and assessment platform" },
+  { key: "qualys", name: "Qualys VMDR", category: "vulnerability_management", authType: "api_key", description: "Vulnerability management, detection and response" },
+  { key: "tenable", name: "Tenable.io", category: "vulnerability_management", authType: "api_key", description: "Exposure management and vulnerability scanning" },
+  { key: "vicarius", name: "Vicarius vRx", category: "vulnerability_management", authType: "api_key", description: "Vulnerability remediation and prioritization" },
+  { key: "active_directory", name: "Microsoft Active Directory", category: "directory_services", authType: "ldap", description: "On-premises directory service for identity management" },
+  { key: "azure_ad", name: "Microsoft Entra ID (Azure AD)", category: "directory_services", authType: "oauth2", description: "Cloud-based identity and access management" },
+  { key: "jamf", name: "JAMF Pro", category: "directory_services", authType: "api_key", description: "Apple device management and security" },
+] as const;
+
+export const INTEGRATION_CATEGORIES = [
+  { key: "edr_xdr", name: "EDR / XDR", description: "Endpoint Detection & Response / Extended Detection & Response" },
+  { key: "sse_casb", name: "SSE / CASB", description: "Security Service Edge / Cloud Access Security Broker" },
+  { key: "dlp", name: "DLP", description: "Data Loss Prevention" },
+  { key: "email_security", name: "Email Security", description: "Email Threat Protection & Filtering" },
+  { key: "waf", name: "WAF", description: "Web Application Firewall" },
+  { key: "tip_easm", name: "TIP & EASM", description: "Threat Intelligence Platform & External Attack Surface Management" },
+  { key: "vulnerability_management", name: "Vulnerability Management", description: "Vulnerability Assessment & Remediation" },
+  { key: "directory_services", name: "Directory Services", description: "Identity & Access Management" },
+  { key: "network_security", name: "Network Security", description: "Network Detection, Response & Gateway" },
+  { key: "endpoint_security", name: "Endpoint Security", description: "Endpoint Protection & Management" },
+  { key: "siem", name: "SIEM", description: "Security Information & Event Management" },
+  { key: "soar", name: "SOAR", description: "Security Orchestration, Automation & Response" },
+  { key: "other", name: "Other", description: "Other Security Solutions" },
+] as const;
+
 export const insertSuperadminSchema = createInsertSchema(superadmins).omit({ id: true, createdAt: true, lastLoginAt: true });
 export const insertLicenseSchema = createInsertSchema(licenses).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertTicketFeedbackSchema = createInsertSchema(ticketFeedback).omit({ id: true, createdAt: true });
@@ -460,3 +550,5 @@ export type TicketFeedback = typeof ticketFeedback.$inferSelect;
 export type InsertTicketFeedback = z.infer<typeof insertTicketFeedbackSchema>;
 export type TicketAttachment = typeof ticketAttachments.$inferSelect;
 export type InsertTicketAttachment = z.infer<typeof insertTicketAttachmentSchema>;
+export type SecurityIntegration = typeof securityIntegrations.$inferSelect;
+export type InsertSecurityIntegration = z.infer<typeof insertSecurityIntegrationSchema>;

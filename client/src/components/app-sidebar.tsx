@@ -16,6 +16,7 @@ import {
   CalendarClock,
   BookOpen,
   Settings,
+  Plug,
 } from "lucide-react";
 import {
   Sidebar,
@@ -47,7 +48,7 @@ function getNavItems(role: string) {
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   ];
 
-  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+  const adminRoles = ["platform_admin", "mss_admin"];
   if (adminRoles.includes(role)) {
     items.push({ title: "Admin Portal", url: "/admin", icon: Settings });
   }
@@ -77,6 +78,11 @@ function getNavItems(role: string) {
   const shiftRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];
   if (shiftRoles.includes(role)) {
     items.push({ title: "Shift Roster", url: "/shift-roster", icon: CalendarClock });
+  }
+
+  const integrationRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer"];
+  if (integrationRoles.includes(role)) {
+    items.push({ title: "Integrations", url: "/integrations", icon: Plug });
   }
 
   const mssRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst", "service_desk"];

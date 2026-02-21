@@ -3,6 +3,7 @@ import {
   projects, tasks, reports, securityEvents,
   services, slaDefinitions, teamMembers, shiftRosters, documents,
   superadmins, licenses, ticketFeedback, ticketAttachments,
+  securityIntegrations,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -21,6 +22,7 @@ import {
   type License, type InsertLicense,
   type TicketFeedback, type InsertTicketFeedback,
   type TicketAttachment, type InsertTicketAttachment,
+  type SecurityIntegration, type InsertSecurityIntegration,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql, gte, lte, inArray } from "drizzle-orm";
@@ -129,6 +131,12 @@ export interface IStorage {
   getTicketAttachments(ticketId: number): Promise<TicketAttachment[]>;
   createTicketAttachment(data: InsertTicketAttachment): Promise<TicketAttachment>;
   deleteTicketAttachment(id: number): Promise<void>;
+
+  getSecurityIntegrations(tenantId: number): Promise<SecurityIntegration[]>;
+  getSecurityIntegration(id: number): Promise<SecurityIntegration | undefined>;
+  createSecurityIntegration(data: InsertSecurityIntegration): Promise<SecurityIntegration>;
+  updateSecurityIntegration(id: number, data: Partial<InsertSecurityIntegration>): Promise<SecurityIntegration>;
+  deleteSecurityIntegration(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -929,6 +937,29 @@ export class DatabaseStorage implements IStorage {
 
   async deleteTicketAttachment(id: number): Promise<void> {
     await db.delete(ticketAttachments).where(eq(ticketAttachments.id, id));
+  }
+
+  async getSecurityIntegrations(tenantId: number): Promise<SecurityIntegration[]> {
+    return db.select().from(securityIntegrations).where(eq(securityIntegrations.tenantId, tenantId)).orderBy(securityIntegrations.platformName);
+  }
+
+  async getSecurityIntegration(id: number): Promise<SecurityIntegration | undefined> {
+    const [integration] = await db.select().from(securityIntegrations).where(eq(securityIntegrations.id, id));
+    return integration;
+  }
+
+  async createSecurityIntegration(data: InsertSecurityIntegration): Promise<SecurityIntegration> {
+    const [integration] = await db.insert(securityIntegrations).values(data).returning();
+    return integration;
+  }
+
+  async updateSecurityIntegration(id: number, data: Partial<InsertSecurityIntegration>): Promise<SecurityIntegration> {
+    const [integration] = await db.update(securityIntegrations).set(data).where(eq(securityIntegrations.id, id)).returning();
+    return integration;
+  }
+
+  async deleteSecurityIntegration(id: number): Promise<void> {
+    await db.delete(securityIntegrations).where(eq(securityIntegrations.id, id));
   }
 }
 
