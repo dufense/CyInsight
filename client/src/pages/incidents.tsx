@@ -180,19 +180,67 @@ export default function IncidentsPage() {
     },
   });
 
-  const enrichMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/ai/enrich-incidents", { tenantId: currentTenant?.id });
-      return res.json();
-    },
-    onSuccess: (data: any) => {
+  const [enrichProgress, setEnrichProgress] = useState<{ enriched: number; total: number; active: boolean }>({ enriched: 0, total: 0, active: false });
+
+  const startBulkEnrich = async () => {
+    if (enrichProgress.active || !currentTenant?.id) return;
+    setEnrichProgress({ enriched: 0, total: 0, active: true });
+
+    try {
+      const res = await fetch("/api/ai/enrich-incidents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ tenantId: currentTenant.id }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: "Failed" }));
+        toast({ title: "Enrichment failed", description: err.message, variant: "destructive" });
+        setEnrichProgress(p => ({ ...p, active: false }));
+        return;
+      }
+
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await res.json();
+        toast({ title: "AI Enrichment Complete", description: data.message });
+        setEnrichProgress({ enriched: 0, total: 0, active: false });
+        queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) { setEnrichProgress(p => ({ ...p, active: false })); return; }
+
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const ev = JSON.parse(line.slice(6));
+              setEnrichProgress({ enriched: ev.enriched, total: ev.total, active: !ev.done });
+              if (ev.done) {
+                queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+                toast({ title: "AI Enrichment Complete", description: `Enriched ${ev.enriched} of ${ev.total} incidents` });
+              }
+            } catch {}
+          }
+        }
+      }
+      setEnrichProgress(p => ({ ...p, active: false }));
       queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
-      toast({ title: "AI Enrichment Complete", description: data.message });
-    },
-    onError: () => {
+    } catch (err) {
       toast({ title: "Enrichment failed", variant: "destructive" });
-    },
-  });
+      setEnrichProgress(p => ({ ...p, active: false }));
+    }
+  };
 
   const updateMutation = useMutation({
     mutationFn: async ({ id, ...data }: any) => {
@@ -305,12 +353,12 @@ export default function IncidentsPage() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => enrichMutation.mutate()}
-              disabled={enrichMutation.isPending}
+              onClick={startBulkEnrich}
+              disabled={enrichProgress.active}
               data-testid="button-bulk-enrich"
             >
-              {enrichMutation.isPending ? (
-                <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Enriching...</>
+              {enrichProgress.active ? (
+                <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Enriching {enrichProgress.enriched}/{enrichProgress.total}...</>
               ) : (
                 <><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Enrich All</>
               )}

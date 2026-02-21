@@ -2147,7 +2147,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       if (incidentsCreated > 0) {
         try {
           const newIncidents = await storage.getIncidents(tid);
-          const unenriched = newIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase).slice(0, 200);
+          const unenriched = newIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase);
 
           for (let b = 0; b < unenriched.length; b += 20) {
             const batch = unenriched.slice(b, b + 20);
@@ -2240,12 +2240,27 @@ Return JSON array matching incident indices. Example: [{"index":0,"mitreTactic":
       await assertTenantAccess(req, tenantId);
 
       const allIncidents = await storage.getIncidents(tenantId);
-      const unenriched = allIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase).slice(0, 100);
-      if (unenriched.length === 0) return res.json({ message: "All incidents already enriched", enriched: 0 });
+      const unenriched = allIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase);
+      if (unenriched.length === 0) return res.json({ message: "All incidents already enriched", enriched: 0, total: 0 });
 
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      const sendProgress = (enriched: number, total: number, done: boolean, error?: string) => {
+        const data = JSON.stringify({ enriched, total, done, error });
+        res.write(`data: ${data}\n\n`);
+      };
+
+      const total = unenriched.length;
       let enriched = 0;
-      for (let b = 0; b < unenriched.length; b += 15) {
-        const batch = unenriched.slice(b, b + 15);
+      const BATCH_SIZE = 15;
+
+      sendProgress(0, total, false);
+
+      for (let b = 0; b < unenriched.length; b += BATCH_SIZE) {
+        const batch = unenriched.slice(b, b + BATCH_SIZE);
         const summaries = batch.map((inc, i) => `[${i}] Title: ${inc.title}\nSeverity: ${inc.severity}\nDescription: ${(inc.description || "").substring(0, 250)}\nSource: ${inc.source || ""}\nAssets: ${inc.affectedAssets || ""}`).join("\n---\n");
 
         try {
@@ -2294,14 +2309,23 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
               }
             }
           }
-        } catch (aiErr) {
+        } catch (aiErr: any) {
           console.error("AI enrich batch error:", aiErr);
+          sendProgress(enriched, total, false, `Batch error at ${b}: ${aiErr.message?.substring(0, 100)}`);
         }
+
+        sendProgress(enriched, total, false);
       }
 
-      res.json({ message: `Enriched ${enriched} incidents with MITRE/Kill Chain/IOC data`, enriched });
+      sendProgress(enriched, total, true);
+      res.end();
     } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to enrich incidents" });
+      if (!res.headersSent) {
+        res.status(error.status || 500).json({ message: error.message || "Failed to enrich incidents" });
+      } else {
+        res.write(`data: ${JSON.stringify({ enriched: 0, total: 0, done: true, error: error.message })}\n\n`);
+        res.end();
+      }
     }
   });
 
