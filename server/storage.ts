@@ -617,12 +617,24 @@ export class DatabaseStorage implements IStorage {
     const topInfectedHosts = topN(countBy(endpointEvents, "target"), 10);
     const endpointLogSources = topN(cleanLogSource(endpointEvents), 6);
     const endpointThreatVectors = topN(countBy(endpointEvents, "threatVector"), 8);
-    const remediatedCount = allEvents.filter(e => {
-      const a = (e.action || "").toLowerCase();
-      if (a.includes("no auto-remediation") || a.includes("no remediation") || a === "no action") return false;
-      return a.includes("remediat") || a.includes("blocked") || a.includes("quarantin") || a.includes("isolat") || a.includes("dropped");
+    const isAutoRemediated = (a: string) => {
+      const al = a.toLowerCase();
+      if (al.includes("no auto-remediation") || al.includes("no remediation")) return false;
+      return al === "auto-remediation applied" || al.includes("auto remediat");
+    };
+    const isRemediated = (a: string) => {
+      const al = a.toLowerCase();
+      if (al.includes("no auto-remediation") || al.includes("no remediation") || al === "no action") return false;
+      return al.includes("remediat") || al.includes("blocked") || al.includes("quarantin") || al.includes("clean") || al.includes("drop") || al.includes("isolat");
+    };
+    const autoRemediatedCount = allEvents.filter(e => isAutoRemediated(e.action || "")).length;
+    const manualRemediatedCount = allEvents.filter(e => {
+      const a = e.action || "";
+      return isRemediated(a) && !isAutoRemediated(a);
     }).length;
+    const remediatedCount = autoRemediatedCount + manualRemediatedCount;
     const noRemediationCount = allEvents.length - remediatedCount;
+    const autoRemediationPct = remediatedCount > 0 ? Math.round((autoRemediatedCount / remediatedCount) * 100) : 0;
 
     const casbEvents = allEvents.filter(e => e.eventType === "casb");
     const wafEvents = allEvents.filter(e => e.eventType === "waf");
@@ -689,7 +701,8 @@ export class DatabaseStorage implements IStorage {
       topThreats, topTargets, topAttackers, topVulnerableApps, vulnerabilitySeverity,
       incidentsByThreatVector, mitreTactics, topMitreTechniques, incidentsByAction,
       emailByThreat, topSenders, topRecipients, emailActions, emailSeverity, emailThreatVectors, emailTotal: emailEvents.length,
-      endpointByThreat, endpointActions, topInfectedHosts, endpointLogSources, endpointThreatVectors, endpointTotal: endpointEvents.length, remediatedCount, noRemediationCount,
+      endpointByThreat, endpointActions, topInfectedHosts, endpointLogSources, endpointThreatVectors, endpointTotal: endpointEvents.length,
+      remediatedCount, noRemediationCount, autoRemediatedCount, manualRemediatedCount, autoRemediationPct,
       casbApps, casbActions, casbTotal: casbEvents.length,
       wafAttackTypes, wafActions, wafTargets, wafTotal: wafEvents.length,
       dlpByThreat, dlpActions, dlpTotal: dlpEvents.length,

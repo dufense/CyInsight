@@ -2879,7 +2879,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         summary.assetsByEventType[et] = names.size;
       }
 
-      res.json({ assets: assets.slice(0, 200), summary });
+      res.json({ assets, summary });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch assets" });
     }

@@ -1,16 +1,19 @@
-import { useState } from "react";
+import { useState, useRef, useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useTenant } from "@/lib/tenant-context";
+import html2canvas from "html2canvas";
+import jsPDF from "jspdf";
 import {
   AlertTriangle, Shield, Ticket, TrendingUp, TrendingDown, Activity, ArrowUpRight,
   Mail, Monitor, Bug, Crosshair, Target, Skull, AppWindow, Globe, Cloud, Lock,
   ShieldAlert, ShieldCheck, ShieldOff, Wifi, Database, Eye, Zap, Clock, Timer,
   Server, AlertCircle, FileWarning, Ban, CheckCircle2, XCircle, Gauge, Radio,
   Network, Fingerprint, KeyRound, UserX, Upload, Download, Search, Radar, HardDrive,
-  Brain,
+  Brain, Maximize2, Minimize2, Image, FileText, X, ChevronLeft, ChevronRight,
   BarChart3, LineChart as LineChartIcon, TrendingUp as AreaChartIcon, PieChart as PieChartIcon,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -194,6 +197,85 @@ function ChartTypeSelector({ active, onChange }: { active: string; onChange: (v:
         </button>
       ))}
     </div>
+  );
+}
+
+function ExpandableCard({ title, children, className, headerExtra, icon: HeaderIcon }: { title: string; children: ReactNode; className?: string; headerExtra?: ReactNode; icon?: any }) {
+  const [expanded, setExpanded] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  const exportAs = useCallback(async (type: "png" | "pdf") => {
+    if (!contentRef.current) return;
+    setExporting(true);
+    try {
+      const isDark = document.documentElement.classList.contains('dark');
+      const canvas = await html2canvas(contentRef.current, {
+        backgroundColor: isDark ? '#1a1a2e' : '#ffffff',
+        scale: 2,
+        useCORS: true,
+      });
+      if (type === "png") {
+        const link = document.createElement("a");
+        link.download = `${title.replace(/\s+/g, "_")}.png`;
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+      } else {
+        const imgData = canvas.toDataURL("image/png");
+        const pdf = new jsPDF({ orientation: canvas.width > canvas.height ? "landscape" : "portrait", unit: "px", format: [canvas.width, canvas.height] });
+        pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+        pdf.save(`${title.replace(/\s+/g, "_")}.pdf`);
+      }
+    } catch (e) { console.error("Export failed:", e); }
+    setExporting(false);
+  }, [title]);
+
+  if (expanded) {
+    return (
+      <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4" data-testid="expanded-overlay" onClick={() => setExpanded(false)}>
+        <div className="bg-card border rounded-xl shadow-2xl w-full max-w-[95vw] max-h-[95vh] overflow-auto" onClick={e => e.stopPropagation()}>
+          <div className="sticky top-0 z-10 bg-card border-b px-4 py-3 flex items-center justify-between">
+            <span className="text-sm font-semibold uppercase tracking-wider">{title}</span>
+            <div className="flex items-center gap-1">
+              <Button variant="ghost" size="sm" onClick={() => exportAs("png")} disabled={exporting} data-testid="export-png" className="h-7 text-[10px] gap-1">
+                <Image className="w-3.5 h-3.5" /> PNG
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => exportAs("pdf")} disabled={exporting} data-testid="export-pdf" className="h-7 text-[10px] gap-1">
+                <FileText className="w-3.5 h-3.5" /> PDF
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setExpanded(false)} data-testid="close-expanded" className="h-7">
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+          <div ref={contentRef} className="p-6">{children}</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Card className={className}>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+        <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
+          {HeaderIcon && <HeaderIcon className="w-4 h-4" />}
+          {title}
+        </CardTitle>
+        <div className="flex items-center gap-1">
+          {headerExtra}
+          <button onClick={() => exportAs("png")} disabled={exporting} className="p-1 rounded text-muted-foreground hover:text-foreground" title="Export as PNG">
+            <Image className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => exportAs("pdf")} disabled={exporting} className="p-1 rounded text-muted-foreground hover:text-foreground" title="Export as PDF">
+            <FileText className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => setExpanded(true)} data-testid="expand-card" className="p-1 rounded text-muted-foreground hover:text-foreground" title="Expand">
+            <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0" ref={contentRef}>{children}</CardContent>
+    </Card>
   );
 }
 
@@ -443,6 +525,8 @@ export default function DashboardPage() {
 
   const [chartTypes, setChartTypes] = useState<Record<string, string>>({});
   const [endpointTimeline, setEndpointTimeline] = useState<string>("90D");
+  const [assetPage, setAssetPage] = useState(0);
+  const [assetPageSize, setAssetPageSize] = useState(25);
 
   const ct = (id: string, fallback: string) => chartTypes[id] || fallback;
   const setCt = (id: string, val: string) => setChartTypes(prev => ({ ...prev, [id]: val }));
@@ -531,66 +615,51 @@ export default function DashboardPage() {
                   </div>
                   <div className="p-2 rounded-md bg-green-500/10 text-center">
                     <p className="text-lg font-bold text-green-500">{s.blockedEvents}</p>
-                    <p className="text-[9px] text-muted-foreground">Blocked</p>
+                    <p className="text-[9px] text-muted-foreground">Remediated</p>
                   </div>
                 </div>
               </CardContent>
             </Card>
 
-            <Card className="lg:col-span-2">
-              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incident Trend</CardTitle>
-                <ChartTypeSelector active={ct("incidentTrend", "area")} onChange={(v) => setCt("incidentTrend", v)} />
-              </CardHeader>
-              <CardContent className="pt-0">
-                <FlexChart
-                  data={s.incidentTrend}
-                  chartType={ct("incidentTrend", "area")}
-                  nameKey="month"
-                  dataKey="incidents"
-                  height={280}
-                  series={[
-                    { dataKey: "incidents", name: "Incidents", color: C.red, gradientId: "gInc" },
-                    { dataKey: "resolved", name: "Resolved", color: C.green, gradientId: "gRes" },
-                  ]}
-                />
-              </CardContent>
-            </Card>
+            <ExpandableCard title="Incident Trend" className="lg:col-span-2"
+              headerExtra={<ChartTypeSelector active={ct("incidentTrend", "area")} onChange={(v) => setCt("incidentTrend", v)} />}>
+              <FlexChart
+                data={s.incidentTrend}
+                chartType={ct("incidentTrend", "area")}
+                nameKey="month"
+                dataKey="incidents"
+                height={280}
+                series={[
+                  { dataKey: "incidents", name: "Incidents", color: C.red, gradientId: "gInc" },
+                  { dataKey: "resolved", name: "Resolved", color: C.green, gradientId: "gRes" },
+                ]}
+              />
+            </ExpandableCard>
 
-            <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Events by Category</CardTitle>
-                <ChartTypeSelector active={ct("eventsByCategory", "pie")} onChange={(v) => setCt("eventsByCategory", v)} />
-              </CardHeader>
-              <CardContent className="pt-0">
-                <FlexChart
-                  data={s.eventsByType.map((e: any) => ({ name: e.type, value: e.count }))}
-                  chartType={ct("eventsByCategory", "pie")}
-                  dataKey="value"
-                  height={220}
-                />
-              </CardContent>
-            </Card>
+            <ExpandableCard title="Events by Category"
+              headerExtra={<ChartTypeSelector active={ct("eventsByCategory", "pie")} onChange={(v) => setCt("eventsByCategory", v)} />}>
+              <FlexChart
+                data={s.eventsByType.map((e: any) => ({ name: e.type, value: e.count }))}
+                chartType={ct("eventsByCategory", "pie")}
+                dataKey="value"
+                height={220}
+              />
+            </ExpandableCard>
           </div>
 
           <div className="grid lg:grid-cols-2 gap-4">
-            <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Category</CardTitle>
-                <ChartTypeSelector active={ct("categoryBreakdown", "bar")} onChange={(v) => setCt("categoryBreakdown", v)} />
-              </CardHeader>
-              <CardContent className="pt-0">
-                <FlexChart
-                  data={s.categoryBreakdown}
-                  chartType={ct("categoryBreakdown", "bar")}
-                  dataKey="count"
-                  nameKey="category"
-                  height={220}
-                  layout="vertical"
-                  yAxisWidth={90}
-                />
-              </CardContent>
-            </Card>
+            <ExpandableCard title="Incidents by Category"
+              headerExtra={<ChartTypeSelector active={ct("categoryBreakdown", "bar")} onChange={(v) => setCt("categoryBreakdown", v)} />}>
+              <FlexChart
+                data={s.categoryBreakdown}
+                chartType={ct("categoryBreakdown", "bar")}
+                dataKey="count"
+                nameKey="category"
+                height={220}
+                layout="vertical"
+                yAxisWidth={90}
+              />
+            </ExpandableCard>
 
             <Card>
               <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
@@ -783,11 +852,12 @@ export default function DashboardPage() {
         {/* Endpoint Protection */}
         <TabsContent value="endpoint" className="space-y-4">
           <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 flex-1">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 flex-1">
               <MetricCard title="Endpoint Events" value={s.endpointTotal} icon={Monitor} color={C.red} />
-              <MetricCard title="Remediated" value={s.remediatedCount || 0} icon={ShieldCheck} color={C.green} />
+              <MetricCard title="Remediated" value={s.remediatedCount || 0} sub={`Auto: ${s.autoRemediatedCount || 0} | Manual: ${s.manualRemediatedCount || 0}`} icon={ShieldCheck} color={C.green} />
               <MetricCard title="No Remediation" value={s.noRemediationCount || 0} icon={ShieldOff} color={C.orange} />
               <MetricCard title="Remediation Rate" value={`${s.endpointTotal > 0 ? Math.round(((s.remediatedCount || 0) / s.endpointTotal) * 100) : 0}%`} icon={Gauge} color={C.blue} />
+              <MetricCard title="Auto-Remediation" value={`${s.autoRemediationPct || 0}%`} sub={`${s.autoRemediatedCount || 0} of ${s.remediatedCount || 0}`} icon={Zap} color={C.teal} />
             </div>
             <div className="flex items-center gap-1 rounded-lg border p-1 bg-muted/30" data-testid="endpoint-timeline-selector">
               {(["24H", "7D", "15D", "30D", "60D", "90D"] as const).map(t => (
@@ -823,35 +893,25 @@ export default function DashboardPage() {
             </Card>
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
-            <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Action Distribution</CardTitle>
-                <ChartTypeSelector active={ct("edrActions", "pie")} onChange={(v) => setCt("edrActions", v)} />
-              </CardHeader>
-              <CardContent className="pt-0">
-                <FlexChart
-                  data={s.endpointActions}
-                  chartType={ct("edrActions", "pie")}
-                  dataKey="value"
-                  height={220}
-                  colors={{ blocked: C.green, quarantined: C.orange, isolated: C.purple, alerted: C.blue }}
-                />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Platforms</CardTitle>
-                <ChartTypeSelector active={ct("edrPlatforms", "pie")} onChange={(v) => setCt("edrPlatforms", v)} />
-              </CardHeader>
-              <CardContent className="pt-0">
-                <FlexChart
-                  data={s.endpointLogSources.map((src: any) => ({ name: src.name, value: src.count }))}
-                  chartType={ct("edrPlatforms", "pie")}
-                  dataKey="value"
-                  height={220}
-                />
-              </CardContent>
-            </Card>
+            <ExpandableCard title="EDR Action Distribution"
+              headerExtra={<ChartTypeSelector active={ct("edrActions", "pie")} onChange={(v) => setCt("edrActions", v)} />}>
+              <FlexChart
+                data={s.endpointActions}
+                chartType={ct("edrActions", "pie")}
+                dataKey="value"
+                height={220}
+                colors={{ "Auto-Remediation Applied": C.green, "No Auto-Remediation": C.orange, blocked: C.green, quarantined: C.orange, isolated: C.purple, alerted: C.blue }}
+              />
+            </ExpandableCard>
+            <ExpandableCard title="EDR Platforms"
+              headerExtra={<ChartTypeSelector active={ct("edrPlatforms", "pie")} onChange={(v) => setCt("edrPlatforms", v)} />}>
+              <FlexChart
+                data={s.endpointLogSources.map((src: any) => ({ name: src.name, value: src.count }))}
+                chartType={ct("edrPlatforms", "pie")}
+                dataKey="value"
+                height={220}
+              />
+            </ExpandableCard>
           </div>
         </TabsContent>
 
@@ -1230,139 +1290,151 @@ export default function DashboardPage() {
               </div>
 
               <div className="grid lg:grid-cols-3 gap-4">
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Group</CardTitle>
-                    <ChartTypeSelector active={ct("assetsByGroup", "bar")} onChange={(v) => setCt("assetsByGroup", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.assetsByGroup || []}
-                      chartType={ct("assetsByGroup", "bar")}
-                      dataKey="value"
-                      height={250}
-                      layout="vertical"
-                      yAxisWidth={140}
-                    />
-                  </CardContent>
-                </Card>
+                <ExpandableCard title="Assets by Group"
+                  headerExtra={<ChartTypeSelector active={ct("assetsByGroup", "bar")} onChange={(v) => setCt("assetsByGroup", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.assetsByGroup || []}
+                    chartType={ct("assetsByGroup", "bar")}
+                    dataKey="value"
+                    height={250}
+                    layout="vertical"
+                    yAxisWidth={140}
+                  />
+                </ExpandableCard>
 
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Type</CardTitle>
-                    <ChartTypeSelector active={ct("assetsByType", "pie")} onChange={(v) => setCt("assetsByType", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.assetsByType || []}
-                      chartType={ct("assetsByType", "pie")}
-                      dataKey="value"
-                      height={250}
-                      colors={{ Endpoint: C.blue, Server: C.purple }}
-                    />
-                  </CardContent>
-                </Card>
+                <ExpandableCard title="Assets by Type"
+                  headerExtra={<ChartTypeSelector active={ct("assetsByType", "pie")} onChange={(v) => setCt("assetsByType", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.assetsByType || []}
+                    chartType={ct("assetsByType", "pie")}
+                    dataKey="value"
+                    height={250}
+                    colors={{ Endpoint: C.blue, Server: C.purple }}
+                  />
+                </ExpandableCard>
 
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by OS</CardTitle>
-                    <ChartTypeSelector active={ct("assetsByOS", "pie")} onChange={(v) => setCt("assetsByOS", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.assetsByOS || []}
-                      chartType={ct("assetsByOS", "pie")}
-                      dataKey="value"
-                      height={250}
-                      colors={{ Windows: C.blue, Linux: C.green, macOS: C.purple, Unknown: C.yellow }}
-                    />
-                  </CardContent>
-                </Card>
+                <ExpandableCard title="Assets by OS"
+                  headerExtra={<ChartTypeSelector active={ct("assetsByOS", "pie")} onChange={(v) => setCt("assetsByOS", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.assetsByOS || []}
+                    chartType={ct("assetsByOS", "pie")}
+                    dataKey="value"
+                    height={250}
+                    colors={{ Windows: C.blue, Linux: C.green, macOS: C.purple, Unknown: C.yellow }}
+                  />
+                </ExpandableCard>
               </div>
 
               <div className="grid lg:grid-cols-2 gap-4">
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by Memory Size</CardTitle>
-                    <ChartTypeSelector active={ct("assetsByMemory", "bar")} onChange={(v) => setCt("assetsByMemory", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.assetsByMemory || []}
-                      chartType={ct("assetsByMemory", "bar")}
-                      dataKey="value"
-                      height={220}
-                    />
-                  </CardContent>
-                </Card>
+                <ExpandableCard title="Assets by Memory Size"
+                  headerExtra={<ChartTypeSelector active={ct("assetsByMemory", "bar")} onChange={(v) => setCt("assetsByMemory", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.assetsByMemory || []}
+                    chartType={ct("assetsByMemory", "bar")}
+                    dataKey="value"
+                    height={220}
+                  />
+                </ExpandableCard>
 
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Assets by CPU</CardTitle>
-                    <ChartTypeSelector active={ct("assetsByCPU", "bar")} onChange={(v) => setCt("assetsByCPU", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.assetsByCPU || []}
-                      chartType={ct("assetsByCPU", "bar")}
-                      dataKey="value"
-                      height={220}
-                    />
-                  </CardContent>
-                </Card>
+                <ExpandableCard title="Assets by CPU"
+                  headerExtra={<ChartTypeSelector active={ct("assetsByCPU", "bar")} onChange={(v) => setCt("assetsByCPU", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.assetsByCPU || []}
+                    chartType={ct("assetsByCPU", "bar")}
+                    dataKey="value"
+                    height={220}
+                  />
+                </ExpandableCard>
               </div>
 
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Asset Inventory</CardTitle></CardHeader>
-                <CardContent className="pt-0">
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="text-[10px] uppercase">Asset Name</TableHead>
-                          <TableHead className="text-[10px] uppercase">Events</TableHead>
-                          <TableHead className="text-[10px] uppercase">Incidents</TableHead>
-                          <TableHead className="text-[10px] uppercase">Risk Level</TableHead>
-                          <TableHead className="text-[10px] uppercase">Event Types</TableHead>
-                          <TableHead className="text-[10px] uppercase">First Seen</TableHead>
-                          <TableHead className="text-[10px] uppercase">Last Seen</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {(assetsData?.assets || []).slice(0, 20).map((asset: any, idx: number) => (
-                          <TableRow key={idx} data-testid={`asset-row-${idx}`} className="cursor-pointer hover:bg-muted/50 transition-colors" onClick={() => navigate(`/assets/${currentTenant?.id}/${encodeURIComponent(asset.name)}`)}>
-                            <TableCell className="text-[11px] font-medium text-primary hover:underline">{asset.name}</TableCell>
-                            <TableCell className="text-[11px] font-mono">{asset.eventCount}</TableCell>
-                            <TableCell className="text-[11px] font-mono">{asset.incidentCount}</TableCell>
-                            <TableCell>
-                              <Badge
-                                variant="secondary"
-                                className="text-[10px]"
-                                style={{ backgroundColor: `${SEV[asset.riskLevel] || C.blue}20`, color: SEV[asset.riskLevel] || C.blue }}
-                              >
-                                {asset.riskLevel}
-                              </Badge>
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex flex-wrap gap-1">
-                                {(asset.eventTypes || []).map((et: string, i: number) => (
-                                  <Badge key={i} variant="secondary" className="text-[9px]">{et}</Badge>
-                                ))}
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-[11px] text-muted-foreground">
-                              {asset.firstSeen ? new Date(asset.firstSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
-                            </TableCell>
-                            <TableCell className="text-[11px] text-muted-foreground">
-                              {asset.lastSeen ? new Date(asset.lastSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                </CardContent>
-              </Card>
+              <ExpandableCard title="Asset Inventory">
+                {(() => {
+                  const allAssets = assetsData?.assets || [];
+                  const totalAssets = allAssets.length;
+                  const totalPages = Math.ceil(totalAssets / assetPageSize);
+                  const pagedAssets = allAssets.slice(assetPage * assetPageSize, (assetPage + 1) * assetPageSize);
+                  return (
+                    <>
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-[10px] uppercase">Asset Name</TableHead>
+                              <TableHead className="text-[10px] uppercase">Events</TableHead>
+                              <TableHead className="text-[10px] uppercase">Incidents</TableHead>
+                              <TableHead className="text-[10px] uppercase">Risk Level</TableHead>
+                              <TableHead className="text-[10px] uppercase">Event Types</TableHead>
+                              <TableHead className="text-[10px] uppercase">First Seen</TableHead>
+                              <TableHead className="text-[10px] uppercase">Last Seen</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {pagedAssets.map((asset: any, idx: number) => (
+                              <TableRow key={idx} data-testid={`asset-row-${idx}`} className="cursor-pointer hover:bg-muted/50 transition-colors" onClick={() => navigate(`/assets/${currentTenant?.id}/${encodeURIComponent(asset.name)}`)}>
+                                <TableCell className="text-[11px] font-medium text-primary hover:underline">{asset.name}</TableCell>
+                                <TableCell className="text-[11px] font-mono">{asset.eventCount}</TableCell>
+                                <TableCell className="text-[11px] font-mono">{asset.incidentCount}</TableCell>
+                                <TableCell>
+                                  <Badge variant="secondary" className="text-[10px]"
+                                    style={{ backgroundColor: `${SEV[asset.riskLevel] || C.blue}20`, color: SEV[asset.riskLevel] || C.blue }}>
+                                    {asset.riskLevel}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell>
+                                  <div className="flex flex-wrap gap-1">
+                                    {(asset.eventTypes || []).map((et: string, i: number) => (
+                                      <Badge key={i} variant="secondary" className="text-[9px]">{et}</Badge>
+                                    ))}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="text-[11px] text-muted-foreground">
+                                  {asset.firstSeen ? new Date(asset.firstSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
+                                </TableCell>
+                                <TableCell className="text-[11px] text-muted-foreground">
+                                  {asset.lastSeen ? new Date(asset.lastSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                      <div className="flex items-center justify-between mt-3 pt-3 border-t">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-muted-foreground">Showing {assetPage * assetPageSize + 1}-{Math.min((assetPage + 1) * assetPageSize, totalAssets)} of {totalAssets}</span>
+                          <select value={assetPageSize} onChange={e => { setAssetPageSize(Number(e.target.value)); setAssetPage(0); }}
+                            className="text-[10px] h-6 px-1 rounded border bg-background" data-testid="asset-page-size">
+                            {[25, 50, 100, 200].map(n => <option key={n} value={n}>{n} per page</option>)}
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button variant="outline" size="sm" disabled={assetPage === 0} onClick={() => setAssetPage(p => p - 1)}
+                            className="h-7 w-7 p-0" data-testid="asset-page-prev">
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                          </Button>
+                          {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                            let pg = i;
+                            if (totalPages > 7) {
+                              if (assetPage < 4) pg = i;
+                              else if (assetPage > totalPages - 4) pg = totalPages - 7 + i;
+                              else pg = assetPage - 3 + i;
+                            }
+                            return (
+                              <Button key={pg} variant={pg === assetPage ? "default" : "outline"} size="sm"
+                                onClick={() => setAssetPage(pg)} className="h-7 w-7 p-0 text-[10px]" data-testid={`asset-page-${pg}`}>
+                                {pg + 1}
+                              </Button>
+                            );
+                          })}
+                          <Button variant="outline" size="sm" disabled={assetPage >= totalPages - 1} onClick={() => setAssetPage(p => p + 1)}
+                            className="h-7 w-7 p-0" data-testid="asset-page-next">
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </ExpandableCard>
             </>
           )}
         </TabsContent>
