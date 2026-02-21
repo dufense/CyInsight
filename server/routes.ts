@@ -42,83 +42,165 @@ const openai = new OpenAI({
 });
 
 function classifyIncidentType(title: string, description?: string | null, source?: string | null, category?: string | null): string {
-  const text = `${title} ${description || ""} ${source || ""} ${category || ""}`.toLowerCase();
+  const text = `${title} ${description || ""} ${source || ""} ${category || ""}`;
 
-  if (/vulnerable driver|loldriver|byovd|bring your own vulnerable/i.test(text)) return "Endpoint Security";
-  if (/suspicious executable|malicious (file|binary|payload)|ransomware|trojan|worm|rootkit|backdoor|keylogger|spyware|adware|cryptominer|coinminer/i.test(text)) return "Endpoint Security";
-  if (/local threat detected|xdr agent|endpoint (protection|detection)|edr |cortex|crowdstrike|sentinel|defender for endpoint/i.test(text)) return "Endpoint Security";
-  if (/process (execution|injection|hollowing)|dll (injection|sideload|hijack)|memory (manipulation|injection)/i.test(text)) return "Endpoint Security";
-  if (/suspicious (process|service|registry|driver|module|script)|fileless|powershell|wmi.*process|living.off.the.land|lolbin/i.test(text)) return "Endpoint Security";
-  if (/accessibility feature escalation|privilege escalation.*endpoint|sync.*escalation/i.test(text)) return "Endpoint Security";
-  if (/anti.?webshell|webshell/i.test(text)) return "Endpoint Security";
+  if (/wildfire malware|wildfire.*malware/i.test(text)) return "Malware";
+  if (/ransomware/i.test(text)) return "Ransomware";
+  if (/trojan|worm|backdoor|keylogger|spyware|adware/i.test(text)) return "Malware";
+  if (/cryptominer|coinminer|crypto.*min/i.test(text)) return "Cryptomining";
 
-  if (/compute.attached identity|unusual asn|cloud (api|iam|identity|credential|account|trail|watch)|aws (guard|cloud|iam|sts|s3.*anomal)|azure (sentinel|security|ad.*anomal)|gcp (security|iam)/i.test(text)) return "Cloud Security";
-  if (/instance metadata|imds|ec2.*api|lambda.*anomal|k8s.*anomal|container.*escape|s3.*bucket.*public|cloud.*misconfig/i.test(text)) return "Cloud Security";
-  if (/geographic.*anomal|geo.*improbab|unusual.*region|api.*call.*from/i.test(text)) return "Cloud Security";
+  if (/vulnerable driver|loldriver|byovd|bring your own vulnerable/i.test(text)) return "Vulnerable Driver";
+  if (/vulnerable.*application|vulnerable.*software/i.test(text)) return "Vulnerable Application";
+  if (/cve-|vulnerab.*patch|patch.*missing|unpatched|security.*flaw/i.test(text) && !/driver/i.test(text)) return "Vulnerability";
 
-  if (/failed connection|port scan|network (scan|sweep|flood)|syn (flood|scan)|tcp.*scan|udp.*flood|icmp|ddos|dos attack|packet.*flood|bandwidth.*anomal/i.test(text)) return "Network Security";
-  if (/lateral movement|smb.*brute|rdp.*brute|ssh.*brute|network.*intrusion|ids.*alert|ips.*alert|firewall.*block/i.test(text)) return "Network Security";
+  if (/suspicious executable/i.test(text)) return "Suspicious Executable";
+  if (/suspicious process creation|suspicious process$/i.test(text)) return "Suspicious Process";
+  if (/suspicious remote wmi|remote wmi/i.test(text)) return "Remote Code Execution";
+  if (/psexec|remote.*execution.*attempt|winrm.*execution/i.test(text)) return "Remote Code Execution";
 
-  if (/phish|spear.?phish|spoofed.*email|malicious.*email|email.*threat|bec |business email compromise|email.*gateway|dmarc|spf.*fail|dkim/i.test(text)) return "Email Threat";
+  if (/local threat detected/i.test(text)) return "Local Threat";
+  if (/rootkit|uncommon driver.*loaded/i.test(text)) return "Rootkit";
+  if (/anti.?webshell|webshell.*dropped|known webshell/i.test(text)) return "Webshell";
 
-  if (/brute.?force|credential.?(stuff|dump|harvest|spray|theft|abuse)|password.*spray|login.*fail.*multiple|authentication.*anomal|account.*lock/i.test(text)) return "Credential Abuse";
+  if (/pe injection|process injection|process hollowing|dll injection/i.test(text)) return "Process Injection";
+  if (/dll.*sideload|dll.*hijack|dll.*loaded.*cd-rom|log4net.*loaded/i.test(text)) return "DLL Side-Loading";
+  if (/modification of the system partition/i.test(text)) return "System Modification";
+  if (/digital signer restriction/i.test(text)) return "Digital Signer Restriction";
 
-  if (/data (exfiltration|leak|loss|theft)|dlp|unusual.*(download|upload|transfer|data)|large.*(download|upload|transfer|file)|sensitive.*data.*access/i.test(text)) return "Data Exfiltration";
+  if (/masquerading/i.test(text)) return "Masquerading";
+  if (/ntlm relay/i.test(text)) return "NTLM Relay";
+  if (/powershell activity|powershell.*execution/i.test(text)) return "Powershell Activity";
+  if (/accessibility feature escalation|sync.*escalation/i.test(text)) return "Privilege Escalation";
+  if (/impair defenses|gain persistency/i.test(text)) return "Defense Evasion";
+  if (/rare unsigned process|unsigned.*module|rundll32.*unsigned/i.test(text)) return "Suspicious Process";
+  if (/multiple alerts.*mitre tactics/i.test(text)) return "Multiple MITRE Alerts";
 
-  if (/vulnerab|cve-|patch.*missing|unpatched|exploit.*vuln|security.*flaw/i.test(text) && !/driver|endpoint|agent/i.test(text)) return "Vulnerability";
+  if (/compute.attached identity.*api call|executed api calls.*unusual asn/i.test(text)) return "Suspicious API Call";
+  if (/suspicious usage of ec2 token|ec2.*token/i.test(text)) return "Suspicious Cloud Token Usage";
+  if (/cloud identity.*performed|createemailidentity|cloud.*operation/i.test(text)) return "Suspicious Cloud Operation";
+  if (/logged in.*aws console|aws.*console.*login/i.test(text)) return "Suspicious Cloud Login";
+  if (/cloud.*misconfig|s3.*bucket.*public/i.test(text)) return "Cloud Misconfiguration";
+  if (/instance metadata|imds/i.test(text)) return "IMDS Exploitation";
 
-  if (/unauthorized (access|login|entry)|privilege (escalation|abuse)|insider.*threat|rogue.*admin|suspicious.*user.*activity/i.test(text)) return "Unauthorized Access";
+  if (/unusual ssh activity|ssh tunnel/i.test(text)) return "Suspicious SSH Activity";
+  if (/uploaded.*mb.*external|uploaded.*gb.*external|large upload/i.test(text)) return "Large Data Upload";
+  if (/data (exfiltration|leak|loss|theft)|dlp|unusual.*(download|transfer)/i.test(text)) return "Data Exfiltration";
 
-  if (/casb|shadow.*it|unsanctioned.*app|cloud.*app.*control/i.test(text)) return "Cloud App Security";
-  if (/waf|web.application.firewall|sql.*inject|xss|cross.site|owasp/i.test(text)) return "Web Application Security";
+  if (/tried to connect to \d+ hosts|port scan|network scan|suspicious port scan/i.test(text)) return "Port Scan";
+  if (/failed connection/i.test(text)) return "Failed Connections";
+  if (/vnc scanning|vnc.*activity|scanning tool/i.test(text)) return "Network Scanning";
+  if (/lateral movement/i.test(text)) return "Lateral Movement";
+  if (/ddos|dos attack|syn flood|packet flood/i.test(text)) return "DDoS";
+  if (/ids.*alert|ips.*alert|network.*intrusion|firewall.*block/i.test(text)) return "Network Intrusion";
 
-  if (/remote wmi|remote (process|command|execution|code)|psexec|winrm|remote.*shell/i.test(text)) return "Endpoint Security";
+  if (/phish|spear.?phish|spoofed.*email|malicious.*email|bec |business email compromise/i.test(text)) return "Phishing";
+  if (/email.*gateway|dmarc.*fail|spf.*fail/i.test(text)) return "Email Security Alert";
+
+  if (/brute.?force|credential.?(stuff|spray|dump)|password.*spray|authentication.*anomal|account.*lock/i.test(text)) return "Brute Force";
+
+  if (/unauthorized (access|login)|privilege (escalation|abuse)|insider.*threat/i.test(text)) return "Unauthorized Access";
+
+  if (/sql.*inject|xss|cross.site|owasp|waf.*alert/i.test(text)) return "Web Application Attack";
+  if (/casb|shadow.*it|unsanctioned.*app/i.test(text)) return "Shadow IT";
+
+  if (/process.*action.*type.*execution/i.test(text)) return "Suspicious Process";
 
   return "";
 }
 
 const ENRICHMENT_SYSTEM_PROMPT = `You are a senior SOC analyst specializing in MSSP operations. For each incident, provide precise security classification and enrichment.
 
-CRITICAL CLASSIFICATION RULES (incidentType field):
-- "Endpoint Security": Malware, suspicious executables, vulnerable drivers (BYOVD/loldrivers), process injection, fileless attacks, EDR/XDR agent detections, local threats, privilege escalation on endpoints, webshell protection, suspicious WMI/PowerShell, remote process execution, accessibility feature escalation
-- "Cloud Security": Cloud IAM anomalies, compute-attached identity misuse, unusual ASN/geographic API calls, AWS/Azure/GCP security events, cloud credential compromise, S3 bucket exposure, IMDS exploitation, cloud misconfigurations
-- "Network Security": Port scanning, network intrusion, firewall blocks, DDoS, lateral movement via network, failed connections (NOT failed logins), IDS/IPS alerts
-- "Email Threat": Phishing, spear-phishing, BEC, malicious email, spoofed sender, DMARC/SPF failures
-- "Credential Abuse": Brute force, credential stuffing/spraying/dumping, authentication anomalies, account lockouts, password attacks
-- "Data Exfiltration": DLP alerts, unusual data downloads/uploads/transfers, large file transfers, sensitive data access anomalies
-- "Vulnerability": CVE-based vulnerability findings, missing patches, scan results (NOT vulnerable drivers - those are Endpoint Security)
-- "Unauthorized Access": Unauthorized logins, privilege abuse, insider threat, rogue admin activity
-- "Cloud App Security": CASB alerts, shadow IT, unsanctioned cloud apps
-- "Web Application Security": WAF alerts, SQL injection, XSS, OWASP-related attacks
+CRITICAL CLASSIFICATION RULES (incidentType field) - Use SPECIFIC threat types, NOT broad categories:
+- "malware": WildFire Malware, malicious files, trojans, worms, backdoors, spyware
+- "ransomware": Ransomware attacks, file encryption events
+- "cryptomining": Cryptominers, coinminers
+- "vulnerable_driver": Vulnerable Driver Dropped (BYOVD/loldrivers) - NOT "vulnerability"
+- "vulnerable_application": Vulnerable application or software detected
+- "vulnerability": CVE-based findings, missing patches, scan results (NOT vulnerable drivers)
+- "suspicious_executable": Suspicious executable file detected
+- "suspicious_process": Suspicious process creation, rare unsigned processes, rundll32 unsigned modules
+- "remote_code_execution": Remote WMI process execution, PsExec, WinRM execution
+- "local_threat": Local Threat Detected by XDR Agent
+- "rootkit": Rootkit detection, uncommon driver loaded for rootkit purposes
+- "webshell": Anti Webshell Protection, webshell dropped
+- "process_injection": PE injection, process injection, process hollowing, DLL injection
+- "dll_sideloading": DLL side-loading, DLL hijacking, DLL loaded from unusual location
+- "system_modification": Modification of system partition
+- "digital_signer_restriction": Digital Signer Restriction alerts
+- "masquerading": Process masquerading (T1036)
+- "ntlm_relay": NTLM Relay attacks
+- "powershell_activity": PowerShell activity alerts
+- "privilege_escalation": Accessibility Feature Escalation, privilege escalation
+- "defense_evasion": Impair Defenses, Gain Persistency
+- "multiple_mitre_alerts": Multiple alerts of different MITRE tactics on same host
+- "suspicious_api_call": Compute-attached identity executing API calls from unusual ASN/region
+- "suspicious_cloud_token": Suspicious usage of EC2 token
+- "suspicious_cloud_operation": Cloud identity performing unusual operations (CreateEmailIdentity etc.)
+- "suspicious_cloud_login": Unusual AWS/Azure console login
+- "cloud_misconfiguration": Cloud misconfigurations, public S3 buckets
+- "large_data_upload": Host uploaded large amounts of data to external host
+- "data_exfiltration": DLP alerts, unusual data transfers
+- "port_scan": Host tried to connect to many hosts, suspicious port scan
+- "failed_connections": Failed network connections
+- "network_scanning": VNC scanning, network sweep
+- "lateral_movement": Lateral movement attempts
+- "network_intrusion": IDS/IPS alerts, firewall blocks
+- "phishing": Phishing, spear-phishing, BEC, malicious email
+- "brute_force": Brute force, credential stuffing/spraying
+- "unauthorized_access": Unauthorized logins, privilege abuse
+- "web_application_attack": SQL injection, XSS, WAF alerts
 
-IMPORTANT DISTINCTIONS:
-- "Vulnerable driver dropped" (loldrivers, BYOVD) = Endpoint Security (T1068/T1211), NOT Vulnerability
-- "Unusual data download" = Data Exfiltration (T1041/T1567), NOT Network Security
-- "Compute-attached identity from unusual ASN" = Cloud Security (T1078.004), NOT Network Security
-- "Anti Webshell Protection" = Endpoint Security (T1505.003), NOT Cloud Security
-- "Suspicious remote WMI process execution" = Endpoint Security (T1047), NOT Network Security
-- "Failed Connections" detected by XDR = Network Security (connection failures are network-layer)
-- "Local Threat Detected" by XDR Agent = Endpoint Security
-
-Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"reconnaissance|weaponization|delivery|exploitation|installation|command_and_control|actions_on_objectives","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"endpoint_security|cloud_security|network_security|email_threat|credential_abuse|data_exfiltration|vulnerability|unauthorized_access|cloud_app_security|web_app_security|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`;
+Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"reconnaissance|weaponization|delivery|exploitation|installation|command_and_control|actions_on_objectives","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|ransomware|cryptomining|vulnerable_driver|vulnerable_application|vulnerability|suspicious_executable|suspicious_process|remote_code_execution|local_threat|rootkit|webshell|process_injection|dll_sideloading|system_modification|masquerading|ntlm_relay|powershell_activity|privilege_escalation|defense_evasion|multiple_mitre_alerts|suspicious_api_call|suspicious_cloud_token|suspicious_cloud_operation|suspicious_cloud_login|cloud_misconfiguration|large_data_upload|data_exfiltration|port_scan|failed_connections|network_scanning|lateral_movement|network_intrusion|phishing|brute_force|unauthorized_access|web_application_attack|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}]}`;
 
 const AI_TYPE_MAP: Record<string, string> = {
-  endpoint_security: "Endpoint Security",
-  cloud_security: "Cloud Security",
-  network_security: "Network Security",
-  email_threat: "Email Threat",
-  credential_abuse: "Credential Abuse",
-  data_exfiltration: "Data Exfiltration",
+  malware: "Malware",
+  ransomware: "Ransomware",
+  cryptomining: "Cryptomining",
+  vulnerable_driver: "Vulnerable Driver",
+  vulnerable_application: "Vulnerable Application",
   vulnerability: "Vulnerability",
+  suspicious_executable: "Suspicious Executable",
+  suspicious_process: "Suspicious Process",
+  remote_code_execution: "Remote Code Execution",
+  local_threat: "Local Threat",
+  rootkit: "Rootkit",
+  webshell: "Webshell",
+  process_injection: "Process Injection",
+  dll_sideloading: "DLL Side-Loading",
+  system_modification: "System Modification",
+  digital_signer_restriction: "Digital Signer Restriction",
+  masquerading: "Masquerading",
+  ntlm_relay: "NTLM Relay",
+  powershell_activity: "Powershell Activity",
+  privilege_escalation: "Privilege Escalation",
+  defense_evasion: "Defense Evasion",
+  multiple_mitre_alerts: "Multiple MITRE Alerts",
+  suspicious_api_call: "Suspicious API Call",
+  suspicious_cloud_token: "Suspicious Cloud Token Usage",
+  suspicious_cloud_operation: "Suspicious Cloud Operation",
+  suspicious_cloud_login: "Suspicious Cloud Login",
+  cloud_misconfiguration: "Cloud Misconfiguration",
+  imds_exploitation: "IMDS Exploitation",
+  suspicious_ssh_activity: "Suspicious SSH Activity",
+  large_data_upload: "Large Data Upload",
+  data_exfiltration: "Data Exfiltration",
+  port_scan: "Port Scan",
+  failed_connections: "Failed Connections",
+  network_scanning: "Network Scanning",
+  lateral_movement: "Lateral Movement",
+  ddos: "DDoS",
+  network_intrusion: "Network Intrusion",
+  phishing: "Phishing",
+  email_security_alert: "Email Security Alert",
+  brute_force: "Brute Force",
   unauthorized_access: "Unauthorized Access",
-  cloud_app_security: "Cloud App Security",
-  web_app_security: "Web Application Security",
-  malware: "Endpoint Security",
-  phishing: "Email Threat",
-  brute_force: "Credential Abuse",
-  dos: "Network Security",
-  insider_threat: "Unauthorized Access",
-  misconfiguration: "Cloud Security",
+  web_application_attack: "Web Application Attack",
+  shadow_it: "Shadow IT",
+  endpoint_security: "Local Threat",
+  cloud_security: "Suspicious Cloud Operation",
+  network_security: "Network Intrusion",
+  email_threat: "Phishing",
+  credential_abuse: "Brute Force",
   other: "Security Alert",
 };
 
@@ -2442,21 +2524,43 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       const summary = `Title: ${incident.title}\nSeverity: ${incident.severity}\nStatus: ${incident.status}\nDescription: ${(incident.description || "").substring(0, 500)}\nSource: ${incident.source || ""}\nAssets: ${incident.affectedAssets || ""}\nCategory: ${incident.category || ""}`;
 
-      const singlePrompt = `You are a senior SOC analyst specializing in MSSP operations. Enrich this single incident with precise security classification.
+      const singlePrompt = `You are a senior SOC analyst. Enrich this incident with SPECIFIC threat classification.
 
-CRITICAL CLASSIFICATION RULES (incidentType field):
-- "endpoint_security": Malware, suspicious executables, vulnerable drivers (BYOVD/loldrivers), process injection, fileless attacks, EDR/XDR agent detections, local threats, privilege escalation on endpoints, webshell protection, suspicious WMI/PowerShell, remote process execution
-- "cloud_security": Cloud IAM anomalies, compute-attached identity misuse, unusual ASN/geographic API calls, AWS/Azure/GCP security events, cloud credential compromise, IMDS exploitation
-- "network_security": Port scanning, network intrusion, firewall blocks, DDoS, lateral movement via network, failed connections, IDS/IPS alerts
-- "email_threat": Phishing, spear-phishing, BEC, malicious email, spoofed sender
-- "credential_abuse": Brute force, credential stuffing/spraying/dumping, authentication anomalies
-- "data_exfiltration": DLP alerts, unusual data downloads/uploads/transfers, large file transfers
-- "vulnerability": CVE-based vulnerability findings, missing patches (NOT vulnerable drivers)
-- "unauthorized_access": Unauthorized logins, privilege abuse, insider threat
+Use SPECIFIC incidentType values (NOT broad categories like "endpoint_security"):
+- "malware": WildFire Malware, trojans, worms, backdoors
+- "vulnerable_driver": Vulnerable Driver Dropped (BYOVD/loldrivers)
+- "suspicious_executable": Suspicious executable detected
+- "suspicious_process": Suspicious process creation, rare unsigned processes
+- "remote_code_execution": Remote WMI execution, PsExec
+- "local_threat": Local Threat Detected by XDR Agent
+- "rootkit": Rootkit, uncommon driver loaded
+- "webshell": Webshell dropped/detected
+- "process_injection": PE injection, process hollowing
+- "dll_sideloading": DLL side-loading, DLL hijacking
+- "masquerading": Process masquerading
+- "powershell_activity": PowerShell activity alerts
+- "privilege_escalation": Accessibility Feature Escalation
+- "defense_evasion": Impair Defenses, Gain Persistency
+- "suspicious_api_call": Compute-attached identity executing API calls from unusual ASN
+- "suspicious_cloud_token": Suspicious usage of EC2 token
+- "suspicious_cloud_operation": Cloud identity performing unusual operations
+- "large_data_upload": Host uploaded large data to external host
+- "port_scan": Host tried to connect to many hosts
+- "failed_connections": Failed network connections
+- "network_scanning": VNC scanning, scanning tools
+- "ntlm_relay": NTLM Relay attacks
+- "suspicious_ssh_activity": Unusual SSH activity, SSH tunneling
+- "phishing": Phishing, BEC, malicious email
+- "brute_force": Brute force, credential spraying
+- "system_modification": Modification of system partition
+- "digital_signer_restriction": Digital signer restriction violations
+- "multiple_mitre_alerts": Multiple alerts with MITRE tactics
+- "suspicious_cloud_login": Logged in from unusual location
+- "cloud_misconfiguration": S3 bucket public, cloud misconfig
+- "imds_exploitation": Instance metadata service exploitation
+- "data_exfiltration": DLP alerts, unusual downloads/transfers
 
-IMPORTANT: "Vulnerable driver" = endpoint_security (NOT vulnerability). "Unusual data download" = data_exfiltration (NOT network_security). "Compute-attached identity from unusual ASN" = cloud_security (NOT network_security).
-
-Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"endpoint_security|cloud_security|network_security|email_threat|credential_abuse|data_exfiltration|vulnerability|unauthorized_access|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}`;
+Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|vulnerable_driver|suspicious_executable|suspicious_process|remote_code_execution|local_threat|rootkit|webshell|process_injection|dll_sideloading|masquerading|powershell_activity|privilege_escalation|defense_evasion|suspicious_api_call|suspicious_cloud_token|suspicious_cloud_operation|large_data_upload|port_scan|failed_connections|network_scanning|ntlm_relay|suspicious_ssh_activity|phishing|brute_force|system_modification|digital_signer_restriction|multiple_mitre_alerts|suspicious_cloud_login|cloud_misconfiguration|imds_exploitation|data_exfiltration|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}`;
 
       const aiRes = await openai.chat.completions.create({
         model: "gpt-4o-mini",
