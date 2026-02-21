@@ -2193,6 +2193,12 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       let incidentsCreated = 0;
       let eventsCreated = 0;
       let skippedRows = 0;
+      let duplicatesSkipped = 0;
+
+      const existingIncidents = await storage.getIncidents(tid);
+      const existingEvents = await storage.getSecurityEvents(tid);
+      const incidentDedupSet = new Set(existingIncidents.map(i => `${i.title}||${i.affectedAssets || ""}`));
+      const eventDedupSet = new Set(existingEvents.map(e => `${e.threat || ""}||${e.asset || ""}||${e.eventType}`));
 
       const batchSize = 500;
       for (let batchStart = 0; batchStart < rows.length; batchStart += batchSize) {
@@ -2230,22 +2236,28 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const incidentType = classifyIncidentType(title, eventType);
           const derivedSource = deriveIncidentSource(eventType, logSourceRaw, title);
 
-          incidentBatch.push({
-            tenantId: tid,
-            title,
-            description,
-            severity,
-            status,
-            source: derivedSource.substring(0, 100),
-            category: category ? category.substring(0, 100) : null,
-            affectedAssets: assets || null,
-            recommendation: recommendation ? recommendation.substring(0, 2000) : null,
-            assignedTo: assignee ? assignee.substring(0, 255) : null,
-            resolvedAt: status === "resolved" ? occurredAt : null,
-            incidentType: incidentType.substring(0, 100),
-            destinationIp: assets ? assets.split(",")[0]?.trim().substring(0, 100) : null,
-            detectionSource: logSourceRaw.substring(0, 200) || null,
-          });
+          const incDedupKey = `${title}||${assets || ""}`;
+          if (incidentDedupSet.has(incDedupKey)) {
+            duplicatesSkipped++;
+          } else {
+            incidentDedupSet.add(incDedupKey);
+            incidentBatch.push({
+              tenantId: tid,
+              title,
+              description,
+              severity,
+              status,
+              source: derivedSource.substring(0, 100),
+              category: category ? category.substring(0, 100) : null,
+              affectedAssets: assets || null,
+              recommendation: recommendation ? recommendation.substring(0, 2000) : null,
+              assignedTo: assignee ? assignee.substring(0, 255) : null,
+              resolvedAt: status === "resolved" ? occurredAt : null,
+              incidentType: incidentType.substring(0, 100),
+              destinationIp: assets ? assets.split(",")[0]?.trim().substring(0, 100) : null,
+              detectionSource: logSourceRaw.substring(0, 200) || null,
+            });
+          }
 
           const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
           const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
@@ -2268,30 +2280,37 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const threatVectorVal = getField(row, "Threat Vector", "threatVector", "Attack Vector", "Vector", "Kill Chain Phase");
           const appVal = getField(row, "app", "App", "Business Application Names", "Application", "Service Name");
 
-          eventBatch.push({
-            tenantId: tid,
-            eventType,
-            severity,
-            threat: title.substring(0, 500),
-            target: (assets || hostIp).substring(0, 500) || null,
-            attacker: getField(row, "Attacker", "attacker", "Source IP", "Threat Actor", "Adversary").substring(0, 500) || null,
-            asset: assets ? assets.split(",")[0]?.trim().substring(0, 500) : null,
-            app: appVal.substring(0, 255) || null,
-            description: (description + (comments ? "\n" + comments : "")).substring(0, 2000),
-            threatVector: threatVectorVal.substring(0, 200) || null,
-            mitreTactic: mitreTactic.substring(0, 200) || null,
-            mitreTechnique: mitreTechnique.substring(0, 200) || null,
-            action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required", "Action Taken", "Response Action", "Remediation Action").substring(0, 100) || null,
-            sourceType: getField(row, "Asset Types", "sourceType", "Source Type", "Device Type", "Endpoint Type").substring(0, 100) || null,
-            logSource: logSource.substring(0, 200) || null,
-            sender: senderVal.substring(0, 500) || null,
-            recipient: recipientVal.substring(0, 500) || null,
-            protocol: protocolVal.substring(0, 50) || null,
-            country: countryVal.substring(0, 100) || null,
-            riskScore,
-            rawPayload: buildRawPayload(row),
-            occurredAt,
-          });
+          const assetVal = assets ? assets.split(",")[0]?.trim().substring(0, 500) : null;
+          const evtDedupKey = `${title.substring(0, 500)}||${assetVal || ""}||${eventType}`;
+          if (!eventDedupSet.has(evtDedupKey)) {
+            eventDedupSet.add(evtDedupKey);
+            eventBatch.push({
+              tenantId: tid,
+              eventType,
+              severity,
+              threat: title.substring(0, 500),
+              target: (assets || hostIp).substring(0, 500) || null,
+              attacker: getField(row, "Attacker", "attacker", "Source IP", "Threat Actor", "Adversary").substring(0, 500) || null,
+              asset: assetVal,
+              app: appVal.substring(0, 255) || null,
+              description: (description + (comments ? "\n" + comments : "")).substring(0, 2000),
+              threatVector: threatVectorVal.substring(0, 200) || null,
+              mitreTactic: mitreTactic.substring(0, 200) || null,
+              mitreTechnique: mitreTechnique.substring(0, 200) || null,
+              action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required", "Action Taken", "Response Action", "Remediation Action").substring(0, 100) || null,
+              sourceType: getField(row, "Asset Types", "sourceType", "Source Type", "Device Type", "Endpoint Type").substring(0, 100) || null,
+              logSource: logSource.substring(0, 200) || null,
+              sender: senderVal.substring(0, 500) || null,
+              recipient: recipientVal.substring(0, 500) || null,
+              protocol: protocolVal.substring(0, 50) || null,
+              country: countryVal.substring(0, 100) || null,
+              riskScore,
+              rawPayload: buildRawPayload(row),
+              occurredAt,
+            });
+          } else {
+            duplicatesSkipped++;
+          }
         }
 
         for (const inc of incidentBatch) {
@@ -2326,13 +2345,14 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       if (unenriched.length === 0) {
         return res.json({
-          message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events.`,
+          message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events.${duplicatesSkipped > 0 ? ` ${duplicatesSkipped} duplicates skipped.` : ""}`,
           incidentsCreated,
           eventsCreated,
           aiEnriched: 0,
           imported: incidentsCreated + eventsCreated,
           total: rows.length,
           skipped: skippedRows,
+          duplicatesSkipped,
           columnsDetected: detectedColumns,
         });
       }
@@ -2343,7 +2363,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       res.flushHeaders();
 
       const sendImportProgress = (phase: string, aiEnriched: number, aiTotal: number, done: boolean) => {
-        res.write(`data: ${JSON.stringify({ phase, incidentsCreated, eventsCreated, aiEnriched, aiTotal, imported: incidentsCreated + eventsCreated, total: rows.length, skipped: skippedRows, columnsDetected: detectedColumns, done })}\n\n`);
+        res.write(`data: ${JSON.stringify({ phase, incidentsCreated, eventsCreated, aiEnriched, aiTotal, imported: incidentsCreated + eventsCreated, total: rows.length, skipped: skippedRows, duplicatesSkipped, columnsDetected: detectedColumns, done })}\n\n`);
       };
 
       sendImportProgress("enriching", 0, unenriched.length, false);

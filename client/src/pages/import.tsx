@@ -43,6 +43,7 @@ export default function ImportPage() {
     eventsCreated?: number;
     columnsDetected?: string[];
     aiEnriched?: number;
+    duplicatesSkipped?: number;
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [enrichResult, setEnrichResult] = useState<{
@@ -147,11 +148,12 @@ export default function ImportPage() {
                     imported: ev.imported || 0,
                     total: ev.total || 0,
                     skipped: ev.skipped || 0,
-                    message: `Imported ${ev.incidentsCreated || 0} incidents and ${ev.eventsCreated || 0} events. AI enriched ${ev.aiEnriched || 0} incidents.`,
+                    message: `Imported ${ev.incidentsCreated || 0} incidents and ${ev.eventsCreated || 0} events. AI enriched ${ev.aiEnriched || 0} incidents.${ev.duplicatesSkipped ? ` ${ev.duplicatesSkipped} duplicates skipped.` : ""}`,
                     incidentsCreated: ev.incidentsCreated,
                     eventsCreated: ev.eventsCreated,
                     columnsDetected: ev.columnsDetected,
                     aiEnriched: ev.aiEnriched,
+                    duplicatesSkipped: ev.duplicatesSkipped || 0,
                   });
                 }
               } catch {}
@@ -164,11 +166,12 @@ export default function ImportPage() {
             imported: lastData.imported || 0,
             total: lastData.total || 0,
             skipped: lastData.skipped || 0,
-            message: `Imported ${lastData.incidentsCreated || 0} incidents and ${lastData.eventsCreated || 0} events. AI enriched ${lastData.aiEnriched || 0} incidents.`,
+            message: `Imported ${lastData.incidentsCreated || 0} incidents and ${lastData.eventsCreated || 0} events. AI enriched ${lastData.aiEnriched || 0} incidents.${lastData.duplicatesSkipped ? ` ${lastData.duplicatesSkipped} duplicates skipped.` : ""}`,
             incidentsCreated: lastData.incidentsCreated,
             eventsCreated: lastData.eventsCreated,
             columnsDetected: lastData.columnsDetected,
             aiEnriched: lastData.aiEnriched,
+            duplicatesSkipped: lastData.duplicatesSkipped || 0,
           });
         }
         queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
@@ -304,6 +307,11 @@ export default function ImportPage() {
                       {result.skipped > 0 && (
                         <Badge variant="outline" className="text-[10px]">
                           {result.skipped} skipped
+                        </Badge>
+                      )}
+                      {result.duplicatesSkipped > 0 && (
+                        <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-700 dark:text-yellow-400">
+                          {result.duplicatesSkipped} duplicates skipped
                         </Badge>
                       )}
                     </div>

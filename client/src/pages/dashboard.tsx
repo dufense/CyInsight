@@ -702,6 +702,16 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
           </div>
+          <ExpandableCard title="Risk Distribution"
+            headerExtra={<ChartTypeSelector active={ct("riskDistribution", "pie")} onChange={(v) => setCt("riskDistribution", v)} />}>
+            <FlexChart
+              data={assetsData?.summary?.riskDistribution || []}
+              chartType={ct("riskDistribution", "pie")}
+              dataKey="value"
+              height={220}
+              colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }}
+            />
+          </ExpandableCard>
         </TabsContent>
 
         {/* Threat Intelligence */}
@@ -913,6 +923,17 @@ export default function DashboardPage() {
               />
             </ExpandableCard>
           </div>
+          <ExpandableCard title="Top 20 Assets by Event Count"
+            headerExtra={<ChartTypeSelector active={ct("topAssets", "bar")} onChange={(v) => setCt("topAssets", v)} />}>
+            <FlexChart
+              data={(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20)}
+              chartType={ct("topAssets", "bar")}
+              dataKey="count"
+              height={300}
+              layout="vertical"
+              yAxisWidth={120}
+            />
+          </ExpandableCard>
         </TabsContent>
 
         {/* Web App (WAF) */}
@@ -1254,40 +1275,7 @@ export default function DashboardPage() {
                 <MetricCard title="Medium Risk" value={assetsData?.summary?.mediumRiskAssets || 0} icon={Shield} color={C.yellow} />
               </div>
 
-              <div className="grid lg:grid-cols-2 gap-4">
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Top 20 Assets by Event Count</CardTitle>
-                    <ChartTypeSelector active={ct("topAssets", "bar")} onChange={(v) => setCt("topAssets", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20)}
-                      chartType={ct("topAssets", "bar")}
-                      dataKey="count"
-                      height={300}
-                      layout="vertical"
-                      yAxisWidth={120}
-                    />
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Risk Distribution</CardTitle>
-                    <ChartTypeSelector active={ct("riskDistribution", "pie")} onChange={(v) => setCt("riskDistribution", v)} />
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <FlexChart
-                      data={assetsData?.summary?.riskDistribution || []}
-                      chartType={ct("riskDistribution", "pie")}
-                      dataKey="value"
-                      height={220}
-                      colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }}
-                    />
-                  </CardContent>
-                </Card>
-              </div>
+              
 
               <div className="grid lg:grid-cols-3 gap-4">
                 <ExpandableCard title="Assets by Group"
