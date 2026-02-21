@@ -1926,6 +1926,50 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         return "endpoint";
       }
 
+      const classifyIncidentType = (title: string, eventType: string): string => {
+        const t = title.toLowerCase();
+        if (t.includes("insertion of storage device") || t.includes("device control") || t.includes("usb")) return "Device Control";
+        if (t.includes("malicious binary") || t.includes("malware") || t.includes("infected file") || t.includes("malicious file") || t.includes("suspicious file") || t.includes("threat intelligence detection")) return "Malware";
+        if (t.includes("malicious script") || t.includes("fileless") || t.includes("script command") || t.includes("powershell") || t.includes("macro")) return "Fileless Attack";
+        if (t.includes("process monitoring") || t.includes("suspicious process") || t.includes("process injection")) return "Process Monitoring";
+        if (t.includes("unauthorized file") || t.includes("unauthorized memory") || t.includes("unauthorized registry") || t.includes("unauthorized access")) return "Unauthorized Access";
+        if (t.includes("attempt to terminate") || t.includes("evasion") || t.includes("defense evasion") || t.includes("kill process")) return "Defense Evasion";
+        if (t.includes("decoy") || t.includes("honeypot") || t.includes("deception")) return "Deception Alert";
+        if (t.includes("responder") || t.includes("response") || t.includes("remediation")) return "Auto Response";
+        if (t.includes("logged in to more than") || t.includes("brute force") || t.includes("multiple login") || t.includes("credential")) return "Credential Abuse";
+        if (t.includes("port scan") || t.includes("reconnaissance") || t.includes("discovery") || t.includes("enumeration")) return "Network Reconnaissance";
+        if (t.includes("phish") || t.includes("spam") || t.includes("suspicious email") || t.includes("email threat")) return "Email Threat";
+        if (t.includes("sql inject") || t.includes("xss") || t.includes("web shell") || t.includes("web attack") || t.includes("rfi") || t.includes("lfi")) return "Web Attack";
+        if (t.includes("data leak") || t.includes("data loss") || t.includes("exfiltrat") || t.includes("dlp")) return "Data Exfiltration";
+        if (t.includes("ransomware") || t.includes("encrypt")) return "Ransomware";
+        if (t.includes("lateral") || t.includes("privilege escalat")) return "Lateral Movement";
+        if (t.includes("vulnerability") || t.includes("cve-") || t.includes("exploit")) return "Vulnerability Exploit";
+        if (t.includes("cloud") || t.includes("aws") || t.includes("azure") || t.includes("gcp")) return "Cloud Security";
+        const etMap: Record<string, string> = {
+          endpoint: "Endpoint Security", network: "Network Security", email: "Email Security",
+          vulnerability: "Vulnerability", waf: "Web App Security", dlp: "Data Protection",
+          identity: "Identity Security", cloud: "Cloud Security", casb: "Cloud Access Security",
+          sse: "Security Service Edge",
+        };
+        return etMap[eventType] || "Security Alert";
+      };
+
+      const deriveIncidentSource = (eventType: string, logSource: string, title: string): string => {
+        const sourceMap: Record<string, string> = {
+          endpoint: "Endpoint Detection & Response",
+          network: "Network Detection",
+          email: "Email Security Gateway",
+          vulnerability: "Vulnerability Scanner",
+          waf: "Web Application Firewall",
+          dlp: "Data Loss Prevention",
+          identity: "Identity & Access Management",
+          cloud: "Cloud Security",
+          casb: "Cloud Access Security Broker",
+          sse: "Security Service Edge",
+        };
+        return sourceMap[eventType] || logSource || "Security Platform";
+      };
+
       const isValidDate = (d: Date): boolean => {
         if (isNaN(d.getTime())) return false;
         const year = d.getFullYear();
@@ -2006,10 +2050,14 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const assets = extractAssets(row);
           const assignee = getField(row, "Assignee", "assignedTo", "assigned_to", "user", "User", "Owner", "Analyst", "Handler");
           const recommendation = getField(row, "Recommendation", "recommendation", "Recommended Response", "Remediation", "Fix", "Solution");
-          const source = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource", "Source", "Detection Source", "Alert Source", "Product") || "Import";
+          const logSourceRaw = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource", "Source", "Detection Source", "Alert Source", "Product") || "";
           const category = getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "category", "Category", "Tactic") || null;
           const dateRaw = getField(row, "Last Updated", "First Seen", "Last Seen", "occurredAt", "occurred_at", "date", "timestamp", "Date", "Timestamp", "Created", "Detection Time", "Event Time");
           const occurredAt = parseExcelDate(dateRaw);
+
+          const eventType = detectEventType(row);
+          const incidentType = classifyIncidentType(title, eventType);
+          const derivedSource = deriveIncidentSource(eventType, logSourceRaw, title);
 
           incidentBatch.push({
             tenantId: tid,
@@ -2017,15 +2065,17 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
             description,
             severity,
             status,
-            source: source.substring(0, 100),
+            source: derivedSource.substring(0, 100),
             category: category ? category.substring(0, 100) : null,
             affectedAssets: assets || null,
             recommendation: recommendation ? recommendation.substring(0, 2000) : null,
             assignedTo: assignee ? assignee.substring(0, 255) : null,
             resolvedAt: status === "resolved" ? occurredAt : null,
+            incidentType: incidentType.substring(0, 100),
+            destinationIp: assets ? assets.split(",")[0]?.trim().substring(0, 100) : null,
+            detectionSource: logSourceRaw.substring(0, 200) || null,
           });
 
-          const eventType = detectEventType(row);
           const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
           const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
           const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score", "Risk Score", "Severity Score", "CVSS");

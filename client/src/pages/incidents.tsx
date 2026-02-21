@@ -78,6 +78,29 @@ const STATUS_STYLES: Record<string, string> = {
   closed: "bg-muted text-muted-foreground",
 };
 
+const INCIDENT_TYPE_STYLES: Record<string, string> = {
+  "Device Control": "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  "Malware": "bg-red-500/10 text-red-700 dark:text-red-400",
+  "Fileless Attack": "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  "Process Monitoring": "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
+  "Unauthorized Access": "bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  "Defense Evasion": "bg-rose-500/10 text-rose-700 dark:text-rose-400",
+  "Deception Alert": "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  "Auto Response": "bg-green-500/10 text-green-700 dark:text-green-400",
+  "Credential Abuse": "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+  "Network Reconnaissance": "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400",
+  "Email Threat": "bg-pink-500/10 text-pink-700 dark:text-pink-400",
+  "Web Attack": "bg-red-600/10 text-red-800 dark:text-red-300",
+  "Data Exfiltration": "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+  "Ransomware": "bg-destructive/10 text-destructive",
+  "Endpoint Security": "bg-slate-500/10 text-slate-700 dark:text-slate-400",
+  "Network Security": "bg-teal-500/10 text-teal-700 dark:text-teal-400",
+};
+
+function getIncidentTypeBadgeStyle(type: string): string {
+  return INCIDENT_TYPE_STYLES[type] || "bg-muted text-muted-foreground";
+}
+
 function formatRelativeTime(dateStr: string | Date): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -529,14 +552,14 @@ export default function IncidentsPage() {
                         </TableCell>
                         <TableCell className="font-mono text-xs">#{incident.id}</TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-[10px]" data-testid={`badge-type-${incident.id}`}>
+                          <Badge variant="outline" className={`text-[10px] ${getIncidentTypeBadgeStyle(incident.incidentType || incident.category || "General")}`} data-testid={`badge-type-${incident.id}`}>
                             {incident.incidentType || incident.category || "General"}
                           </Badge>
                         </TableCell>
                         <TableCell>
                           <span className="text-xs font-medium">{incident.title}</span>
                         </TableCell>
-                        <TableCell className="text-xs text-muted-foreground font-mono" data-testid={`text-source-${incident.id}`}>
+                        <TableCell className="text-xs text-muted-foreground" data-testid={`text-source-${incident.id}`}>
                           {incident.sourceIp || incident.source || "--"}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground font-mono" data-testid={`text-dest-${incident.id}`}>
