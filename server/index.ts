@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { seedDatabase, seedSecurityEvents } from "./seed";
+import { runMigrations } from "./migrate";
 
 const app = express();
 const httpServer = createServer(app);
@@ -61,6 +62,7 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  await runMigrations();
   await seedDatabase();
   await seedSecurityEvents();
   await registerRoutes(httpServer, app);

@@ -199,5 +199,13 @@ Customer tenants can be created via POST /api/tenants by MSS admins.
 - Tenant access validated server-side via assertTenantAccess middleware
 - Input validation via Zod schemas on all create/update endpoints
 
+## Database Migrations
+- Uses drizzle-kit generate + drizzle-orm migrate for safe incremental migrations
+- Migration runner (`server/migrate.ts`) runs automatically on server startup
+- Detects existing databases and creates baseline migration journal entry
+- New schema changes should use `npx drizzle-kit generate` to create migration files
+- Migration files are in `migrations/` directory with journal in `migrations/meta/`
+- NEVER use `db:push` as it can drop and recreate tables, causing data loss
+
 ## Running
 Workflow "Start application" runs `npm run dev` which starts Express + Vite on port 5000.
