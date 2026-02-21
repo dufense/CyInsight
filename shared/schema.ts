@@ -39,6 +39,41 @@ export const tenantUsers = pgTable("tenant_users", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const INDUSTRY_OPTIONS = [
+  "Banking & Financial Services",
+  "Healthcare",
+  "Technology",
+  "Government",
+  "Retail & E-Commerce",
+  "Education",
+  "Manufacturing",
+  "Energy & Utilities",
+  "Telecommunications",
+  "Insurance",
+  "Legal",
+  "Media & Entertainment",
+  "Transportation & Logistics",
+  "Real Estate",
+  "Pharmaceuticals",
+  "Defense & Aerospace",
+  "Hospitality",
+  "Cybersecurity",
+  "Non-Profit",
+  "Other",
+] as const;
+
+export const MITRE_TACTICS = [
+  "Reconnaissance", "Resource Development", "Initial Access", "Execution",
+  "Persistence", "Privilege Escalation", "Defense Evasion", "Credential Access",
+  "Discovery", "Lateral Movement", "Collection", "Command and Control",
+  "Exfiltration", "Impact",
+] as const;
+
+export const KILL_CHAIN_PHASES = [
+  "Reconnaissance", "Weaponization", "Delivery", "Exploitation",
+  "Installation", "Command & Control", "Actions on Objectives",
+] as const;
+
 export const incidents = pgTable("incidents", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull().references(() => tenants.id),
@@ -51,6 +86,13 @@ export const incidents = pgTable("incidents", {
   affectedAssets: text("affected_assets"),
   recommendation: text("recommendation"),
   assignedTo: varchar("assigned_to"),
+  mitreTactic: varchar("mitre_tactic", { length: 200 }),
+  mitreTechniqueId: varchar("mitre_technique_id", { length: 50 }),
+  mitreTechnique: varchar("mitre_technique", { length: 200 }),
+  killChainPhase: varchar("kill_chain_phase", { length: 100 }),
+  confidenceScore: integer("confidence_score"),
+  isTruePositive: boolean("is_true_positive"),
+  classification: varchar("classification", { length: 50 }),
   resolvedAt: timestamp("resolved_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

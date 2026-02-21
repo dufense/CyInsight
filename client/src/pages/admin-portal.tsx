@@ -3,6 +3,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { Tenant, TenantUser, License } from "@shared/schema";
+import { INDUSTRY_OPTIONS } from "@shared/schema";
 import {
   Building2, Users, Shield, KeyRound, Globe, Plus, Search,
   Edit2, Trash2, ChevronRight, ChevronDown, Activity, Calendar, AlertTriangle,
@@ -185,6 +186,7 @@ function TenantsTab() {
   const [formType, setFormType] = useState<"mssp" | "customer">("mssp");
   const [parentId, setParentId] = useState<string>("");
   const [expandedMssps, setExpandedMssps] = useState<Set<number>>(new Set());
+  const [industryValue, setIndustryValue] = useState<string>("");
 
   const { data: allTenants = [], isLoading } = useQuery<Tenant[]>({
     queryKey: ["/api/tenant-admin/tenants"],
@@ -243,7 +245,7 @@ function TenantsTab() {
         data: {
           name,
           slug,
-          industry: fd.get("industry") || null,
+          industry: industryValue || null,
           contactEmail: fd.get("contactEmail") || null,
           isActive: fd.get("isActive") === "true",
         },
@@ -254,7 +256,7 @@ function TenantsTab() {
         slug,
         type: formType,
         parentId: formType === "customer" && parentId ? parseInt(parentId) : null,
-        industry: fd.get("industry") || null,
+        industry: industryValue || null,
         contactEmail: fd.get("contactEmail") || null,
       });
     }
@@ -273,6 +275,7 @@ function TenantsTab() {
     setEditTenant(null);
     setFormType("customer");
     setParentId(String(mssp.id));
+    setIndustryValue("");
     setDialogOpen(true);
   };
 
@@ -314,7 +317,7 @@ function TenantsTab() {
               data-testid="input-search-tenants"
             />
           </div>
-          <Button size="sm" onClick={() => { setEditTenant(null); setFormType("mssp"); setParentId(""); setDialogOpen(true); }} data-testid="button-add-tenant">
+          <Button size="sm" onClick={() => { setEditTenant(null); setFormType("mssp"); setParentId(""); setIndustryValue(""); setDialogOpen(true); }} data-testid="button-add-tenant">
             <Plus className="w-3.5 h-3.5 mr-1.5" />
             Add Tenant
           </Button>
@@ -422,7 +425,7 @@ function TenantsTab() {
                           size="icon"
                           variant="ghost"
                           className="w-7 h-7"
-                          onClick={() => { setEditTenant(tenant); setDialogOpen(true); }}
+                          onClick={() => { setEditTenant(tenant); setIndustryValue(tenant.industry || ""); setDialogOpen(true); }}
                           data-testid={`button-edit-tenant-${tenant.id}`}
                         >
                           <Edit2 className="w-3.5 h-3.5" />
@@ -518,7 +521,14 @@ function TenantsTab() {
             )}
             <div className="space-y-2">
               <Label>Industry</Label>
-              <Input name="industry" defaultValue={editTenant?.industry || ""} data-testid="input-tenant-industry" />
+              <Select value={industryValue} onValueChange={setIndustryValue}>
+                <SelectTrigger data-testid="select-tenant-industry"><SelectValue placeholder="Select industry" /></SelectTrigger>
+                <SelectContent>
+                  {INDUSTRY_OPTIONS.map(opt => (
+                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label>Contact Email</Label>

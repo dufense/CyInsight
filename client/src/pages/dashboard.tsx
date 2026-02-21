@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import {
@@ -7,6 +8,7 @@ import {
   Server, AlertCircle, FileWarning, Ban, CheckCircle2, XCircle, Gauge, Radio,
   Network, Fingerprint, KeyRound, UserX, Upload, Download, Search, Radar, HardDrive,
   Brain,
+  BarChart3, LineChart as LineChartIcon, TrendingUp as AreaChartIcon, PieChart as PieChartIcon,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +19,7 @@ import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend, RadarChart, Radar as RechartsRadar,
   PolarGrid, PolarAngleAxis, PolarRadiusAxis, Treemap,
+  LineChart as RechartsLineChart, Line,
 } from "recharts";
 
 const C = {
@@ -139,13 +142,22 @@ function Top10({ title, data, icon: Icon, showBar = true }: {
 }
 
 function MiniPie({ data, colors }: { data: { name: string; value: number }[]; colors?: Record<string, string> }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   return (
     <ResponsiveContainer width="100%" height={220}>
       <PieChart>
-        <Pie data={data} cx="50%" cy="50%" innerRadius={48} outerRadius={72} paddingAngle={3} dataKey="value">
-          {data.map((e, i) => <Cell key={e.name} fill={colors?.[e.name] || PALETTE[i % PALETTE.length]} />)}
+        <Pie data={data} cx="50%" cy="50%" innerRadius={48} outerRadius={72} paddingAngle={3} dataKey="value"
+          animationBegin={0} animationDuration={800}
+          onMouseEnter={(_, idx) => setActiveIndex(idx)}
+          onMouseLeave={() => setActiveIndex(null)}>
+          {data.map((e, i) => (
+            <Cell key={e.name} fill={colors?.[e.name] || PALETTE[i % PALETTE.length]}
+              opacity={activeIndex === null || activeIndex === i ? 1 : 0.4}
+              stroke={activeIndex === i ? "hsl(var(--foreground))" : "none"}
+              strokeWidth={activeIndex === i ? 2 : 0} />
+          ))}
         </Pie>
-        <Tooltip contentStyle={tooltipStyle} />
+        <Tooltip contentStyle={tooltipStyle} formatter={(value: any, name: string) => [`${value}`, name]} />
         <Legend wrapperStyle={{ fontSize: "10px" }} formatter={(v) => <span className="capitalize text-[10px]">{v}</span>} />
       </PieChart>
     </ResponsiveContainer>
@@ -163,6 +175,255 @@ function DashboardSkeleton() {
   );
 }
 
+const CHART_TYPE_OPTIONS = [
+  { value: "bar", icon: BarChart3, label: "Bar" },
+  { value: "line", icon: LineChartIcon, label: "Line" },
+  { value: "area", icon: AreaChartIcon, label: "Area" },
+  { value: "pie", icon: PieChartIcon, label: "Pie" },
+];
+
+function ChartTypeSelector({ active, onChange }: { active: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      {CHART_TYPE_OPTIONS.map(t => (
+        <button key={t.value} onClick={() => onChange(t.value)}
+          className={`p-1 rounded ${active === t.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+          data-testid={`chart-type-${t.value}`}>
+          <t.icon className="w-3.5 h-3.5" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+interface SeriesConfig {
+  dataKey: string;
+  name?: string;
+  color: string;
+  gradientId?: string;
+}
+
+function FlexChart({
+  data,
+  chartType,
+  dataKey = "value",
+  nameKey = "name",
+  height = 250,
+  colors,
+  layout = "horizontal",
+  series,
+  xAxisAngle,
+  xAxisHeight,
+  yAxisWidth,
+}: {
+  data: any[];
+  chartType: string;
+  dataKey?: string;
+  nameKey?: string;
+  height?: number;
+  colors?: Record<string, string>;
+  layout?: "horizontal" | "vertical";
+  series?: SeriesConfig[];
+  xAxisAngle?: number;
+  xAxisHeight?: number;
+  yAxisWidth?: number;
+}) {
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
+
+  const toggleSeries = (key: string) => {
+    setHiddenSeries(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const legendClick = (e: any) => {
+    if (e?.dataKey) toggleSeries(e.dataKey);
+    else if (e?.value) toggleSeries(e.value);
+  };
+
+  const resolvedData = data.map(d => {
+    const val = d[dataKey] !== undefined ? d[dataKey] : d.count !== undefined ? d.count : d.value;
+    return { ...d, [dataKey]: val };
+  });
+
+  if (chartType === "pie") {
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <PieChart>
+          <Pie data={resolvedData} cx="50%" cy="50%" innerRadius={Math.max(height / 5, 30)} outerRadius={Math.max(height / 3, 55)}
+            paddingAngle={3} dataKey={dataKey} nameKey={nameKey}
+            animationBegin={0} animationDuration={800}>
+            {resolvedData.map((e, i) => (
+              <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} />
+            ))}
+          </Pie>
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+            formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+        </PieChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  if (chartType === "line") {
+    if (series && series.length > 0) {
+      return (
+        <ResponsiveContainer width="100%" height={height}>
+          <RechartsLineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+            <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+              angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+            <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+              formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+            {series.map(s => !hiddenSeries.has(s.dataKey) && (
+              <Line key={s.dataKey} type="monotone" dataKey={s.dataKey} name={s.name || s.dataKey}
+                stroke={s.color} strokeWidth={2} dot={false} animationDuration={800} />
+            ))}
+          </RechartsLineChart>
+        </ResponsiveContainer>
+      );
+    }
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <RechartsLineChart data={resolvedData} layout={layout === "vertical" ? "vertical" : "horizontal"}>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+          {layout === "vertical" ? (
+            <>
+              <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+              <YAxis dataKey={nameKey} type="category" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" width={yAxisWidth || 90} />
+            </>
+          ) : (
+            <>
+              <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+                angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+              <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+            </>
+          )}
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+            formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+          <Line type="monotone" dataKey={dataKey} stroke={PALETTE[0]} strokeWidth={2} dot={false} animationDuration={800} />
+        </RechartsLineChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  if (chartType === "area") {
+    if (series && series.length > 0) {
+      return (
+        <ResponsiveContainer width="100%" height={height}>
+          <AreaChart data={data}>
+            <defs>
+              {series.map(s => (
+                <linearGradient key={s.dataKey} id={s.gradientId || `g_${s.dataKey}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={s.color} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={s.color} stopOpacity={0} />
+                </linearGradient>
+              ))}
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+            <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+              angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+            <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+              formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+            {series.map(s => !hiddenSeries.has(s.dataKey) && (
+              <Area key={s.dataKey} type="monotone" dataKey={s.dataKey} name={s.name || s.dataKey}
+                stroke={s.color} fill={`url(#${s.gradientId || `g_${s.dataKey}`})`} strokeWidth={2}
+                animationDuration={800} />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      );
+    }
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <AreaChart data={resolvedData}>
+          <defs>
+            <linearGradient id={`gFlex_${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={PALETTE[0]} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={PALETTE[0]} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+          <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+            angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+          <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+            formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+          <Area type="monotone" dataKey={dataKey} stroke={PALETTE[0]} fill={`url(#gFlex_${dataKey})`} strokeWidth={2}
+            animationDuration={800} />
+        </AreaChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  if (series && series.length > 0) {
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart data={data} layout={layout === "vertical" ? "vertical" : "horizontal"}>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+          {layout === "vertical" ? (
+            <>
+              <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+              <YAxis dataKey={nameKey} type="category" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" width={yAxisWidth || 90} />
+            </>
+          ) : (
+            <>
+              <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+                angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+              <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+            </>
+          )}
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+            formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+          {series.map(s => !hiddenSeries.has(s.dataKey) && (
+            <Bar key={s.dataKey} dataKey={s.dataKey} name={s.name || s.dataKey}
+              fill={s.color} radius={layout === "vertical" ? [0, 4, 4, 0] : [4, 4, 0, 0]}
+              barSize={14} animationDuration={800} />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={resolvedData} layout={layout === "vertical" ? "vertical" : "horizontal"}>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+        {layout === "vertical" ? (
+          <>
+            <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+            <YAxis dataKey={nameKey} type="category" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" width={yAxisWidth || 90} />
+          </>
+        ) : (
+          <>
+            <XAxis dataKey={nameKey} tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))"
+              angle={xAxisAngle} textAnchor={xAxisAngle ? "end" : "middle"} height={xAxisHeight} />
+            <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+          </>
+        )}
+        <Tooltip contentStyle={tooltipStyle} />
+        <Legend wrapperStyle={{ fontSize: "10px" }} onClick={legendClick}
+          formatter={(v) => <span className="capitalize text-[10px] cursor-pointer">{v}</span>} />
+        <Bar dataKey={dataKey} name="Events" radius={layout === "vertical" ? [0, 4, 4, 0] : [4, 4, 0, 0]}
+          barSize={layout === "vertical" ? 14 : 28} animationDuration={800}>
+          {resolvedData.map((e, i) => (
+            <Cell key={e[nameKey] || i} fill={colors?.[e[nameKey]] || PALETTE[i % PALETTE.length]} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
 export default function DashboardPage() {
   const { currentTenant } = useTenant();
   const { data: stats, isLoading } = useQuery<any>({
@@ -177,6 +438,11 @@ export default function DashboardPage() {
     queryKey: ["/api/ai/threat-analysis", currentTenant?.id],
     enabled: !!currentTenant?.id,
   });
+
+  const [chartTypes, setChartTypes] = useState<Record<string, string>>({});
+
+  const ct = (id: string, fallback: string) => chartTypes[id] || fallback;
+  const setCt = (id: string, val: string) => setChartTypes(prev => ({ ...prev, [id]: val }));
 
   if (isLoading || !stats) return <DashboardSkeleton />;
 
@@ -268,60 +534,62 @@ export default function DashboardPage() {
             </Card>
 
             <Card className="lg:col-span-2">
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Incident Trend</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incident Trend</CardTitle>
+                <ChartTypeSelector active={ct("incidentTrend", "area")} onChange={(v) => setCt("incidentTrend", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={280}>
-                  <AreaChart data={s.incidentTrend}>
-                    <defs>
-                      <linearGradient id="gInc" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={C.red} stopOpacity={0.3} />
-                        <stop offset="95%" stopColor={C.red} stopOpacity={0} />
-                      </linearGradient>
-                      <linearGradient id="gRes" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={C.green} stopOpacity={0.3} />
-                        <stop offset="95%" stopColor={C.green} stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="month" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Area type="monotone" dataKey="incidents" stroke={C.red} fill="url(#gInc)" strokeWidth={2} />
-                    <Area type="monotone" dataKey="resolved" stroke={C.green} fill="url(#gRes)" strokeWidth={2} />
-                    <Legend wrapperStyle={{ fontSize: "10px" }} />
-                  </AreaChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={s.incidentTrend}
+                  chartType={ct("incidentTrend", "area")}
+                  nameKey="month"
+                  dataKey="incidents"
+                  height={280}
+                  series={[
+                    { dataKey: "incidents", name: "Incidents", color: C.red, gradientId: "gInc" },
+                    { dataKey: "resolved", name: "Resolved", color: C.green, gradientId: "gRes" },
+                  ]}
+                />
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Events by Category</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Events by Category</CardTitle>
+                <ChartTypeSelector active={ct("eventsByCategory", "pie")} onChange={(v) => setCt("eventsByCategory", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.eventsByType.map((e: any) => ({ name: e.type, value: e.count }))} />
+                <FlexChart
+                  data={s.eventsByType.map((e: any) => ({ name: e.type, value: e.count }))}
+                  chartType={ct("eventsByCategory", "pie")}
+                  dataKey="value"
+                  height={220}
+                />
               </CardContent>
             </Card>
           </div>
 
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Category</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Category</CardTitle>
+                <ChartTypeSelector active={ct("categoryBreakdown", "bar")} onChange={(v) => setCt("categoryBreakdown", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={s.categoryBreakdown} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis dataKey="category" type="category" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" width={90} />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                      {s.categoryBreakdown.map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={s.categoryBreakdown}
+                  chartType={ct("categoryBreakdown", "bar")}
+                  dataKey="count"
+                  nameKey="category"
+                  height={220}
+                  layout="vertical"
+                  yAxisWidth={90}
+                />
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between">
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                 <CardTitle className="text-xs font-semibold uppercase tracking-wider">Recent Incidents</CardTitle>
                 <a href="/incidents" className="text-[10px] text-primary flex items-center gap-0.5">View All <ArrowUpRight className="w-3 h-3" /></a>
               </CardHeader>
@@ -372,70 +640,77 @@ export default function DashboardPage() {
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Threat Vector</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Threat Vector</CardTitle>
+                <ChartTypeSelector active={ct("threatVector", "bar")} onChange={(v) => setCt("threatVector", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={s.incidentsByThreatVector} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis dataKey="name" type="category" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" width={120} />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                      {(s.incidentsByThreatVector || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={s.incidentsByThreatVector}
+                  chartType={ct("threatVector", "bar")}
+                  dataKey="count"
+                  height={300}
+                  layout="vertical"
+                  yAxisWidth={120}
+                />
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">MITRE ATT&CK Tactics</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">MITRE ATT&CK Tactics</CardTitle>
+                <ChartTypeSelector active={ct("mitreTactics", "bar")} onChange={(v) => setCt("mitreTactics", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={300}>
-                  <RadarChart data={s.mitreTactics}>
-                    <PolarGrid stroke="hsl(var(--border))" />
-                    <PolarAngleAxis dataKey="name" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" />
-                    <PolarRadiusAxis tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" />
-                    <RechartsRadar name="Events" dataKey="value" stroke={C.purple} fill={C.purple} fillOpacity={0.3} strokeWidth={2} />
-                    <Tooltip contentStyle={tooltipStyle} />
-                  </RadarChart>
-                </ResponsiveContainer>
+                {ct("mitreTactics", "bar") === "bar" ? (
+                  <FlexChart
+                    data={s.mitreTactics}
+                    chartType="bar"
+                    dataKey="value"
+                    height={300}
+                  />
+                ) : (
+                  <FlexChart
+                    data={s.mitreTactics}
+                    chartType={ct("mitreTactics", "bar")}
+                    dataKey="value"
+                    height={300}
+                  />
+                )}
               </CardContent>
             </Card>
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Top10 title="MITRE ATT&CK Techniques" data={s.topMitreTechniques} icon={Shield} />
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Action Taken</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Incidents by Action Taken</CardTitle>
+                <ChartTypeSelector active={ct("actionTaken", "bar")} onChange={(v) => setCt("actionTaken", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={250}>
-                  <BarChart data={s.incidentsByAction}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Bar dataKey="value" name="Events" radius={[4, 4, 0, 0]} barSize={28}>
-                      {(s.incidentsByAction || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={s.incidentsByAction}
+                  chartType={ct("actionTaken", "bar")}
+                  dataKey="value"
+                  height={250}
+                />
               </CardContent>
             </Card>
           </div>
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Attack Origin Countries</CardTitle></CardHeader>
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider">Attack Origin Countries</CardTitle>
+              <ChartTypeSelector active={ct("attackOrigin", "bar")} onChange={(v) => setCt("attackOrigin", v)} />
+            </CardHeader>
             <CardContent className="pt-0">
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart data={s.topCountries}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis dataKey="name" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" angle={-30} textAnchor="end" height={60} />
-                  <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Bar dataKey="count" name="Events" radius={[4, 4, 0, 0]} barSize={24}>
-                    {(s.topCountries || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <FlexChart
+                data={s.topCountries}
+                chartType={ct("attackOrigin", "bar")}
+                dataKey="count"
+                height={250}
+                xAxisAngle={-30}
+                xAxisHeight={60}
+              />
             </CardContent>
           </Card>
         </TabsContent>
@@ -455,32 +730,48 @@ export default function DashboardPage() {
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Action Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Action Distribution</CardTitle>
+                <ChartTypeSelector active={ct("emailActions", "pie")} onChange={(v) => setCt("emailActions", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.emailActions} colors={{ blocked: C.red, quarantined: C.orange, delivered: C.green, sandboxed: C.purple, stripped: C.yellow }} />
+                <FlexChart
+                  data={s.emailActions}
+                  chartType={ct("emailActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.red, quarantined: C.orange, delivered: C.green, sandboxed: C.purple, stripped: C.yellow }}
+                />
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Severity Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Severity Distribution</CardTitle>
+                <ChartTypeSelector active={ct("emailSeverity", "pie")} onChange={(v) => setCt("emailSeverity", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.emailSeverity} colors={SEV} />
+                <FlexChart
+                  data={s.emailSeverity}
+                  chartType={ct("emailSeverity", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={SEV}
+                />
               </CardContent>
             </Card>
           </div>
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Threat Vectors</CardTitle></CardHeader>
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider">Email Threat Vectors</CardTitle>
+              <ChartTypeSelector active={ct("emailThreatVectors", "bar")} onChange={(v) => setCt("emailThreatVectors", v)} />
+            </CardHeader>
             <CardContent className="pt-0">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={s.emailThreatVectors}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Bar dataKey="count" name="Events" radius={[4, 4, 0, 0]} barSize={32}>
-                    {(s.emailThreatVectors || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <FlexChart
+                data={s.emailThreatVectors}
+                chartType={ct("emailThreatVectors", "bar")}
+                dataKey="count"
+                height={220}
+              />
             </CardContent>
           </Card>
         </TabsContent>
@@ -519,15 +810,32 @@ export default function DashboardPage() {
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Action Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Action Distribution</CardTitle>
+                <ChartTypeSelector active={ct("edrActions", "pie")} onChange={(v) => setCt("edrActions", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.endpointActions} colors={{ blocked: C.green, quarantined: C.orange, isolated: C.purple, alerted: C.blue }} />
+                <FlexChart
+                  data={s.endpointActions}
+                  chartType={ct("edrActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.green, quarantined: C.orange, isolated: C.purple, alerted: C.blue }}
+                />
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Platforms</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">EDR Platforms</CardTitle>
+                <ChartTypeSelector active={ct("edrPlatforms", "pie")} onChange={(v) => setCt("edrPlatforms", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.endpointLogSources.map((s: any) => ({ name: s.name, value: s.count }))} />
+                <FlexChart
+                  data={s.endpointLogSources.map((src: any) => ({ name: src.name, value: src.count }))}
+                  chartType={ct("edrPlatforms", "pie")}
+                  dataKey="value"
+                  height={220}
+                />
               </CardContent>
             </Card>
           </div>
@@ -551,33 +859,49 @@ export default function DashboardPage() {
             <Top10 title="Cloud Misconfigurations" data={s.cloudByThreat} icon={Cloud} />
             <Top10 title="Cloud Services" data={s.cloudApps} icon={Server} />
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Action Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Action Distribution</CardTitle>
+                <ChartTypeSelector active={ct("wafActions", "pie")} onChange={(v) => setCt("wafActions", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.wafActions} colors={{ blocked: C.green, dropped: C.red, alerted: C.orange, logged: C.blue }} />
+                <FlexChart
+                  data={s.wafActions}
+                  chartType={ct("wafActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.green, dropped: C.red, alerted: C.orange, logged: C.blue }}
+                />
               </CardContent>
             </Card>
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Protected Targets</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">WAF Protected Targets</CardTitle>
+                <ChartTypeSelector active={ct("wafTargets", "bar")} onChange={(v) => setCt("wafTargets", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={s.wafTargets}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Bar dataKey="count" name="Attacks" radius={[4, 4, 0, 0]} barSize={28}>
-                      {(s.wafTargets || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={s.wafTargets}
+                  chartType={ct("wafTargets", "bar")}
+                  dataKey="count"
+                  height={220}
+                />
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">CASB Actions</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">CASB Actions</CardTitle>
+                <ChartTypeSelector active={ct("casbActions", "pie")} onChange={(v) => setCt("casbActions", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.casbActions} colors={{ blocked: C.green, alerted: C.orange, logged: C.blue }} />
+                <FlexChart
+                  data={s.casbActions}
+                  chartType={ct("casbActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.green, alerted: C.orange, logged: C.blue }}
+                />
               </CardContent>
             </Card>
           </div>
@@ -595,33 +919,50 @@ export default function DashboardPage() {
             <Top10 title="Network Threats" data={s.networkByThreat} icon={Network} />
             <Top10 title="Identity Threats" data={s.identityByThreat} icon={Fingerprint} />
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Network Protocols</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Network Protocols</CardTitle>
+                <ChartTypeSelector active={ct("networkProtocols", "pie")} onChange={(v) => setCt("networkProtocols", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.networkProtocols} />
+                <FlexChart
+                  data={s.networkProtocols}
+                  chartType={ct("networkProtocols", "pie")}
+                  dataKey="value"
+                  height={220}
+                />
               </CardContent>
             </Card>
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Identity Action Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Identity Action Distribution</CardTitle>
+                <ChartTypeSelector active={ct("identityActions", "pie")} onChange={(v) => setCt("identityActions", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.identityActions} colors={{ blocked: C.green, alerted: C.orange, logged: C.blue }} />
+                <FlexChart
+                  data={s.identityActions}
+                  chartType={ct("identityActions", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={{ blocked: C.green, alerted: C.orange, logged: C.blue }}
+                />
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Attack Origin Countries</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Attack Origin Countries</CardTitle>
+                <ChartTypeSelector active={ct("networkCountries", "bar")} onChange={(v) => setCt("networkCountries", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={(s.topCountries || []).slice(0, 8)}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" angle={-20} textAnchor="end" height={50} />
-                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Bar dataKey="count" name="Events" radius={[4, 4, 0, 0]} barSize={24}>
-                      {(s.topCountries || []).slice(0, 8).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <FlexChart
+                  data={(s.topCountries || []).slice(0, 8)}
+                  chartType={ct("networkCountries", "bar")}
+                  dataKey="count"
+                  height={220}
+                  xAxisAngle={-20}
+                  xAxisHeight={50}
+                />
               </CardContent>
             </Card>
           </div>
@@ -636,23 +977,19 @@ export default function DashboardPage() {
             <MetricCard title="Avg EPS" value={Math.round(s.totalEvents / 120 * 10) / 10} sub="events/sec" icon={Activity} color={C.orange} />
           </div>
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Event Ingestion Trend</CardTitle></CardHeader>
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider">Event Ingestion Trend</CardTitle>
+              <ChartTypeSelector active={ct("logIngestion", "area")} onChange={(v) => setCt("logIngestion", v)} />
+            </CardHeader>
             <CardContent className="pt-0">
-              <ResponsiveContainer width="100%" height={250}>
-                <AreaChart data={s.logIngestionTrend}>
-                  <defs>
-                    <linearGradient id="gLog" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={C.blue} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={C.blue} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis dataKey="month" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Area type="monotone" dataKey="events" stroke={C.blue} fill="url(#gLog)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
+              <FlexChart
+                data={s.logIngestionTrend}
+                chartType={ct("logIngestion", "area")}
+                nameKey="month"
+                dataKey="events"
+                height={250}
+                series={[{ dataKey: "events", name: "Events", color: C.blue, gradientId: "gLog" }]}
+              />
             </CardContent>
           </Card>
           <div className="grid lg:grid-cols-2 gap-4">
@@ -674,9 +1011,17 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Source Type Distribution</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Source Type Distribution</CardTitle>
+                <ChartTypeSelector active={ct("sourceTypes", "pie")} onChange={(v) => setCt("sourceTypes", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.sourceTypes} />
+                <FlexChart
+                  data={s.sourceTypes}
+                  chartType={ct("sourceTypes", "pie")}
+                  dataKey="value"
+                  height={220}
+                />
               </CardContent>
             </Card>
           </div>
@@ -687,26 +1032,34 @@ export default function DashboardPage() {
           <div className="grid lg:grid-cols-2 gap-4">
             <Top10 title="Top Vulnerable Applications" data={s.topVulnerableApps} icon={AppWindow} />
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Vulnerability Severity</CardTitle></CardHeader>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider">Vulnerability Severity</CardTitle>
+                <ChartTypeSelector active={ct("vulnSeverity", "pie")} onChange={(v) => setCt("vulnSeverity", v)} />
+              </CardHeader>
               <CardContent className="pt-0">
-                <MiniPie data={s.vulnerabilitySeverity} colors={SEV} />
+                <FlexChart
+                  data={s.vulnerabilitySeverity}
+                  chartType={ct("vulnSeverity", "pie")}
+                  dataKey="value"
+                  height={220}
+                  colors={SEV}
+                />
               </CardContent>
             </Card>
           </div>
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Event Severity Distribution</CardTitle></CardHeader>
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider">Event Severity Distribution</CardTitle>
+              <ChartTypeSelector active={ct("eventSeverity", "bar")} onChange={(v) => setCt("eventSeverity", v)} />
+            </CardHeader>
             <CardContent className="pt-0">
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart data={s.eventsBySeverity}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip contentStyle={tooltipStyle} />
-                  <Bar dataKey="value" name="Events" radius={[4, 4, 0, 0]} barSize={32}>
-                    {(s.eventsBySeverity || []).map((e: any) => <Cell key={e.name} fill={SEV[e.name] || C.blue} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <FlexChart
+                data={s.eventsBySeverity}
+                chartType={ct("eventSeverity", "bar")}
+                dataKey="value"
+                height={250}
+                colors={SEV}
+              />
             </CardContent>
           </Card>
         </TabsContent>
@@ -731,26 +1084,35 @@ export default function DashboardPage() {
 
               <div className="grid lg:grid-cols-2 gap-4">
                 <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Top 20 Assets by Event Count</CardTitle></CardHeader>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Top 20 Assets by Event Count</CardTitle>
+                    <ChartTypeSelector active={ct("topAssets", "bar")} onChange={(v) => setCt("topAssets", v)} />
+                  </CardHeader>
                   <CardContent className="pt-0">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20)} layout="vertical">
-                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                          {(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <FlexChart
+                      data={(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20)}
+                      chartType={ct("topAssets", "bar")}
+                      dataKey="count"
+                      height={300}
+                      layout="vertical"
+                      yAxisWidth={120}
+                    />
                   </CardContent>
                 </Card>
 
                 <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Risk Distribution</CardTitle></CardHeader>
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider">Risk Distribution</CardTitle>
+                    <ChartTypeSelector active={ct("riskDistribution", "pie")} onChange={(v) => setCt("riskDistribution", v)} />
+                  </CardHeader>
                   <CardContent className="pt-0">
-                    <MiniPie data={assetsData?.summary?.riskDistribution || []} colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }} />
+                    <FlexChart
+                      data={assetsData?.summary?.riskDistribution || []}
+                      chartType={ct("riskDistribution", "pie")}
+                      dataKey="value"
+                      height={220}
+                      colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }}
+                    />
                   </CardContent>
                 </Card>
               </div>
@@ -860,150 +1222,145 @@ export default function DashboardPage() {
 
               <div className="grid lg:grid-cols-2 gap-4">
                 <Card data-testid="card-repeated-attacks">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <Target className="w-4 h-4" />
                       Repeated Attack Patterns
                     </CardTitle>
+                    <ChartTypeSelector active={ct("repeatedAttacks", "bar")} onChange={(v) => setCt("repeatedAttacks", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={(threatAnalysis?.repeatedThreats || []).slice(0, 10)} layout="vertical">
-                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                          {(threatAnalysis?.repeatedThreats || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <FlexChart
+                      data={(threatAnalysis?.repeatedThreats || []).slice(0, 10)}
+                      chartType={ct("repeatedAttacks", "bar")}
+                      dataKey="count"
+                      height={300}
+                      layout="vertical"
+                      yAxisWidth={120}
+                    />
                   </CardContent>
                 </Card>
 
                 <Card data-testid="card-targeted-systems">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <Monitor className="w-4 h-4" />
                       Most Targeted Systems
                     </CardTitle>
+                    <ChartTypeSelector active={ct("targetedSystems", "bar")} onChange={(v) => setCt("targetedSystems", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={(threatAnalysis?.mostTargetedSystems || []).slice(0, 10)} layout="vertical">
-                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                          {(threatAnalysis?.mostTargetedSystems || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <FlexChart
+                      data={(threatAnalysis?.mostTargetedSystems || []).slice(0, 10)}
+                      chartType={ct("targetedSystems", "bar")}
+                      dataKey="count"
+                      height={300}
+                      layout="vertical"
+                      yAxisWidth={120}
+                    />
                   </CardContent>
                 </Card>
               </div>
 
               <div className="grid lg:grid-cols-2 gap-4">
                 <Card data-testid="card-top-techniques">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <Shield className="w-4 h-4" />
                       Top Attack Techniques (MITRE)
                     </CardTitle>
+                    <ChartTypeSelector active={ct("topTechniques", "bar")} onChange={(v) => setCt("topTechniques", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={(threatAnalysis?.topTechniques || []).slice(0, 10)} layout="vertical">
-                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={140} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
-                          {(threatAnalysis?.topTechniques || []).slice(0, 10).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <FlexChart
+                      data={(threatAnalysis?.topTechniques || []).slice(0, 10)}
+                      chartType={ct("topTechniques", "bar")}
+                      dataKey="count"
+                      height={300}
+                      layout="vertical"
+                      yAxisWidth={140}
+                    />
                   </CardContent>
                 </Card>
 
                 <Card data-testid="card-tactics-distribution">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <Crosshair className="w-4 h-4" />
                       Attack Tactics Distribution
                     </CardTitle>
+                    <ChartTypeSelector active={ct("tacticsDistribution", "pie")} onChange={(v) => setCt("tacticsDistribution", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <MiniPie data={(threatAnalysis?.topTactics || []).slice(0, 8).map((t: any) => ({ name: t.name, value: t.count }))} />
+                    <FlexChart
+                      data={(threatAnalysis?.topTactics || []).slice(0, 8).map((t: any) => ({ name: t.name, value: t.count }))}
+                      chartType={ct("tacticsDistribution", "pie")}
+                      dataKey="value"
+                      height={220}
+                    />
                   </CardContent>
                 </Card>
               </div>
 
               <Card data-testid="card-attack-trend">
-                <CardHeader className="pb-2">
+                <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                   <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                     <Activity className="w-4 h-4" />
                     Attack Volume Trend
                   </CardTitle>
+                  <ChartTypeSelector active={ct("attackTrend", "area")} onChange={(v) => setCt("attackTrend", v)} />
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <ResponsiveContainer width="100%" height={280}>
-                    <AreaChart data={threatAnalysis?.dailyTrend || []}>
-                      <defs>
-                        <linearGradient id="gThreatTrend" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={C.purple} stopOpacity={0.3} />
-                          <stop offset="95%" stopColor={C.purple} stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                      <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                      <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                      <Tooltip contentStyle={tooltipStyle} />
-                      <Area type="monotone" dataKey="count" stroke={C.purple} fill="url(#gThreatTrend)" strokeWidth={2} />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  <FlexChart
+                    data={threatAnalysis?.dailyTrend || []}
+                    chartType={ct("attackTrend", "area")}
+                    nameKey="date"
+                    dataKey="count"
+                    height={280}
+                    series={[{ dataKey: "count", name: "Attacks", color: C.purple, gradientId: "gThreatTrend" }]}
+                  />
                 </CardContent>
               </Card>
 
               <div className="grid lg:grid-cols-2 gap-4">
                 <Card data-testid="card-attacks-by-layer">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <Server className="w-4 h-4" />
                       Attacks by Security Layer
                     </CardTitle>
+                    <ChartTypeSelector active={ct("attacksByLayer", "bar")} onChange={(v) => setCt("attacksByLayer", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <ResponsiveContainer width="100%" height={250}>
-                      <BarChart data={threatAnalysis?.attacksByLayer || []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                        <XAxis dataKey="layer" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Bar dataKey="count" name="Attacks" radius={[4, 4, 0, 0]} barSize={28}>
-                          {(threatAnalysis?.attacksByLayer || []).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <FlexChart
+                      data={threatAnalysis?.attacksByLayer || []}
+                      chartType={ct("attacksByLayer", "bar")}
+                      nameKey="layer"
+                      dataKey="count"
+                      height={250}
+                    />
                   </CardContent>
                 </Card>
 
                 <Card data-testid="card-severity-distribution">
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 flex-wrap">
                     <CardTitle className="text-xs font-semibold flex items-center gap-2 uppercase tracking-wider">
                       <AlertTriangle className="w-4 h-4" />
                       Severity Distribution
                     </CardTitle>
+                    <ChartTypeSelector active={ct("severityDistribution", "pie")} onChange={(v) => setCt("severityDistribution", v)} />
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <MiniPie
+                    <FlexChart
                       data={threatAnalysis?.severityDistribution ? [
                         { name: "critical", value: threatAnalysis.severityDistribution.critical || 0 },
                         { name: "high", value: threatAnalysis.severityDistribution.high || 0 },
                         { name: "medium", value: threatAnalysis.severityDistribution.medium || 0 },
                         { name: "low", value: threatAnalysis.severityDistribution.low || 0 },
                       ] : []}
+                      chartType={ct("severityDistribution", "pie")}
+                      dataKey="value"
+                      height={220}
                       colors={SEV}
                     />
                   </CardContent>

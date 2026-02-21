@@ -605,10 +605,19 @@ export async function registerRoutes(
       const access = await assertTenantAccess(req, existing.tenantId);
       assertMSSRole(access);
 
-      const { status } = req.body;
-      if (!status) return res.status(400).json({ message: "Status is required" });
+      const { status, mitreTactic, mitreTechniqueId, mitreTechnique, killChainPhase, confidenceScore, isTruePositive, classification, ...rest } = req.body;
+      const updateData: Record<string, any> = {};
+      if (status !== undefined) updateData.status = status;
+      if (mitreTactic !== undefined) updateData.mitreTactic = mitreTactic;
+      if (mitreTechniqueId !== undefined) updateData.mitreTechniqueId = mitreTechniqueId;
+      if (mitreTechnique !== undefined) updateData.mitreTechnique = mitreTechnique;
+      if (killChainPhase !== undefined) updateData.killChainPhase = killChainPhase;
+      if (confidenceScore !== undefined) updateData.confidenceScore = confidenceScore;
+      if (isTruePositive !== undefined) updateData.isTruePositive = isTruePositive;
+      if (classification !== undefined) updateData.classification = classification;
+      if (Object.keys(updateData).length === 0) return res.status(400).json({ message: "No valid fields to update" });
 
-      const incident = await storage.updateIncident(id, { status });
+      const incident = await storage.updateIncident(id, updateData);
       res.json(incident);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to update incident" });

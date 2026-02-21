@@ -33,7 +33,8 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 10 event types: email, endpoint, vulnerability, casb, waf, dlp, sse, network, identity, cloud
 Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType, logSource, sender, recipient, protocol, country, riskScore
 
-## Dashboard Tabs
+## Dashboard Tabs (with switchable chart types)
+All dashboard charts support type switching (bar/line/area/pie) via ChartTypeSelector buttons in card headers.
 1. **SOC Overview** - Risk/compliance gauges, incident trends, severity breakdown, recent incidents
 2. **Threat Intel** - MITRE ATT&CK radar, threat vectors, top threats/targets/attackers, attack origins
 3. **Email Security** - Email threats, top senders/recipients, action distribution, threat vectors
@@ -43,7 +44,31 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 7. **Log Sources** - Event ingestion trends, log source health, source type distribution, EPS
 8. **Vulnerabilities** - Vulnerable apps, severity distribution, event severity
 
-## New Features (Feb 2026)
+## New Features (Feb 2026 - Latest)
+### Interactive Dashboard Charts
+- All dashboard charts support type switching: bar, line, area, pie via ChartTypeSelector icons
+- FlexChart reusable component renders data in any chart type with animations
+- Clickable legends to show/hide series, enhanced tooltips, hover effects
+- Each chart widget has a small icon toolbar in the card header for type switching
+
+### Incident Enrichment (MITRE ATT&CK & Kill Chain)
+- MITRE ATT&CK enrichment: tactic, technique ID, technique name per incident
+- Lockheed Martin Cyber Kill Chain phase mapping with visual progress indicator
+- True Positive / False Positive classification with color-coded toggles
+- Confidence scoring (0-100) with progress bar visualization
+- 90-day alert data retention indicator showing days old and retention status
+- Framework badges on incident table rows (MITRE, LMKC, TP/FP)
+- Stats bar showing TP/FP/Unclassified counts and average confidence
+- Inline editing for MSS users on all enrichment fields
+
+### Industry Dropdown Standardization
+- Tenant industry field is now a dropdown with 20 standard options (Banking, Healthcare, Technology, etc.)
+- Applied to both Add and Edit tenant dialogs in Admin Portal
+
+### Data Cleanup
+- All dummy/test data cleared from database for fresh real data ingestion
+
+## Previous Features (Feb 2026)
 ### Solutions & Services Management
 - Service definitions with MSA tracking (start/end dates, contract value)
 - SLA definitions per service (response time, resolution time, uptime targets)
