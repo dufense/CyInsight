@@ -11,21 +11,22 @@ Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for m
 - **Auth**: Replit OIDC Auth with role-based access control
 
 ## Key Files
-- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters, documents)
+- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters, documents, ticket_feedback, ticket_attachments, superadmins, licenses)
 - `server/routes.ts` - API routes with tenant access control middleware
 - `server/storage.ts` - Database storage layer (IStorage interface) with CRUD for all entities
 - `server/seed.ts` - Disabled (production-ready, no seed data)
 - `client/src/App.tsx` - Main app with routing and auth flow
-- `client/src/components/app-sidebar.tsx` - Sidebar navigation with hierarchical tenant selector
-- `client/src/lib/tenant-context.tsx` - Multi-tenant context provider with hierarchy support
+- `client/src/components/app-sidebar.tsx` - Sidebar navigation with hierarchical tenant selector and role-based menu
+- `client/src/lib/tenant-context.tsx` - Multi-tenant context provider with hierarchy support, isMSS, isAdmin flags
 - `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 8 tabs
-- `client/src/pages/tickets.tsx` - Ticketing with SLA indicators and activity dashboard
-- `client/src/pages/projects.tsx` - Project management with activity dashboard and report generation
+- `client/src/pages/tickets.tsx` - Ticketing with SLA indicators, activity dashboard, detail dialog with comments/attachments/feedback
+- `client/src/pages/projects.tsx` - Project management with activity dashboard, report generation, read-only mode for customers
 - `client/src/pages/knowledge-base.tsx` - Knowledge Base with document management and AI content generation
 - `client/src/pages/services.tsx` - Solutions & Services management with SLA tracking
 - `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
 - `client/src/pages/reports.tsx` - AI-powered report generation with 8 report types
 - `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF)
+- `client/src/pages/admin-center.tsx` - Admin Center for tenant user management (create/edit/delete users with role assignment)
 
 ## Security Events Architecture
 10 event types: email, endpoint, vulnerability, casb, waf, dlp, sse, network, identity, cloud
