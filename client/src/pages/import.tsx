@@ -44,6 +44,10 @@ export default function ImportPage() {
     columnsDetected?: string[];
     aiEnriched?: number;
     duplicatesSkipped?: number;
+    importType?: string;
+    assetsCreated?: number;
+    assetsUpdated?: number;
+    totalRows?: number;
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [enrichResult, setEnrichResult] = useState<{
@@ -183,12 +187,27 @@ export default function ImportPage() {
         });
       } else {
         const data = await response.json();
-        setResult(data);
+        if (data.importType === "inventory") {
+          setResult({
+            imported: data.assetsCreated || 0,
+            total: data.totalRows || 0,
+            skipped: 0,
+            message: data.message,
+            importType: "inventory",
+            assetsCreated: data.assetsCreated,
+            assetsUpdated: data.assetsUpdated,
+            totalRows: data.totalRows,
+            columnsDetected: data.detectedColumns,
+          });
+        } else {
+          setResult(data);
+        }
         queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
         queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
         toast({
-          title: "Import successful",
+          title: data.importType === "inventory" ? "Asset Inventory Imported" : "Import successful",
           description: data.message,
         });
       }
@@ -294,25 +313,41 @@ export default function ImportPage() {
                   <div className="space-y-1">
                     <p className="text-sm font-medium">{result.message}</p>
                     <div className="flex items-center gap-3 flex-wrap">
-                      {result.incidentsCreated !== undefined && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          {result.incidentsCreated} incidents
-                        </Badge>
-                      )}
-                      {result.eventsCreated !== undefined && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          {result.eventsCreated} security events
-                        </Badge>
-                      )}
-                      {result.skipped > 0 && (
-                        <Badge variant="outline" className="text-[10px]">
-                          {result.skipped} skipped
-                        </Badge>
-                      )}
-                      {result.duplicatesSkipped > 0 && (
-                        <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-700 dark:text-yellow-400">
-                          {result.duplicatesSkipped} duplicates skipped
-                        </Badge>
+                      {result.importType === "inventory" ? (
+                        <>
+                          <Badge variant="secondary" className="text-[10px]">
+                            {result.assetsCreated || 0} new assets
+                          </Badge>
+                          <Badge variant="secondary" className="text-[10px]">
+                            {result.assetsUpdated || 0} updated
+                          </Badge>
+                          <Badge variant="outline" className="text-[10px]">
+                            {result.totalRows || 0} total rows
+                          </Badge>
+                        </>
+                      ) : (
+                        <>
+                          {result.incidentsCreated !== undefined && (
+                            <Badge variant="secondary" className="text-[10px]">
+                              {result.incidentsCreated} incidents
+                            </Badge>
+                          )}
+                          {result.eventsCreated !== undefined && (
+                            <Badge variant="secondary" className="text-[10px]">
+                              {result.eventsCreated} security events
+                            </Badge>
+                          )}
+                          {result.skipped > 0 && (
+                            <Badge variant="outline" className="text-[10px]">
+                              {result.skipped} skipped
+                            </Badge>
+                          )}
+                          {(result.duplicatesSkipped ?? 0) > 0 && (
+                            <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-700 dark:text-yellow-400">
+                              {result.duplicatesSkipped} duplicates skipped
+                            </Badge>
+                          )}
+                        </>
                       )}
                     </div>
                     {result.columnsDetected && result.columnsDetected.length > 0 && (
@@ -332,7 +367,7 @@ export default function ImportPage() {
               </div>
             )}
 
-            {result && (
+            {result && result.importType !== "inventory" && (
               <div className="p-4 rounded-md bg-primary/5 border border-primary/10" data-testid="ai-enrich-section">
                 <div className="flex items-start gap-3">
                   <Sparkles className="w-5 h-5 text-primary shrink-0" />
@@ -393,10 +428,37 @@ export default function ImportPage() {
               <div className="p-3 rounded-md bg-muted/30">
                 <div className="flex items-center gap-2 mb-2">
                   <FileSpreadsheet className="w-4 h-4 text-chart-2" />
-                  <span className="text-xs font-medium">Supported XDR / SIEM Formats</span>
+                  <span className="text-xs font-medium">Asset Inventory (CAASM)</span>
                 </div>
                 <p className="text-[10px] text-muted-foreground mb-2">
-                  Auto-detects columns from Palo Alto Cortex XDR, CrowdStrike, and other platforms:
+                  Auto-detects XDR agent inventory exports (Palo Alto Cortex, CrowdStrike, etc.):
+                </p>
+                <div className="grid grid-cols-2 gap-1">
+                  {[
+                    { col: "Endpoint Name", desc: "Hostname / device name" },
+                    { col: "IP Address", desc: "IPv4 endpoint address" },
+                    { col: "Mac Address", desc: "Hardware MAC address" },
+                    { col: "Operating System", desc: "OS name and version" },
+                    { col: "Agent Version", desc: "XDR agent version" },
+                    { col: "Endpoint Type", desc: "Workstation / Server" },
+                    { col: "Prevention Policy", desc: "Assigned security policy" },
+                    { col: "Cloud Provider", desc: "On-Prem / AWS / Azure" },
+                  ].map(({ col, desc }) => (
+                    <div key={col} className="text-[10px]">
+                      <code className="bg-muted px-1 rounded text-primary">{col}</code>
+                      <span className="text-muted-foreground ml-1">- {desc}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-md bg-muted/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileSpreadsheet className="w-4 h-4 text-orange-500" />
+                  <span className="text-xs font-medium">Security Incidents / Events</span>
+                </div>
+                <p className="text-[10px] text-muted-foreground mb-2">
+                  Auto-detects columns from XDR, SIEM, and other security platforms:
                 </p>
                 <div className="grid grid-cols-2 gap-1">
                   {[

@@ -448,6 +448,48 @@ export const securityIntegrationsRelations = relations(securityIntegrations, ({ 
 
 export const insertSecurityIntegrationSchema = createInsertSchema(securityIntegrations).omit({ id: true, createdAt: true, updatedAt: true, lastPollAt: true, lastPollStatus: true, lastPollMessage: true, eventsImported: true });
 
+export const assetStatusEnum = pgEnum("asset_status", ["active", "inactive", "decommissioned", "quarantined"]);
+
+export const assets = pgTable("assets", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  hostname: varchar("hostname", { length: 255 }).notNull(),
+  ipAddress: varchar("ip_address", { length: 100 }),
+  ipv6Address: varchar("ipv6_address", { length: 200 }),
+  macAddress: varchar("mac_address", { length: 50 }),
+  endpointType: varchar("endpoint_type", { length: 50 }),
+  operatingSystem: varchar("operating_system", { length: 200 }),
+  agentVersion: varchar("agent_version", { length: 100 }),
+  contentVersion: varchar("content_version", { length: 100 }),
+  user: varchar("user_name", { length: 255 }),
+  endpointAlias: varchar("endpoint_alias", { length: 255 }),
+  endpointGroup: varchar("endpoint_group", { length: 255 }),
+  preventionPolicy: varchar("prevention_policy", { length: 255 }),
+  extensionsPolicy: varchar("extensions_policy", { length: 255 }),
+  cloudProvider: varchar("cloud_provider", { length: 100 }),
+  cloudRegion: varchar("cloud_region", { length: 100 }),
+  cloudInstanceId: varchar("cloud_instance_id", { length: 200 }),
+  tags: text("tags"),
+  lastSeen: timestamp("last_seen"),
+  lastUpgradeStatus: varchar("last_upgrade_status", { length: 100 }),
+  lastUpgradeTime: timestamp("last_upgrade_time"),
+  status: assetStatusEnum("status").default("active").notNull(),
+  riskLevel: varchar("risk_level", { length: 20 }),
+  riskScore: integer("risk_score"),
+  incidentCount: integer("incident_count").default(0),
+  vulnerabilityCount: integer("vulnerability_count").default(0),
+  enrichmentData: jsonb("enrichment_data"),
+  source: varchar("source", { length: 100 }).default("import"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const assetsRelations = relations(assets, ({ one }) => ({
+  tenant: one(tenants, { fields: [assets.tenantId], references: [tenants.id] }),
+}));
+
+export const insertAssetSchema = createInsertSchema(assets).omit({ id: true, createdAt: true, updatedAt: true });
+
 export const SECURITY_PLATFORMS = [
   { key: "crowdstrike", name: "CrowdStrike Falcon", category: "edr_xdr", authType: "oauth2", description: "Endpoint detection and response platform with threat intelligence" },
   { key: "palo_alto_cortex", name: "Palo Alto Cortex XDR", category: "edr_xdr", authType: "api_key", description: "Extended detection and response across endpoints, network, and cloud" },
@@ -557,3 +599,5 @@ export type TicketAttachment = typeof ticketAttachments.$inferSelect;
 export type InsertTicketAttachment = z.infer<typeof insertTicketAttachmentSchema>;
 export type SecurityIntegration = typeof securityIntegrations.$inferSelect;
 export type InsertSecurityIntegration = z.infer<typeof insertSecurityIntegrationSchema>;
+export type Asset = typeof assets.$inferSelect;
+export type InsertAsset = z.infer<typeof insertAssetSchema>;

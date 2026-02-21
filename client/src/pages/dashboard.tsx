@@ -1268,14 +1268,34 @@ export default function DashboardPage() {
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                <MetricCard title="Total Assets" value={assetsData?.summary?.totalAssets || 0} icon={HardDrive} color={C.blue} />
-                <MetricCard title="Critical Risk" value={assetsData?.summary?.criticalAssets || 0} icon={ShieldAlert} color={C.red} />
-                <MetricCard title="High Risk" value={assetsData?.summary?.highRiskAssets || 0} icon={AlertTriangle} color={C.orange} />
-                <MetricCard title="Medium Risk" value={assetsData?.summary?.mediumRiskAssets || 0} icon={Shield} color={C.yellow} />
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                <MetricCard title="Total Inventory" value={assetsData?.summary?.totalInventory || assetsData?.summary?.totalAssets || 0} icon={HardDrive} color={C.blue} />
+                <MetricCard title="With Incidents" value={assetsData?.summary?.assetsWithEvents || 0} icon={ShieldAlert} color={C.red} />
+                <MetricCard title="Clean Assets" value={assetsData?.summary?.assetsWithoutEvents || 0} icon={Shield} color={C.green} />
+                <MetricCard title="Coverage" value={`${assetsData?.summary?.coveragePercent || 0}%`} icon={Target} color={C.purple} />
+                <MetricCard title="Critical Risk" value={assetsData?.summary?.criticalAssets || 0} icon={AlertTriangle} color={C.orange} />
               </div>
 
-              
+              {(assetsData?.summary?.totalInventory > 0) && (
+                <Card className="border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20">
+                  <CardContent className="p-4 flex items-center gap-3">
+                    <div className="rounded-full bg-blue-100 dark:bg-blue-900 p-2">
+                      <Radar className="h-5 w-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-blue-800 dark:text-blue-200">
+                        Asset Coverage Insight
+                      </p>
+                      <p className="text-xs text-blue-600 dark:text-blue-400">
+                        Out of <strong>{assetsData.summary.totalInventory.toLocaleString()}</strong> systems in inventory, 
+                        security incidents were observed on <strong>{assetsData.summary.assetsWithEvents.toLocaleString()}</strong> systems 
+                        ({assetsData.summary.coveragePercent}% coverage). 
+                        <strong> {(assetsData.summary.totalInventory - assetsData.summary.assetsWithEvents).toLocaleString()}</strong> systems have no recorded security events.
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
 
               <div className="grid lg:grid-cols-3 gap-4">
                 <ExpandableCard title="Assets by Group"
@@ -1313,22 +1333,34 @@ export default function DashboardPage() {
                 </ExpandableCard>
               </div>
 
-              <div className="grid lg:grid-cols-2 gap-4">
-                <ExpandableCard title="Assets by Memory Size"
-                  headerExtra={<ChartTypeSelector active={ct("assetsByMemory", "bar")} onChange={(v) => setCt("assetsByMemory", v)} />}>
+              <div className="grid lg:grid-cols-3 gap-4">
+                <ExpandableCard title="Agent Version Distribution"
+                  headerExtra={<ChartTypeSelector active={ct("agentVersionDist", "bar")} onChange={(v) => setCt("agentVersionDist", v)} />}>
                   <FlexChart
-                    data={assetsData?.summary?.assetsByMemory || []}
-                    chartType={ct("assetsByMemory", "bar")}
+                    data={assetsData?.summary?.agentVersionDist || []}
+                    chartType={ct("agentVersionDist", "bar")}
                     dataKey="value"
                     height={220}
                   />
                 </ExpandableCard>
 
-                <ExpandableCard title="Assets by CPU"
-                  headerExtra={<ChartTypeSelector active={ct("assetsByCPU", "bar")} onChange={(v) => setCt("assetsByCPU", v)} />}>
+                <ExpandableCard title="Prevention Policy Distribution"
+                  headerExtra={<ChartTypeSelector active={ct("policyDist", "bar")} onChange={(v) => setCt("policyDist", v)} />}>
                   <FlexChart
-                    data={assetsData?.summary?.assetsByCPU || []}
-                    chartType={ct("assetsByCPU", "bar")}
+                    data={assetsData?.summary?.policyDist || []}
+                    chartType={ct("policyDist", "bar")}
+                    dataKey="value"
+                    height={220}
+                    layout="vertical"
+                    yAxisWidth={180}
+                  />
+                </ExpandableCard>
+
+                <ExpandableCard title="Cloud Provider Distribution"
+                  headerExtra={<ChartTypeSelector active={ct("cloudDist", "pie")} onChange={(v) => setCt("cloudDist", v)} />}>
+                  <FlexChart
+                    data={assetsData?.summary?.cloudDist || []}
+                    chartType={ct("cloudDist", "pie")}
                     dataKey="value"
                     height={220}
                   />
@@ -1347,12 +1379,14 @@ export default function DashboardPage() {
                         <Table>
                           <TableHeader>
                             <TableRow>
-                              <TableHead className="text-[10px] uppercase">Asset Name</TableHead>
+                              <TableHead className="text-[10px] uppercase">Hostname</TableHead>
+                              <TableHead className="text-[10px] uppercase">Type</TableHead>
+                              <TableHead className="text-[10px] uppercase">OS</TableHead>
+                              <TableHead className="text-[10px] uppercase">IP Address</TableHead>
                               <TableHead className="text-[10px] uppercase">Events</TableHead>
                               <TableHead className="text-[10px] uppercase">Incidents</TableHead>
-                              <TableHead className="text-[10px] uppercase">Risk Level</TableHead>
-                              <TableHead className="text-[10px] uppercase">Event Types</TableHead>
-                              <TableHead className="text-[10px] uppercase">First Seen</TableHead>
+                              <TableHead className="text-[10px] uppercase">Risk</TableHead>
+                              <TableHead className="text-[10px] uppercase">Group</TableHead>
                               <TableHead className="text-[10px] uppercase">Last Seen</TableHead>
                             </TableRow>
                           </TableHeader>
@@ -1360,24 +1394,24 @@ export default function DashboardPage() {
                             {pagedAssets.map((asset: any, idx: number) => (
                               <TableRow key={idx} data-testid={`asset-row-${idx}`} className="cursor-pointer hover:bg-muted/50 transition-colors" onClick={() => navigate(`/assets/${currentTenant?.id}/${encodeURIComponent(asset.name)}`)}>
                                 <TableCell className="text-[11px] font-medium text-primary hover:underline">{asset.name}</TableCell>
+                                <TableCell>
+                                  <Badge variant="outline" className="text-[9px]">{asset.assetType || asset.endpointType || "Endpoint"}</Badge>
+                                </TableCell>
+                                <TableCell className="text-[10px] text-muted-foreground max-w-[120px] truncate">{asset.operatingSystem || (asset.os && asset.os[0]) || "-"}</TableCell>
+                                <TableCell className="text-[10px] font-mono text-muted-foreground">{(asset.ips && asset.ips[0]) || "-"}</TableCell>
                                 <TableCell className="text-[11px] font-mono">{asset.eventCount}</TableCell>
                                 <TableCell className="text-[11px] font-mono">{asset.incidentCount}</TableCell>
                                 <TableCell>
-                                  <Badge variant="secondary" className="text-[10px]"
-                                    style={{ backgroundColor: `${SEV[asset.riskLevel] || C.blue}20`, color: SEV[asset.riskLevel] || C.blue }}>
-                                    {asset.riskLevel}
-                                  </Badge>
+                                  {(asset.eventCount > 0 || asset.incidentCount > 0) ? (
+                                    <Badge variant="secondary" className="text-[10px]"
+                                      style={{ backgroundColor: `${SEV[asset.riskLevel] || C.blue}20`, color: SEV[asset.riskLevel] || C.blue }}>
+                                      {asset.riskLevel}
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="outline" className="text-[9px] text-green-600">Clean</Badge>
+                                  )}
                                 </TableCell>
-                                <TableCell>
-                                  <div className="flex flex-wrap gap-1">
-                                    {(asset.eventTypes || []).map((et: string, i: number) => (
-                                      <Badge key={i} variant="secondary" className="text-[9px]">{et}</Badge>
-                                    ))}
-                                  </div>
-                                </TableCell>
-                                <TableCell className="text-[11px] text-muted-foreground">
-                                  {asset.firstSeen ? new Date(asset.firstSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
-                                </TableCell>
+                                <TableCell className="text-[10px] text-muted-foreground max-w-[120px] truncate">{asset.endpointGroup || (asset.groups && asset.groups[0]) || "-"}</TableCell>
                                 <TableCell className="text-[11px] text-muted-foreground">
                                   {asset.lastSeen ? new Date(asset.lastSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
                                 </TableCell>

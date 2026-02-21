@@ -3,7 +3,7 @@ import {
   projects, tasks, reports, securityEvents,
   services, slaDefinitions, teamMembers, shiftRosters, documents,
   superadmins, licenses, ticketFeedback, ticketAttachments,
-  securityIntegrations,
+  securityIntegrations, assets,
   type Tenant, type InsertTenant,
   type TenantUser, type InsertTenantUser,
   type Incident, type InsertIncident,
@@ -23,6 +23,7 @@ import {
   type TicketFeedback, type InsertTicketFeedback,
   type TicketAttachment, type InsertTicketAttachment,
   type SecurityIntegration, type InsertSecurityIntegration,
+  type Asset, type InsertAsset,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, count, sql, gte, lte, inArray } from "drizzle-orm";
@@ -137,6 +138,13 @@ export interface IStorage {
   createSecurityIntegration(data: InsertSecurityIntegration): Promise<SecurityIntegration>;
   updateSecurityIntegration(id: number, data: Partial<InsertSecurityIntegration>): Promise<SecurityIntegration>;
   deleteSecurityIntegration(id: number): Promise<void>;
+
+  getAssets(tenantId: number): Promise<Asset[]>;
+  getAsset(id: number): Promise<Asset | undefined>;
+  createAsset(data: InsertAsset): Promise<Asset>;
+  createAssets(data: InsertAsset[]): Promise<Asset[]>;
+  updateAsset(id: number, data: Partial<InsertAsset>): Promise<Asset>;
+  getAssetsByHostnames(tenantId: number, hostnames: string[]): Promise<Asset[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -983,6 +991,42 @@ export class DatabaseStorage implements IStorage {
 
   async deleteSecurityIntegration(id: number): Promise<void> {
     await db.delete(securityIntegrations).where(eq(securityIntegrations.id, id));
+  }
+
+  async getAssets(tenantId: number): Promise<Asset[]> {
+    return db.select().from(assets).where(eq(assets.tenantId, tenantId)).orderBy(assets.hostname);
+  }
+
+  async getAsset(id: number): Promise<Asset | undefined> {
+    const [asset] = await db.select().from(assets).where(eq(assets.id, id));
+    return asset;
+  }
+
+  async createAsset(data: InsertAsset): Promise<Asset> {
+    const [asset] = await db.insert(assets).values(data).returning();
+    return asset;
+  }
+
+  async createAssets(data: InsertAsset[]): Promise<Asset[]> {
+    if (data.length === 0) return [];
+    const batchSize = 500;
+    const results: Asset[] = [];
+    for (let i = 0; i < data.length; i += batchSize) {
+      const chunk = data.slice(i, i + batchSize);
+      const inserted = await db.insert(assets).values(chunk).returning();
+      results.push(...inserted);
+    }
+    return results;
+  }
+
+  async updateAsset(id: number, data: Partial<InsertAsset>): Promise<Asset> {
+    const [asset] = await db.update(assets).set({ ...data, updatedAt: new Date() }).where(eq(assets.id, id)).returning();
+    return asset;
+  }
+
+  async getAssetsByHostnames(tenantId: number, hostnames: string[]): Promise<Asset[]> {
+    if (hostnames.length === 0) return [];
+    return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(assets.hostname, hostnames)));
   }
 }
 

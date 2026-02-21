@@ -2039,6 +2039,123 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       const detectedColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
 
+      const inventoryColumns = ["Endpoint Name", "Mac Address", "Agent Version", "Content Version", "Assigned Prevention Policy", "Last Upgrade Status", "Endpoint Type"];
+      const colsLower = detectedColumns.map(c => c.toLowerCase());
+      const isInventoryFile = inventoryColumns.filter(ic => colsLower.includes(ic.toLowerCase())).length >= 3 ||
+        (colsLower.includes("endpoint name") && colsLower.includes("operating system")) ||
+        (colsLower.includes("hostname") && colsLower.includes("mac address") && colsLower.includes("agent version"));
+
+      if (isInventoryFile) {
+        const existingAssets = await storage.getAssets(tid);
+        const existingHostnames = new Set(existingAssets.map(a => a.hostname.toLowerCase()));
+
+        const getInvField = (row: any, ...keys: string[]): string => {
+          for (const k of keys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+              return String(row[k]).trim();
+            }
+          }
+          return "";
+        };
+
+        const parseInvDate = (val: any): Date | null => {
+          if (!val) return null;
+          const s = String(val).trim();
+          const match = s.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})\s+([\d:]+)/i);
+          if (match) {
+            const d = new Date(`${match[1]} ${match[2]}, ${match[3]} ${match[4]}`);
+            if (!isNaN(d.getTime())) return d;
+          }
+          const d = new Date(s);
+          return !isNaN(d.getTime()) ? d : null;
+        };
+
+        const deriveEndpointGroup = (row: any): string => {
+          const policy = getInvField(row, "Assigned Prevention Policy", "Prevention Policy");
+          if (policy) {
+            const cleaned = policy.replace(/^Fedfina_/i, "").replace(/_Protect_Profile.*$/i, "").replace(/_/g, " ");
+            return cleaned || policy;
+          }
+          const tags = getInvField(row, "Tags");
+          if (tags) {
+            const egMatch = tags.match(/EG:([^'",\]]+)/);
+            if (egMatch) return egMatch[1].trim();
+          }
+          const etype = getInvField(row, "Endpoint Type");
+          return etype || "Unknown";
+        };
+
+        let assetsCreated = 0;
+        let assetsUpdated = 0;
+        let assetsDuplicates = 0;
+
+        const newAssets: any[] = [];
+        const updateQueue: { hostname: string; data: any }[] = [];
+
+        for (const row of rows) {
+          const hostname = getInvField(row, "Endpoint Name", "Hostname", "Computer Name", "Device Name", "Host Name").substring(0, 255);
+          if (!hostname) continue;
+
+          const assetData: any = {
+            tenantId: tid,
+            hostname,
+            ipAddress: getInvField(row, "IP Address", "IP", "IPv4 Address").substring(0, 100) || null,
+            ipv6Address: getInvField(row, "IPv6 Address").substring(0, 200) || null,
+            macAddress: getInvField(row, "Mac Address", "MAC Address", "MAC").substring(0, 50) || null,
+            endpointType: getInvField(row, "Endpoint Type", "Device Type", "Type").substring(0, 50) || null,
+            operatingSystem: getInvField(row, "Operating System", "OS", "OS Version").substring(0, 200) || null,
+            agentVersion: getInvField(row, "Agent Version", "Version").substring(0, 100) || null,
+            contentVersion: getInvField(row, "Content Version", "Content Release").substring(0, 100) || null,
+            user: getInvField(row, "User", "Username", "Last User", "Last Logged In User").substring(0, 255) || null,
+            endpointAlias: getInvField(row, "Endpoint Alias", "Alias").substring(0, 255) || null,
+            endpointGroup: deriveEndpointGroup(row).substring(0, 255),
+            preventionPolicy: getInvField(row, "Assigned Prevention Policy", "Prevention Policy").substring(0, 255) || null,
+            extensionsPolicy: getInvField(row, "Assigned Extensions Policy", "Extensions Policy").substring(0, 255) || null,
+            cloudProvider: getInvField(row, "Cloud Provider", "Cloud").substring(0, 100) || null,
+            cloudRegion: getInvField(row, "Cloud Region", "Region").substring(0, 100) || null,
+            cloudInstanceId: getInvField(row, "Cloud Instance ID", "Instance ID").substring(0, 200) || null,
+            tags: getInvField(row, "Tags") || null,
+            lastSeen: parseInvDate(getInvField(row, "Last Seen", "Last Active", "Last Check-In")),
+            lastUpgradeStatus: getInvField(row, "Last Upgrade Status").substring(0, 100) || null,
+            lastUpgradeTime: parseInvDate(getInvField(row, "Last Upgrade Status Time", "Last Upgrade Time")),
+            status: "active" as const,
+            source: "import",
+          };
+
+          if (existingHostnames.has(hostname.toLowerCase())) {
+            updateQueue.push({ hostname, data: assetData });
+            assetsDuplicates++;
+          } else {
+            existingHostnames.add(hostname.toLowerCase());
+            newAssets.push(assetData);
+          }
+        }
+
+        if (newAssets.length > 0) {
+          await storage.createAssets(newAssets);
+          assetsCreated = newAssets.length;
+        }
+
+        for (const { hostname, data } of updateQueue) {
+          const existing = existingAssets.find(a => a.hostname.toLowerCase() === hostname.toLowerCase());
+          if (existing) {
+            const { tenantId: _t, ...updateData } = data;
+            await storage.updateAsset(existing.id, updateData);
+            assetsUpdated++;
+          }
+        }
+
+        return res.json({
+          message: `Asset inventory imported: ${assetsCreated} new assets created, ${assetsUpdated} existing assets updated`,
+          importType: "inventory",
+          assetsCreated,
+          assetsUpdated,
+          assetsDuplicates,
+          totalRows: rows.length,
+          detectedColumns,
+        });
+      }
+
       const validSeverities = ["critical", "high", "medium", "low", "info"];
       const validEventTypes = ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"];
 
@@ -3181,9 +3298,44 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         }
       }
 
+      let inventoryAssets: any[] = [];
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const allTenantIds = [tenantId, ...children.map(c => c.id)];
+        for (const tid of allTenantIds) {
+          const tAssets = await storage.getAssets(tid);
+          inventoryAssets.push(...tAssets);
+        }
+      } else {
+        inventoryAssets = await storage.getAssets(tenantId);
+      }
+      for (const inv of inventoryAssets) {
+        const key = inv.hostname.toLowerCase().trim();
+        if (!assetMap[key]) {
+          assetMap[key] = {
+            name: inv.hostname, eventCount: 0, incidentCount: 0,
+            criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+            eventTypes: new Set(), firstSeen: inv.createdAt, lastSeen: inv.lastSeen || inv.createdAt,
+            riskScore: inv.riskScore || 0, mitreTactics: new Set(),
+            logSources: new Set(), ips: new Set(),
+            groups: new Set(), osSet: new Set(),
+            assetType: inv.endpointType === "Server" ? "Server" : "Endpoint",
+            memoryMB: 0, cpuCores: 0,
+          };
+        }
+        const a = assetMap[key];
+        if (inv.ipAddress) a.ips.add(inv.ipAddress);
+        if (inv.endpointGroup) a.groups.add(inv.endpointGroup);
+        if (inv.operatingSystem) a.osSet.add(inv.operatingSystem);
+        if (inv.endpointType) a.assetType = inv.endpointType === "Server" ? "Server" : "Endpoint";
+        if (inv.lastSeen && new Date(inv.lastSeen) > a.lastSeen) a.lastSeen = new Date(inv.lastSeen);
+        if (inv.preventionPolicy) a.logSources.add(inv.preventionPolicy);
+      }
+
       const assets = Object.values(assetMap)
         .map(a => {
           a.assetType = classifyAssetType(a.name, a.groups);
+          const invAsset = inventoryAssets.find(inv => inv.hostname.toLowerCase() === a.name.toLowerCase());
           return {
             ...a,
             totalEvents: a.eventCount + a.incidentCount,
@@ -3194,12 +3346,23 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             ips: Array.from(a.ips),
             groups: Array.from(a.groups),
             os: Array.from(a.osSet),
-            assetType: a.assetType,
+            assetType: invAsset?.endpointType || a.assetType,
             memoryMB: a.memoryMB,
             cpuCores: a.cpuCores,
+            macAddress: invAsset?.macAddress || null,
+            agentVersion: invAsset?.agentVersion || null,
+            operatingSystem: invAsset?.operatingSystem || null,
+            preventionPolicy: invAsset?.preventionPolicy || null,
+            cloudProvider: invAsset?.cloudProvider || null,
+            user: invAsset?.user || null,
+            endpointGroup: invAsset?.endpointGroup || null,
+            inventoryId: invAsset?.id || null,
           };
         })
         .sort((a, b) => b.totalEvents - a.totalEvents);
+
+      const totalInventory = inventoryAssets.length;
+      const assetsWithEvents = assets.filter(a => a.eventCount > 0 || a.incidentCount > 0).length;
 
       const groupCounts: Record<string, number> = {};
       const typeCounts: Record<string, number> = { Endpoint: 0, Server: 0 };
@@ -3240,8 +3403,20 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         } else { cpuBuckets["Unknown"]++; }
       }
 
+      const versionCounts: Record<string, number> = {};
+      const policyCountsMap: Record<string, number> = {};
+      const cloudCountsMap: Record<string, number> = {};
+      for (const inv of inventoryAssets) {
+        if (inv.agentVersion) versionCounts[inv.agentVersion] = (versionCounts[inv.agentVersion] || 0) + 1;
+        if (inv.preventionPolicy) policyCountsMap[inv.preventionPolicy] = (policyCountsMap[inv.preventionPolicy] || 0) + 1;
+        if (inv.cloudProvider) cloudCountsMap[inv.cloudProvider] = (cloudCountsMap[inv.cloudProvider] || 0) + 1;
+      }
+
       const summary = {
         totalAssets: assets.length,
+        totalInventory,
+        assetsWithEvents,
+        assetsWithoutEvents: totalInventory > 0 ? totalInventory - assetsWithEvents : assets.length - assetsWithEvents,
         criticalAssets: assets.filter(a => a.riskLevel === "critical").length,
         highRiskAssets: assets.filter(a => a.riskLevel === "high").length,
         mediumRiskAssets: assets.filter(a => a.riskLevel === "medium").length,
@@ -3259,6 +3434,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         assetsByOS: Object.entries(osCounts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
         assetsByMemory: Object.entries(memorySizeBuckets).map(([name, value]) => ({ name, value })).filter(v => v.value > 0),
         assetsByCPU: Object.entries(cpuBuckets).map(([name, value]) => ({ name, value })).filter(v => v.value > 0),
+        agentVersionDist: Object.entries(versionCounts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
+        policyDist: Object.entries(policyCountsMap).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
+        cloudDist: Object.entries(cloudCountsMap).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value),
+        coveragePercent: totalInventory > 0 ? Math.round((assetsWithEvents / totalInventory) * 100) : 0,
       };
 
       const eventTypeCounts: Record<string, Set<string>> = {};
@@ -3656,6 +3835,137 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Data pull failed" });
+    }
+  });
+
+  app.get("/api/assets", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const tenantId = req.query.tenantId ? parseInt(String(req.query.tenantId)) : access.tenantId;
+      if (tenantId) await assertTenantAccess(req, tenantId);
+
+      if (!tenantId) {
+        const allTenants = await storage.getTenants();
+        const tenantIds = access.isMSS ? allTenants.map(t => t.id) : [access.tenantId].filter(Boolean);
+        let allAssets: any[] = [];
+        for (const tid of tenantIds) {
+          const a = await storage.getAssets(tid as number);
+          allAssets.push(...a);
+        }
+        return res.json(allAssets);
+      }
+
+      const assetsList = await storage.getAssets(tenantId);
+      res.json(assetsList);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to get assets" });
+    }
+  });
+
+  app.get("/api/assets/stats/summary", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const tenantId = req.query.tenantId ? parseInt(String(req.query.tenantId)) : access.tenantId;
+      if (tenantId) await assertTenantAccess(req, tenantId);
+
+      let allAssets: any[] = [];
+      if (!tenantId) {
+        const allTenants = await storage.getTenants();
+        const tenantIds = access.isMSS ? allTenants.map(t => t.id) : [access.tenantId].filter(Boolean);
+        for (const tid of tenantIds) {
+          const a = await storage.getAssets(tid as number);
+          allAssets.push(...a);
+        }
+      } else {
+        allAssets = await storage.getAssets(tenantId);
+      }
+
+      const incidents = tenantId ? await storage.getIncidents(tenantId) : [];
+      const events = tenantId ? await storage.getSecurityEvents(tenantId) : [];
+
+      const affectedAssetNames = new Set<string>();
+      incidents.forEach(inc => {
+        if (inc.affectedAssets) {
+          inc.affectedAssets.split(",").map(a => a.trim().toLowerCase()).filter(Boolean).forEach(a => affectedAssetNames.add(a));
+        }
+      });
+      events.forEach(evt => {
+        if (evt.asset) affectedAssetNames.add(evt.asset.toLowerCase());
+      });
+
+      const assetsWithIncidents = allAssets.filter(a => affectedAssetNames.has(a.hostname.toLowerCase()));
+
+      const osDist: Record<string, number> = {};
+      const typeDist: Record<string, number> = {};
+      const groupDist: Record<string, number> = {};
+      const versionDist: Record<string, number> = {};
+      const cloudDist: Record<string, number> = {};
+      const statusDist: Record<string, number> = {};
+      const policyDist: Record<string, number> = {};
+      let activeCount = 0;
+      let lastSeenRecent = 0;
+      const now = Date.now();
+
+      for (const a of allAssets) {
+        if (a.operatingSystem) osDist[a.operatingSystem] = (osDist[a.operatingSystem] || 0) + 1;
+        if (a.endpointType) typeDist[a.endpointType] = (typeDist[a.endpointType] || 0) + 1;
+        if (a.endpointGroup) groupDist[a.endpointGroup] = (groupDist[a.endpointGroup] || 0) + 1;
+        if (a.agentVersion) versionDist[a.agentVersion] = (versionDist[a.agentVersion] || 0) + 1;
+        if (a.cloudProvider) cloudDist[a.cloudProvider] = (cloudDist[a.cloudProvider] || 0) + 1;
+        if (a.status) statusDist[a.status] = (statusDist[a.status] || 0) + 1;
+        if (a.preventionPolicy) policyDist[a.preventionPolicy] = (policyDist[a.preventionPolicy] || 0) + 1;
+        if (a.status === "active") activeCount++;
+        if (a.lastSeen && (now - new Date(a.lastSeen).getTime()) < 7 * 24 * 3600 * 1000) lastSeenRecent++;
+      }
+
+      const toArr = (d: Record<string, number>) => Object.entries(d).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+
+      res.json({
+        totalAssets: allAssets.length,
+        activeAssets: activeCount,
+        lastSeenRecent,
+        assetsWithIncidents: assetsWithIncidents.length,
+        assetsWithoutIncidents: allAssets.length - assetsWithIncidents.length,
+        totalIncidents: incidents.length,
+        totalEvents: events.length,
+        osDist: toArr(osDist),
+        typeDist: toArr(typeDist),
+        groupDist: toArr(groupDist),
+        versionDist: toArr(versionDist),
+        cloudDist: toArr(cloudDist),
+        statusDist: toArr(statusDist),
+        policyDist: toArr(policyDist),
+        coverage: allAssets.length > 0 ? Math.round((assetsWithIncidents.length / allAssets.length) * 100) : 0,
+      });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to get asset stats" });
+    }
+  });
+
+  app.get("/api/assets/:id", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const asset = await storage.getAsset(id);
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      await assertTenantAccess(req, asset.tenantId);
+      res.json(asset);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to get asset" });
+    }
+  });
+
+  app.patch("/api/assets/:id", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const id = parseInt(req.params.id);
+      const existing = await storage.getAsset(id);
+      if (!existing) return res.status(404).json({ message: "Asset not found" });
+      await assertTenantAccess(req, existing.tenantId);
+      const updated = await storage.updateAsset(id, req.body);
+      res.json(updated);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to update asset" });
     }
   });
 
