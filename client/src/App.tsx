@@ -12,6 +12,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { RoleSwitcher } from "@/components/role-switcher";
 import NotFound from "@/pages/not-found";
 import LandingPage from "@/pages/landing";
 import DashboardPage from "@/pages/dashboard";
@@ -69,7 +70,10 @@ function AuthenticatedLayout() {
           <div className="flex flex-col flex-1 min-w-0">
             <header className="flex items-center justify-between gap-2 px-4 h-12 border-b shrink-0">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
-              <ThemeToggle />
+              <div className="flex items-center gap-2">
+                <RoleSwitcher />
+                <ThemeToggle />
+              </div>
             </header>
             <main className="flex-1 overflow-hidden">
               <AuthenticatedRouter />

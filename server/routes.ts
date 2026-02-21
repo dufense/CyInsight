@@ -403,16 +403,54 @@ export async function registerRoutes(
       }
 
       const mssRolesCheck = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+      const canSwitchRoles = tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true || req.session?.isSuperAdmin === true;
       res.json({
         role: tenantUser.role,
         tenantId: tenantUser.tenantId,
         isPlatformAdmin: tenantUser.role === "platform_admin",
         isMSS: mssRolesCheck.includes(tenantUser.role),
         isAdmin: ["platform_admin", "mss_admin", "soc_manager"].includes(tenantUser.role),
+        canSwitchRoles,
       });
     } catch (error) {
       console.error("Error fetching user profile:", error);
       res.status(500).json({ message: "Failed to fetch profile" });
+    }
+  });
+
+  app.put("/api/user/role", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { role } = req.body;
+      const validRoles = ["platform_admin", "mss_admin", "mss_analyst", "customer", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+      if (!role || !validRoles.includes(role)) {
+        return res.status(400).json({ message: "Invalid role" });
+      }
+      const tenantUser = await storage.getTenantUserByUserId(userId);
+      if (!tenantUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      const isSuperAdminSession = req.session?.isSuperAdmin === true;
+      const canSwitchRoles = isSuperAdminSession || tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true;
+      if (!canSwitchRoles) {
+        return res.status(403).json({ message: "Only superadmin or platform admin can switch roles" });
+      }
+      if (tenantUser.role === "platform_admin" || isSuperAdminSession) {
+        req.session.canSwitchRoles = true;
+      }
+      const updated = await storage.updateTenantUser(tenantUser.id, { role });
+      const mssRolesCheck = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+      res.json({
+        role: updated.role,
+        tenantId: updated.tenantId,
+        isPlatformAdmin: updated.role === "platform_admin",
+        isMSS: mssRolesCheck.includes(updated.role),
+        isAdmin: ["platform_admin", "mss_admin", "soc_manager"].includes(updated.role),
+        canSwitchRoles: true,
+      });
+    } catch (error) {
+      console.error("Error switching role:", error);
+      res.status(500).json({ message: "Failed to switch role" });
     }
   });
 

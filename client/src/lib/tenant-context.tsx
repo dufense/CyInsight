@@ -17,6 +17,7 @@ interface TenantContextType {
   isPlatformAdmin: boolean;
   isMSS: boolean;
   isAdmin: boolean;
+  canSwitchRoles: boolean;
 }
 
 const TenantContext = createContext<TenantContextType>({
@@ -30,12 +31,13 @@ const TenantContext = createContext<TenantContextType>({
   isPlatformAdmin: false,
   isMSS: false,
   isAdmin: false,
+  canSwitchRoles: false,
 });
 
 export function TenantProvider({ children }: { children: ReactNode }) {
   const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
 
-  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean; isMSS?: boolean; isAdmin?: boolean }>({
+  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean; isMSS?: boolean; isAdmin?: boolean; canSwitchRoles?: boolean }>({
     queryKey: ["/api/user/profile"],
   });
 
@@ -50,7 +52,15 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (tenants.length > 0 && !currentTenant) {
+    if (tenants.length > 0) {
+      if (currentTenant) {
+        const stillValid = tenants.find(t => t.id === currentTenant.id);
+        if (!stillValid) {
+          const userTenant = userProfile?.tenantId ? tenants.find(t => t.id === userProfile.tenantId) : null;
+          setCurrentTenant(userTenant || tenants[0]);
+        }
+        return;
+      }
       if (userProfile?.tenantId) {
         const userTenant = tenants.find(t => t.id === userProfile.tenantId);
         if (userTenant) {
@@ -80,6 +90,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         isPlatformAdmin: userProfile?.isPlatformAdmin || false,
         isMSS: userProfile?.isMSS || false,
         isAdmin: userProfile?.isAdmin || false,
+        canSwitchRoles: userProfile?.canSwitchRoles || false,
       }}
     >
       {children}

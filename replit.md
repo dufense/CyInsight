@@ -69,6 +69,16 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 - AI-powered report generation (Daily Project Status, Weekly Project Summary)
 - Enhanced task cards with assignee, due dates, overdue indicators
 
+### Role Switcher
+- Production role switcher for superadmin and platform_admin users
+- Dropdown in top-right header showing current role with icon
+- 8 roles available: Platform Admin, MSS Admin, SOC Manager, MSS Analyst, Security Engineer, Security Analyst, Service Desk, Customer
+- Each role shows name + description + icon with checkmark for active role
+- Actually updates the user's role in the database via PUT /api/user/role
+- Session-based canSwitchRoles flag allows switching back to platform_admin after switching away
+- All cached queries cleared on role switch for immediate UI update
+- Tenant context resets currentTenant if it becomes invalid after role change
+
 ### Superadmin & Tenant Administration
 - Standalone superadmin login (username/password: admin/Admin@123)
 - Dedicated Tenant Admin page with 4 tabs:
@@ -126,6 +136,7 @@ Customer tenants can be created via POST /api/tenants by MSS admins.
 - `POST /api/tenants` - Create customer tenant (MSS role)
 - `GET /api/tenants/hierarchy` - Hierarchical tenant structure
 - `GET /api/user/profile` - User role and tenant info (auto-provisions first user)
+- `PUT /api/user/role` - Switch user role (superadmin/platform_admin only)
 - `GET /api/dashboard/:tenantId` - Enhanced dashboard statistics
 - `GET/POST/PATCH /api/incidents` - Incident CRUD
 - `GET/POST/PATCH /api/tickets` - Ticket CRUD with SLA fields
