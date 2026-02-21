@@ -75,18 +75,7 @@ async function assertTenantAccess(req: any, tenantId: number): Promise<{
   }
 
   if (access.isMSS) {
-    const userTenant = access.tenantId ? await storage.getTenant(access.tenantId) : null;
-    if (userTenant && userTenant.type === "mssp") {
-      const children = await storage.getChildTenants(userTenant.id);
-      const childIds = children.map(c => c.id);
-      if (tenantId === userTenant.id || childIds.includes(tenantId)) {
-        return { userId: access.userId, role: access.role, isMSS: true, isPlatformAdmin: false };
-      }
-    }
-    if (access.tenantId === tenantId) {
-      return { userId: access.userId, role: access.role, isMSS: true, isPlatformAdmin: false };
-    }
-    throw Object.assign(new Error("Forbidden: no access to this tenant"), { status: 403 });
+    return { userId: access.userId, role: access.role, isMSS: true, isPlatformAdmin: false };
   }
 
   if (access.tenantId !== tenantId) {
@@ -483,18 +472,9 @@ export async function registerRoutes(
   app.get("/api/tenants", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
-      const msspAdminRoles = ["platform_admin", "mss_admin", "soc_manager"];
-      if (access.isPlatformAdmin || (access.isMSS && msspAdminRoles.includes(access.role))) {
+      if (access.isPlatformAdmin || access.isMSS) {
         const allTenants = await storage.getTenants();
         return res.json(allTenants);
-      }
-      if (access.isMSS && access.tenantId) {
-        const userTenant = await storage.getTenant(access.tenantId);
-        if (userTenant && userTenant.type === "mssp") {
-          const children = await storage.getChildTenants(userTenant.id);
-          return res.json([userTenant, ...children]);
-        }
-        return res.json(userTenant ? [userTenant] : []);
       }
       if (access.tenantId) {
         const tenant = await storage.getTenant(access.tenantId);
@@ -509,9 +489,8 @@ export async function registerRoutes(
   app.get("/api/tenants/hierarchy", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
-      const msspAdminRoles = ["platform_admin", "mss_admin", "soc_manager"];
 
-      if (access.isPlatformAdmin || (access.isMSS && msspAdminRoles.includes(access.role))) {
+      if (access.isPlatformAdmin || access.isMSS) {
         const mssps = await storage.getMSSPs();
         const result = [];
         for (const mssp of mssps) {
@@ -521,23 +500,12 @@ export async function registerRoutes(
         return res.json(result);
       }
 
-      if (!access.isMSS || !access.tenantId) {
-        if (access.tenantId) {
-          const tenant = await storage.getTenant(access.tenantId);
-          return res.json(tenant ? [{ ...tenant, children: [] }] : []);
-        }
-        return res.json([]);
+      if (access.tenantId) {
+        const tenant = await storage.getTenant(access.tenantId);
+        return res.json(tenant ? [{ ...tenant, children: [] }] : []);
       }
 
-      const userTenant = await storage.getTenant(access.tenantId);
-      if (!userTenant) return res.json([]);
-
-      if (userTenant.type === "mssp") {
-        const children = await storage.getChildTenants(userTenant.id);
-        return res.json([{ ...userTenant, children }]);
-      }
-
-      return res.json([{ ...userTenant, children: [] }]);
+      return res.json([]);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch tenant hierarchy" });
     }
