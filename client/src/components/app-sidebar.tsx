@@ -47,8 +47,7 @@ function getNavItems(role: string) {
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   ];
 
-  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
-  if (adminRoles.includes(role)) {
+  if (role === "platform_admin") {
     items.push({ title: "Admin Center", url: "/admin-center", icon: Settings });
   }
 
