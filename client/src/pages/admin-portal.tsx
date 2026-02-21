@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -301,7 +301,7 @@ function TenantsTab() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold" data-testid="text-tenants-title">Tenants</h2>
-          <p className="text-sm text-muted-foreground">{allTenants.length} tenants registered</p>
+          <p className="text-sm text-muted-foreground">{totalCount} tenants registered</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="relative">
@@ -323,7 +323,7 @@ function TenantsTab() {
 
       {isLoading ? (
         <div className="space-y-2">{[1, 2, 3].map(i => <Skeleton key={i} className="h-16" />)}</div>
-      ) : filtered.length === 0 ? (
+      ) : topLevel.length === 0 ? (
         <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">No tenants found</CardContent></Card>
       ) : (
         <div className="border rounded-lg overflow-hidden">
@@ -374,7 +374,7 @@ function TenantsTab() {
                         <span className="font-medium text-sm">{tenant.name}</span>
                         {!isChild && tenant.type === "mssp" && (
                           <Badge variant="secondary" className="text-[9px] px-1.5 py-0 ml-1">
-                            {children.length} customer{children.length !== 1 ? "s" : ""}
+                            {allChildren.length} customer{allChildren.length !== 1 ? "s" : ""}
                           </Badge>
                         )}
                       </div>
@@ -461,10 +461,10 @@ function TenantsTab() {
                   </TableRow>
                 );
                 return (
-                  <>
+                  <Fragment key={t.id}>
                     {renderRow(t, false)}
                     {isExpanded && children.map(child => renderRow(child, true, t))}
-                  </>
+                  </Fragment>
                 );
               })}
             </TableBody>
@@ -853,7 +853,7 @@ function UsersTab() {
                   {allTenants.filter(t => t.type === "mssp").map(mssp => {
                     const customers = allTenants.filter(c => c.parentId === mssp.id);
                     return (
-                      <div key={mssp.id}>
+                      <Fragment key={mssp.id}>
                         <SelectItem value={String(mssp.id)}>
                           <div className="flex items-center gap-2">
                             <Shield className="w-3 h-3 text-primary" />
@@ -870,7 +870,7 @@ function UsersTab() {
                             </div>
                           </SelectItem>
                         ))}
-                      </div>
+                      </Fragment>
                     );
                   })}
                   {allTenants.filter(t => t.type !== "mssp" && !t.parentId).map(t => (
@@ -1160,7 +1160,7 @@ function LicensesTab() {
                   {allTenants.filter(t => t.type === "mssp").map(mssp => {
                     const customers = allTenants.filter(c => c.parentId === mssp.id);
                     return (
-                      <div key={mssp.id}>
+                      <Fragment key={mssp.id}>
                         <SelectItem value={String(mssp.id)}>
                           <div className="flex items-center gap-2">
                             <Shield className="w-3 h-3 text-primary shrink-0" />
@@ -1177,7 +1177,7 @@ function LicensesTab() {
                             </div>
                           </SelectItem>
                         ))}
-                      </div>
+                      </Fragment>
                     );
                   })}
                   {allTenants.filter(t => t.type !== "mssp" && !t.parentId).map(t => (
