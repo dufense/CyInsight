@@ -5,12 +5,13 @@ import {
   Mail, Monitor, Bug, Crosshair, Target, Skull, AppWindow, Globe, Cloud, Lock,
   ShieldAlert, ShieldCheck, ShieldOff, Wifi, Database, Eye, Zap, Clock, Timer,
   Server, AlertCircle, FileWarning, Ban, CheckCircle2, XCircle, Gauge, Radio,
-  Network, Fingerprint, KeyRound, UserX, Upload, Download, Search, Radar,
+  Network, Fingerprint, KeyRound, UserX, Upload, Download, Search, Radar, HardDrive,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableHead, TableHeader, TableRow, TableBody, TableCell } from "@/components/ui/table";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend, RadarChart, Radar as RechartsRadar,
@@ -167,6 +168,10 @@ export default function DashboardPage() {
     queryKey: ["/api/dashboard", currentTenant?.id],
     enabled: !!currentTenant,
   });
+  const { data: assetsData, isLoading: assetsLoading } = useQuery<any>({
+    queryKey: ["/api/assets", currentTenant?.id],
+    enabled: !!currentTenant?.id,
+  });
 
   if (isLoading || !stats) return <DashboardSkeleton />;
 
@@ -231,6 +236,7 @@ export default function DashboardPage() {
             <TabsTrigger value="network" data-testid="tab-network" className="text-xs">Network & Identity</TabsTrigger>
             <TabsTrigger value="logs" data-testid="tab-logs" className="text-xs">Log Sources</TabsTrigger>
             <TabsTrigger value="vuln" data-testid="tab-vuln" className="text-xs">Vulnerabilities</TabsTrigger>
+            <TabsTrigger value="assets" data-testid="tab-assets" className="text-xs">Asset Inventory</TabsTrigger>
           </TabsList>
         </div>
 
@@ -681,6 +687,105 @@ export default function DashboardPage() {
               </ResponsiveContainer>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Asset Inventory */}
+        <TabsContent value="assets" className="space-y-4">
+          {assetsLoading ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {Array.from({ length: 4 }).map((_, i) => <Card key={i}><CardContent className="p-4"><Skeleton className="h-16" /></CardContent></Card>)}
+              </div>
+              <Card><CardContent className="p-5"><Skeleton className="h-64" /></CardContent></Card>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <MetricCard title="Total Assets" value={assetsData?.summary?.totalAssets || 0} icon={HardDrive} color={C.blue} />
+                <MetricCard title="Critical Risk" value={assetsData?.summary?.criticalAssets || 0} icon={ShieldAlert} color={C.red} />
+                <MetricCard title="High Risk" value={assetsData?.summary?.highRiskAssets || 0} icon={AlertTriangle} color={C.orange} />
+                <MetricCard title="Medium Risk" value={assetsData?.summary?.mediumRiskAssets || 0} icon={Shield} color={C.yellow} />
+              </div>
+
+              <div className="grid lg:grid-cols-2 gap-4">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Top 20 Assets by Event Count</CardTitle></CardHeader>
+                  <CardContent className="pt-0">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20)} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis type="number" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis dataKey="name" type="category" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" width={120} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={14}>
+                          {(assetsData?.summary?.topAssetsByEvents || []).slice(0, 20).map((_: any, i: number) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Risk Distribution</CardTitle></CardHeader>
+                  <CardContent className="pt-0">
+                    <MiniPie data={assetsData?.summary?.riskDistribution || []} colors={{ Critical: C.red, High: C.orange, Medium: C.yellow, Low: C.green }} />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card>
+                <CardHeader className="pb-2"><CardTitle className="text-xs font-semibold uppercase tracking-wider">Asset Inventory</CardTitle></CardHeader>
+                <CardContent className="pt-0">
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-[10px] uppercase">Asset Name</TableHead>
+                          <TableHead className="text-[10px] uppercase">Events</TableHead>
+                          <TableHead className="text-[10px] uppercase">Incidents</TableHead>
+                          <TableHead className="text-[10px] uppercase">Risk Level</TableHead>
+                          <TableHead className="text-[10px] uppercase">Event Types</TableHead>
+                          <TableHead className="text-[10px] uppercase">First Seen</TableHead>
+                          <TableHead className="text-[10px] uppercase">Last Seen</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(assetsData?.assets || []).slice(0, 20).map((asset: any, idx: number) => (
+                          <TableRow key={idx} data-testid={`asset-row-${idx}`}>
+                            <TableCell className="text-[11px] font-medium">{asset.name}</TableCell>
+                            <TableCell className="text-[11px] font-mono">{asset.eventCount}</TableCell>
+                            <TableCell className="text-[11px] font-mono">{asset.incidentCount}</TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px]"
+                                style={{ backgroundColor: `${SEV[asset.riskLevel] || C.blue}20`, color: SEV[asset.riskLevel] || C.blue }}
+                              >
+                                {asset.riskLevel}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1">
+                                {(asset.eventTypes || []).map((et: string, i: number) => (
+                                  <Badge key={i} variant="secondary" className="text-[9px]">{et}</Badge>
+                                ))}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-[11px] text-muted-foreground">
+                              {asset.firstSeen ? new Date(asset.firstSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
+                            </TableCell>
+                            <TableCell className="text-[11px] text-muted-foreground">
+                              {asset.lastSeen ? new Date(asset.lastSeen).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
         </TabsContent>
       </Tabs>
     </div>

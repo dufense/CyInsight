@@ -70,6 +70,7 @@ export interface IStorage {
   getSecurityEventsByType(tenantId: number, eventType: string): Promise<SecurityEvent[]>;
   createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent>;
   createSecurityEvents(data: InsertSecurityEvent[]): Promise<SecurityEvent[]>;
+  updateSecurityEvent(id: number, data: Partial<InsertSecurityEvent>): Promise<SecurityEvent>;
 
   getDashboardStats(tenantId: number): Promise<any>;
   getEnhancedDashboardStats(tenantId: number): Promise<any>;
@@ -330,6 +331,11 @@ export class DatabaseStorage implements IStorage {
   async createSecurityEvents(data: InsertSecurityEvent[]): Promise<SecurityEvent[]> {
     if (data.length === 0) return [];
     return db.insert(securityEvents).values(data).returning();
+  }
+
+  async updateSecurityEvent(id: number, data: Partial<InsertSecurityEvent>): Promise<SecurityEvent> {
+    const [event] = await db.update(securityEvents).set(data).where(eq(securityEvents.id, id)).returning();
+    return event;
   }
 
   async getDashboardStats(tenantId: number): Promise<any> {

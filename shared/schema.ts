@@ -15,7 +15,7 @@ export const ticketPriorityEnum = pgEnum("ticket_priority", ["urgent", "high", "
 export const projectStatusEnum = pgEnum("project_status", ["planning", "active", "on_hold", "completed", "cancelled"]);
 export const taskStatusEnum = pgEnum("task_status", ["backlog", "todo", "in_progress", "review", "done"]);
 export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"]);
-export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability", "compliance", "threat_intelligence", "incident_response", "cloud_security"]);
+export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability", "compliance", "threat_intelligence", "incident_response", "cloud_security", "asset_inventory", "threat_landscape", "sla_performance", "soc_operations", "risk_posture"]);
 
 export const tenants = pgTable("tenants", {
   id: serial("id").primaryKey(),

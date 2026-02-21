@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
 import { useTenant } from "@/lib/tenant-context";
 import { useToast } from "@/hooks/use-toast";
-import { queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useMutation } from "@tanstack/react-query";
 import {
   Upload,
   FileSpreadsheet,
@@ -11,6 +12,8 @@ import {
   AlertTriangle,
   Loader2,
   Info,
+  Brain,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,8 +41,40 @@ export default function ImportPage() {
     message: string;
     incidentsCreated?: number;
     eventsCreated?: number;
+    columnsDetected?: string[];
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [enrichResult, setEnrichResult] = useState<{
+    enriched: number;
+    remaining: number;
+    message?: string;
+  } | null>(null);
+
+  const enrichMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/ai/enrich-events", {
+        tenantId: currentTenant?.id,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setEnrichResult(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      toast({
+        title: "Enrichment complete",
+        description: data.message || `${data.enriched} events enriched`,
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Enrichment failed",
+        description: err.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
 
   const handleFile = useCallback((f: File) => {
     const ext = "." + f.name.split(".").pop()?.toLowerCase();
@@ -202,6 +237,65 @@ export default function ImportPage() {
                         </Badge>
                       )}
                     </div>
+                    {result.columnsDetected && result.columnsDetected.length > 0 && (
+                      <div className="mt-2" data-testid="columns-detected">
+                        <p className="text-[10px] text-muted-foreground mb-1 font-medium">Columns Detected:</p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {result.columnsDetected.map((col) => (
+                            <Badge key={col} variant="outline" className="text-[10px]">
+                              {col}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {result && (
+              <div className="p-4 rounded-md bg-primary/5 border border-primary/10" data-testid="ai-enrich-section">
+                <div className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-primary shrink-0" />
+                  <div className="space-y-2 flex-1">
+                    <p className="text-sm font-medium">AI Enrichment</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Use AI to automatically enrich imported security events with severity classification, MITRE ATT&CK mapping, and actionable recommendations.
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={() => enrichMutation.mutate()}
+                      disabled={enrichMutation.isPending}
+                      data-testid="button-enrich"
+                    >
+                      {enrichMutation.isPending ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                          Enriching...
+                        </>
+                      ) : (
+                        <>
+                          <Brain className="w-3.5 h-3.5 mr-1.5" />
+                          Enrich with AI
+                        </>
+                      )}
+                    </Button>
+                    {enrichResult && (
+                      <div className="mt-2 p-3 rounded-md bg-chart-2/10 border border-chart-2/20" data-testid="enrich-result">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <Badge variant="secondary" className="text-[10px]">
+                            {enrichResult.enriched} enriched
+                          </Badge>
+                          <Badge variant="outline" className="text-[10px]">
+                            {enrichResult.remaining} remaining
+                          </Badge>
+                        </div>
+                        {enrichResult.message && (
+                          <p className="text-[10px] text-muted-foreground mt-1">{enrichResult.message}</p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

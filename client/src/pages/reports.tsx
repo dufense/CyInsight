@@ -19,6 +19,11 @@ import {
   Crosshair,
   AlertTriangle,
   Cloud,
+  Package,
+  Map,
+  Timer,
+  Activity,
+  Gauge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +56,11 @@ const REPORT_TYPE_LABELS: Record<string, { label: string; icon: any; color: stri
   threat_intelligence: { label: "Threat Intelligence", icon: Crosshair, color: "text-cyan-500" },
   incident_response: { label: "Incident Response", icon: AlertTriangle, color: "text-yellow-500" },
   cloud_security: { label: "Cloud Security", icon: Cloud, color: "text-sky-500" },
+  asset_inventory: { label: "Asset Inventory", icon: Package, color: "text-teal-500" },
+  threat_landscape: { label: "Threat Landscape", icon: Map, color: "text-rose-500" },
+  sla_performance: { label: "SLA Performance", icon: Timer, color: "text-amber-500" },
+  soc_operations: { label: "SOC Operations", icon: Activity, color: "text-indigo-500" },
+  risk_posture: { label: "Risk Posture", icon: Gauge, color: "text-emerald-500" },
 };
 
 function ReportViewer({ report }: { report: Report }) {
@@ -281,6 +291,60 @@ export default function ReportsPage() {
                         <span className="flex items-center gap-2">
                           <Bug className="w-3.5 h-3.5 text-orange-500" />
                           Vulnerability Report
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="compliance" data-testid="select-item-compliance">
+                        <span className="flex items-center gap-2">
+                          <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
+                          Compliance Report
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="threat_intelligence" data-testid="select-item-threat-intelligence">
+                        <span className="flex items-center gap-2">
+                          <Crosshair className="w-3.5 h-3.5 text-cyan-500" />
+                          Threat Intelligence
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="incident_response" data-testid="select-item-incident-response">
+                        <span className="flex items-center gap-2">
+                          <AlertTriangle className="w-3.5 h-3.5 text-yellow-500" />
+                          Incident Response
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="cloud_security" data-testid="select-item-cloud-security">
+                        <span className="flex items-center gap-2">
+                          <Cloud className="w-3.5 h-3.5 text-sky-500" />
+                          Cloud Security
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="asset_inventory" data-testid="select-item-asset-inventory">
+                        <span className="flex items-center gap-2">
+                          <Package className="w-3.5 h-3.5 text-teal-500" />
+                          Asset Inventory
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="threat_landscape" data-testid="select-item-threat-landscape">
+                        <span className="flex items-center gap-2">
+                          <Map className="w-3.5 h-3.5 text-rose-500" />
+                          Threat Landscape
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="sla_performance" data-testid="select-item-sla-performance">
+                        <span className="flex items-center gap-2">
+                          <Timer className="w-3.5 h-3.5 text-amber-500" />
+                          SLA Performance
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="soc_operations" data-testid="select-item-soc-operations">
+                        <span className="flex items-center gap-2">
+                          <Activity className="w-3.5 h-3.5 text-indigo-500" />
+                          SOC Operations
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="risk_posture" data-testid="select-item-risk-posture">
+                        <span className="flex items-center gap-2">
+                          <Gauge className="w-3.5 h-3.5 text-emerald-500" />
+                          Risk Posture
                         </span>
                       </SelectItem>
                     </SelectContent>

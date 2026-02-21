@@ -26,7 +26,7 @@ import * as fs from "fs";
 import * as path from "path";
 import bcrypt from "bcryptjs";
 
-const upload = multer({ dest: "/tmp/uploads/" });
+const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 200 * 1024 * 1024 } });
 const REPORTS_DIR = path.join(process.cwd(), "data", "reports");
 const UPLOADS_DIR = path.join(process.cwd(), "data", "uploads");
 
@@ -1052,6 +1052,64 @@ export async function registerRoutes(
       } else if (rType === "cloud_security") {
         const cloudEvents = securityEventsList.filter(e => ["cloud", "casb", "sse"].includes(e.eventType));
         promptContext = `Cloud Security Events (${cloudEvents.length} total):\n${JSON.stringify(cloudEvents.slice(0, 30).map(e => ({ threat: e.threat, app: e.app, severity: e.severity, action: e.action, description: e.description })), null, 2)}`;
+      } else if (rType === "asset_inventory") {
+        const assetMap: Record<string, { count: number; severities: string[]; types: string[] }> = {};
+        for (const evt of securityEventsList) {
+          const assets = [evt.asset, evt.target].filter(Boolean);
+          for (const a of assets) {
+            if (!a) continue;
+            a.split(",").forEach(name => {
+              const key = name.trim().toLowerCase();
+              if (key.length < 2) return;
+              if (!assetMap[key]) assetMap[key] = { count: 0, severities: [], types: [] };
+              assetMap[key].count++;
+              assetMap[key].severities.push(evt.severity);
+              assetMap[key].types.push(evt.eventType);
+            });
+          }
+        }
+        const topAssets = Object.entries(assetMap).sort((a, b) => b[1].count - a[1].count).slice(0, 50);
+        promptContext = `Asset Inventory Data:\nTotal unique assets: ${Object.keys(assetMap).length}\nTotal security events: ${securityEventsList.length}\nTotal incidents: ${incidentsList.length}\n\nTop 50 Assets by Event Count:\n${JSON.stringify(topAssets.map(([name, data]) => ({
+          name, eventCount: data.count,
+          criticalEvents: data.severities.filter(s => s === "critical").length,
+          highEvents: data.severities.filter(s => s === "high").length,
+          eventTypes: Array.from(new Set(data.types)),
+        })), null, 2)}\n\nIncident affected assets summary:\n${JSON.stringify(incidentsList.slice(0, 30).filter(i => i.affectedAssets).map(i => ({ title: i.title, assets: i.affectedAssets, severity: i.severity })), null, 2)}`;
+      } else if (rType === "threat_landscape") {
+        const tactics: Record<string, number> = {};
+        const techniques: Record<string, number> = {};
+        const vectors: Record<string, number> = {};
+        for (const evt of securityEventsList) {
+          if (evt.mitreTactic) { const t = evt.mitreTactic.split(",")[0]?.trim(); if (t) tactics[t] = (tactics[t] || 0) + 1; }
+          if (evt.mitreTechnique) { const t = evt.mitreTechnique.split(",")[0]?.trim(); if (t) techniques[t] = (techniques[t] || 0) + 1; }
+          if (evt.threatVector) vectors[evt.threatVector] = (vectors[evt.threatVector] || 0) + 1;
+        }
+        promptContext = `Threat Landscape Analysis:\nTotal events: ${securityEventsList.length}\nTotal incidents: ${incidentsList.length}\nCritical incidents: ${incidentsList.filter(i => i.severity === "critical").length}\n\nMITRE ATT&CK Tactics (top 20):\n${JSON.stringify(Object.entries(tactics).sort((a, b) => b[1] - a[1]).slice(0, 20), null, 2)}\n\nMITRE Techniques (top 20):\n${JSON.stringify(Object.entries(techniques).sort((a, b) => b[1] - a[1]).slice(0, 20), null, 2)}\n\nThreat Vectors:\n${JSON.stringify(Object.entries(vectors).sort((a, b) => b[1] - a[1]), null, 2)}\n\nEvent Type Distribution:\n${JSON.stringify(securityEventsList.reduce((acc: any, e) => { acc[e.eventType] = (acc[e.eventType] || 0) + 1; return acc; }, {}), null, 2)}\n\nTop threats:\n${JSON.stringify(securityEventsList.slice(0, 30).map(e => ({ threat: e.threat, severity: e.severity, tactic: e.mitreTactic, technique: e.mitreTechnique, country: e.country })), null, 2)}`;
+      } else if (rType === "sla_performance") {
+        const servicesList = await storage.getServices(tenantId);
+        let slasList: any[] = [];
+        for (const svc of servicesList) {
+          const defs = await storage.getSlaDefinitions(svc.id);
+          slasList.push(...defs);
+        }
+        const ticketSlaData = ticketsList.map(t => ({
+          title: t.title, priority: t.priority, status: t.status,
+          slaBreached: t.slaBreached, serviceId: t.serviceId,
+          createdAt: t.createdAt, resolvedAt: t.resolvedAt,
+          firstResponseAt: t.firstResponseAt,
+        }));
+        promptContext = `SLA Performance Report:\nServices (${servicesList.length}):\n${JSON.stringify(servicesList.map(s => ({ name: s.name, type: s.serviceType, status: s.status })), null, 2)}\n\nSLA Definitions (${slasList.length}):\n${JSON.stringify(slasList.map(s => ({ name: s.name, priority: s.priority, responseTimeMin: s.responseTimeMinutes, resolutionTimeMin: s.resolutionTimeMinutes, uptime: s.uptimePercentage })), null, 2)}\n\nTicket SLA Data (${ticketsList.length} total):\nBreached: ${ticketsList.filter(t => t.slaBreached).length}\nResolved: ${ticketsList.filter(t => t.status === "resolved" || t.status === "closed").length}\nOpen: ${ticketsList.filter(t => t.status === "open").length}\n\nRecent tickets:\n${JSON.stringify(ticketSlaData.slice(0, 30), null, 2)}`;
+      } else if (rType === "soc_operations") {
+        const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+        incidentsList.forEach(i => { if (sevCounts[i.severity as keyof typeof sevCounts] !== undefined) sevCounts[i.severity as keyof typeof sevCounts]++; });
+        const openInc = incidentsList.filter(i => i.status === "open" || i.status === "investigating").length;
+        const resolvedInc = incidentsList.filter(i => i.status === "resolved" || i.status === "closed").length;
+        promptContext = `SOC Operations Report:\nTotal Incidents: ${incidentsList.length}\nOpen/Investigating: ${openInc}\nResolved/Closed: ${resolvedInc}\nSeverity: Critical=${sevCounts.critical}, High=${sevCounts.high}, Medium=${sevCounts.medium}, Low=${sevCounts.low}\n\nTickets: Total=${ticketsList.length}, Open=${ticketsList.filter(t => t.status === "open").length}, In Progress=${ticketsList.filter(t => t.status === "in_progress").length}\nSLA Breached: ${ticketsList.filter(t => t.slaBreached).length}\n\nSecurity Events: ${securityEventsList.length} total\nEvent Types: ${JSON.stringify(securityEventsList.reduce((acc: any, e) => { acc[e.eventType] = (acc[e.eventType] || 0) + 1; return acc; }, {}))}\n\nRecent Critical Incidents:\n${JSON.stringify(incidentsList.filter(i => i.severity === "critical").slice(0, 15).map(i => ({ title: i.title, status: i.status, assets: i.affectedAssets, source: i.source })), null, 2)}\n\nTop Threats:\n${JSON.stringify(securityEventsList.slice(0, 20).map(e => ({ threat: e.threat, severity: e.severity, type: e.eventType })), null, 2)}`;
+      } else if (rType === "risk_posture") {
+        const riskScores = securityEventsList.filter(e => e.riskScore).map(e => e.riskScore!);
+        const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a, b) => a + b, 0) / riskScores.length) : 0;
+        const maxRisk = riskScores.length > 0 ? Math.max(...riskScores) : 0;
+        promptContext = `Risk Posture Assessment:\nTotal Events: ${securityEventsList.length}\nTotal Incidents: ${incidentsList.length}\nCritical Incidents: ${incidentsList.filter(i => i.severity === "critical").length}\nHigh Incidents: ${incidentsList.filter(i => i.severity === "high").length}\n\nRisk Scores: Average=${avgRisk}, Maximum=${maxRisk}, Events with scores=${riskScores.length}\n\nEvent Distribution: ${JSON.stringify(securityEventsList.reduce((acc: any, e) => { acc[e.eventType] = (acc[e.eventType] || 0) + 1; return acc; }, {}))}\n\nMITRE Coverage:\n${JSON.stringify(securityEventsList.filter(e => e.mitreTactic).slice(0, 30).map(e => ({ threat: e.threat, tactic: e.mitreTactic, technique: e.mitreTechnique, riskScore: e.riskScore, severity: e.severity })), null, 2)}\n\nOpen Risk Items:\n${JSON.stringify(incidentsList.filter(i => i.status === "open").slice(0, 20).map(i => ({ title: i.title, severity: i.severity, assets: i.affectedAssets, category: i.category })), null, 2)}`;
       } else {
         const incidentSummary = incidentsList.slice(0, 20).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, source: i.source }));
         promptContext = `Incidents (${incidentsList.length} total):\n${JSON.stringify(incidentSummary, null, 2)}\n\nTickets: ${ticketsList.length} total, ${ticketsList.filter(t => t.status === "open").length} open\n\nSecurity Events: ${securityEventsList.length} total (Email: ${securityEventsList.filter(e => e.eventType === "email").length}, Endpoint: ${securityEventsList.filter(e => e.eventType === "endpoint").length}, Vulnerability: ${securityEventsList.filter(e => e.eventType === "vulnerability").length})`;
@@ -1061,7 +1119,9 @@ export async function registerRoutes(
         executive_summary: "Executive Summary", endpoint: "Endpoint Security", email: "Email Security",
         vulnerability: "Vulnerability Assessment", compliance: "Compliance & Governance",
         threat_intelligence: "Threat Intelligence", incident_response: "Incident Response",
-        cloud_security: "Cloud Security",
+        cloud_security: "Cloud Security", asset_inventory: "Asset Inventory",
+        threat_landscape: "Threat Landscape", sla_performance: "SLA Performance",
+        soc_operations: "SOC Operations", risk_posture: "Risk Posture",
       };
       const reportTypeLabel = reportLabels[rType] || "Executive Summary";
 
@@ -1679,35 +1739,37 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       const parseSpreadsheet = (filePath: string): any[] => {
         const workbook = XLSX.readFile(filePath);
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
-        if (!rawData || rawData.length === 0) return [];
+        const allRows: any[] = [];
+        for (const sheetName of workbook.SheetNames) {
+          const sheet = workbook.Sheets[sheetName];
+          const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+          if (!rawData || rawData.length === 0) continue;
 
-        let headerRowIdx = 0;
-        for (let i = 0; i < Math.min(5, rawData.length); i++) {
-          const row = rawData[i];
-          if (!row || row.length <= 2) continue;
-          const cellCount = row.filter((c: any) => c !== null && c !== undefined && String(c).trim() !== "").length;
-          if (cellCount >= 3) {
-            headerRowIdx = i;
-            break;
+          let headerRowIdx = 0;
+          for (let i = 0; i < Math.min(10, rawData.length); i++) {
+            const row = rawData[i];
+            if (!row || row.length <= 2) continue;
+            const cellCount = row.filter((c: any) => c !== null && c !== undefined && String(c).trim() !== "").length;
+            if (cellCount >= 3) {
+              headerRowIdx = i;
+              break;
+            }
+          }
+
+          const headers = rawData[headerRowIdx].map((h: any) => String(h || "").trim());
+          for (let i = headerRowIdx + 1; i < rawData.length; i++) {
+            const row = rawData[i];
+            if (!row || row.length === 0) continue;
+            const obj: any = {};
+            headers.forEach((h: string, idx: number) => {
+              if (h && row[idx] !== undefined && row[idx] !== null) {
+                obj[h] = row[idx];
+              }
+            });
+            if (Object.keys(obj).length > 0) allRows.push(obj);
           }
         }
-
-        const headers = rawData[headerRowIdx].map((h: any) => String(h || "").trim());
-        const dataRows: any[] = [];
-        for (let i = headerRowIdx + 1; i < rawData.length; i++) {
-          const row = rawData[i];
-          if (!row || row.length === 0) continue;
-          const obj: any = {};
-          headers.forEach((h: string, idx: number) => {
-            if (h && row[idx] !== undefined && row[idx] !== null) {
-              obj[h] = row[idx];
-            }
-          });
-          if (Object.keys(obj).length > 0) dataRows.push(obj);
-        }
-        return dataRows;
+        return allRows;
       }
 
       const cleanStr = (s: any): string => String(s || "").replace(/\u00A0/g, " ").trim();
@@ -1764,8 +1826,11 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       if (ext === ".csv" || ext === ".tsv") {
         const workbook = XLSX.readFile(savedPath, { type: "file" });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        rows = XLSX.utils.sheet_to_json(sheet);
+        for (const sheetName of workbook.SheetNames) {
+          const sheet = workbook.Sheets[sheetName];
+          const sheetRows = XLSX.utils.sheet_to_json(sheet);
+          rows.push(...sheetRows);
+        }
       } else if (ext === ".xlsx" || ext === ".xls") {
         if (isVerticalFormat(savedPath)) {
           rows = parseVerticalFormat(savedPath);
@@ -1793,9 +1858,10 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         return res.status(400).json({ message: "Unsupported file format. Use .csv, .xlsx, .xls, .tsv, or .pdf" });
       }
 
+      const detectedColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
+
       const validSeverities = ["critical", "high", "medium", "low", "info"];
       const validEventTypes = ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"];
-      const validIncidentStatuses = ["open", "investigating", "resolved", "closed"];
 
       const getField = (row: any, ...keys: string[]): string => {
         for (const k of keys) {
@@ -1809,31 +1875,38 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       const parseSeverity = (val: string): "critical" | "high" | "medium" | "low" | "info" => {
         const v = val.toLowerCase().trim();
         if (validSeverities.includes(v)) return v as any;
+        if (v.includes("crit")) return "critical";
+        if (v.includes("hi")) return "high";
+        if (v.includes("lo")) return "low";
+        if (v.includes("info")) return "info";
         return "medium";
       }
 
       const parseIncidentStatus = (val: string): "open" | "investigating" | "resolved" | "closed" => {
         const v = val.toLowerCase().trim();
-        if (v.includes("closed") || v.includes("resolved")) return "resolved";
-        if (v.includes("progress") || v.includes("investigating")) return "investigating";
-        if (v.includes("open") || v.includes("new")) return "open";
+        if (v.includes("closed") || v.includes("resolved") || v.includes("complete")) return "resolved";
+        if (v.includes("progress") || v.includes("investigating") || v.includes("active")) return "investigating";
+        if (v.includes("open") || v.includes("new") || v.includes("pending")) return "open";
         return "open";
       }
 
       const detectEventType = (row: any): "email" | "endpoint" | "vulnerability" | "casb" | "waf" | "dlp" | "sse" | "network" | "identity" | "cloud" => {
-        const explicit = getField(row, "eventType", "event_type", "Event Type").toLowerCase();
+        const explicit = getField(row, "eventType", "event_type", "Event Type", "Category", "Alert Category").toLowerCase();
         if (validEventTypes.includes(explicit)) return explicit as any;
 
-        const desc = (getField(row, "Case Description", "description", "Description", "Incident Name", "title") + " " +
-                      getField(row, "MITRE ATT&CK Tactic", "mitreTactic") + " " +
-                      getField(row, "MITRE ATT&CK Technique", "mitreTechnique")).toLowerCase();
-        if (desc.includes("email") || desc.includes("phish") || desc.includes("spam") || desc.includes("mimecast")) return "email";
-        if (desc.includes("cloud") || desc.includes("aws") || desc.includes("azure") || desc.includes("s3")) return "cloud";
-        if (desc.includes("waf") || desc.includes("web shell") || desc.includes("web application")) return "waf";
-        if (desc.includes("identity") || desc.includes("valid accounts") || desc.includes("credential") || desc.includes("login") || desc.includes("console")) return "identity";
-        if (desc.includes("network") || desc.includes("ssh") || desc.includes("tunnel") || desc.includes("protocol") || desc.includes("lateral")) return "network";
-        if (desc.includes("vulnerability") || desc.includes("cve-") || desc.includes("log4")) return "vulnerability";
-        if (desc.includes("dlp") || desc.includes("data loss") || desc.includes("upload")) return "dlp";
+        const desc = (getField(row, "Case Description", "description", "Description", "Incident Name", "title", "Alert Name", "Rule Name") + " " +
+                      getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "Tactic") + " " +
+                      getField(row, "MITRE ATT&CK Technique", "mitreTechnique", "Technique") + " " +
+                      getField(row, "Source", "source", "Alert Source", "Detection Source")).toLowerCase();
+        if (desc.includes("email") || desc.includes("phish") || desc.includes("spam") || desc.includes("mimecast") || desc.includes("o365") || desc.includes("exchange")) return "email";
+        if (desc.includes("cloud") || desc.includes("aws") || desc.includes("azure") || desc.includes("gcp") || desc.includes("s3") || desc.includes("ec2") || desc.includes("lambda")) return "cloud";
+        if (desc.includes("waf") || desc.includes("web shell") || desc.includes("web application") || desc.includes("sql inject") || desc.includes("xss")) return "waf";
+        if (desc.includes("casb") || desc.includes("shadow it") || desc.includes("saas")) return "casb";
+        if (desc.includes("identity") || desc.includes("valid accounts") || desc.includes("credential") || desc.includes("login") || desc.includes("console") || desc.includes("brute") || desc.includes("ntlm")) return "identity";
+        if (desc.includes("network") || desc.includes("ssh") || desc.includes("tunnel") || desc.includes("protocol") || desc.includes("lateral") || desc.includes("port scan") || desc.includes("firewall") || desc.includes("ids") || desc.includes("ips")) return "network";
+        if (desc.includes("vulnerability") || desc.includes("cve-") || desc.includes("log4") || desc.includes("patch") || desc.includes("exploit")) return "vulnerability";
+        if (desc.includes("dlp") || desc.includes("data loss") || desc.includes("data leak") || desc.includes("exfiltrat")) return "dlp";
+        if (desc.includes("sse") || desc.includes("zero trust") || desc.includes("sase")) return "sse";
         return "endpoint";
       }
 
@@ -1865,9 +1938,9 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       const extractAssets = (row: any): string => {
         const parts: string[] = [];
-        const assetNames = getField(row, "Asset Names", "Asset IDs", "Hosts Windows", "Hosts Linux", "hostName", "Host Name");
+        const assetNames = getField(row, "Asset Names", "Asset IDs", "Hosts Windows", "Hosts Linux", "hostName", "Host Name", "Hostname", "hostname", "Computer Name", "Device Name", "Device", "Endpoint");
         if (assetNames) {
-          const cleaned = assetNames.replace(/[\[\]']/g, "").split(",").map((s: string) => s.trim()).filter(Boolean).slice(0, 10);
+          const cleaned = assetNames.replace(/[\[\]']/g, "").split(",").map((s: string) => s.trim()).filter(Boolean);
           parts.push(...cleaned);
         }
         const hostRisk = getField(row, "Host/Risk");
@@ -1879,89 +1952,105 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       }
 
       const extractMitre = (row: any, field: string): string => {
-        const val = getField(row, field);
+        const val = getField(row, field, field.replace("MITRE ATT&CK ", ""));
         if (!val) return "";
         return val.replace(/[\[\]']/g, "").split(",").map((s: string) => s.trim()).filter(Boolean).join(", ").substring(0, 200);
       }
 
-      let incidentsCreated = 0;
-      let eventsCreated = 0;
-
-      const incidentBatch: any[] = [];
-      const eventBatch: any[] = [];
-
-      for (const row of rows) {
-        const title = getField(row, "Incident Name", "title", "Case Description", "threat", "Threat")
-                      .substring(0, 500);
-        if (!title) continue;
-
-        const severity = parseSeverity(getField(row, "Severity", "severity"));
-        const description = getField(row, "Case Description", "description", "Description", "details")
-                            .substring(0, 2000) || title;
-        const statusRaw = getField(row, "Status", "status");
-        const status = parseIncidentStatus(statusRaw);
-        const assets = extractAssets(row);
-        const assignee = getField(row, "Assignee", "assignedTo", "assigned_to", "user", "User");
-        const recommendation = getField(row, "Recommendation", "recommendation", "Recommended Response", "action", "Action Required");
-        const source = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource") || "Import";
-        const category = getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "category") || null;
-        const dateRaw = getField(row, "Last Updated", "First Seen", "Last Seen", "occurredAt", "occurred_at", "date", "timestamp");
-        const occurredAt = parseExcelDate(dateRaw);
-
-        incidentBatch.push({
-          tenantId: tid,
-          title,
-          description,
-          severity,
-          status,
-          source: source.substring(0, 100),
-          category: category ? category.substring(0, 100) : null,
-          affectedAssets: assets || null,
-          recommendation: recommendation ? recommendation.substring(0, 2000) : null,
-          assignedTo: assignee ? assignee.substring(0, 255) : null,
-          resolvedAt: status === "resolved" ? occurredAt : null,
-        });
-
-        const eventType = detectEventType(row);
-        const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
-        const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
-        const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score");
-        const riskScore = riskScoreRaw ? parseInt(riskScoreRaw) || null : null;
-        const logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Tags");
-        const hostIp = getField(row, "Host Ip", "hostIp", "Targeted Host IP");
-        const comments = getField(row, "Comments", "Resolution Reason");
-
-        eventBatch.push({
-          tenantId: tid,
-          eventType,
-          severity,
-          threat: title.substring(0, 500),
-          target: (assets || hostIp).substring(0, 500) || null,
-          attacker: null,
-          asset: assets ? assets.split(",")[0]?.trim().substring(0, 500) : null,
-          app: getField(row, "app", "App", "Business Application Names").substring(0, 255) || null,
-          description: (description + (comments ? "\n" + comments : "")).substring(0, 2000),
-          threatVector: null,
-          mitreTactic: mitreTactic.substring(0, 200) || null,
-          mitreTechnique: mitreTechnique.substring(0, 200) || null,
-          action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required").substring(0, 100) || null,
-          sourceType: getField(row, "Asset Types", "sourceType").substring(0, 100) || null,
-          logSource: logSource.substring(0, 200) || null,
-          sender: null,
-          recipient: null,
-          protocol: getField(row, "protocol").substring(0, 50) || null,
-          country: getField(row, "Asset Regions", "country").substring(0, 100) || null,
-          riskScore,
-          rawPayload: null,
-          occurredAt,
-        });
+      const buildRawPayload = (row: any): any => {
+        const payload: any = {};
+        for (const [key, value] of Object.entries(row)) {
+          if (value !== null && value !== undefined && String(value).trim() !== "") {
+            payload[key] = value;
+          }
+        }
+        return Object.keys(payload).length > 0 ? payload : null;
       }
 
-      const batchSize = 100;
+      let incidentsCreated = 0;
+      let eventsCreated = 0;
       let skippedRows = 0;
-      for (let i = 0; i < incidentBatch.length; i += batchSize) {
-        const batch = incidentBatch.slice(i, i + batchSize);
-        for (const inc of batch) {
+
+      const batchSize = 500;
+      for (let batchStart = 0; batchStart < rows.length; batchStart += batchSize) {
+        const chunk = rows.slice(batchStart, batchStart + batchSize);
+        const incidentBatch: any[] = [];
+        const eventBatch: any[] = [];
+
+        for (const row of chunk) {
+          const title = getField(row, "Incident Name", "title", "Case Description", "threat", "Threat", "Alert Name", "Rule Name", "Event Name", "Subject")
+                        .substring(0, 500);
+          if (!title) { skippedRows++; continue; }
+
+          const severity = parseSeverity(getField(row, "Severity", "severity", "Risk Level", "Priority", "Alert Severity"));
+          const description = getField(row, "Case Description", "description", "Description", "details", "Detail", "Summary", "Alert Description", "Message")
+                              .substring(0, 2000) || title;
+          const statusRaw = getField(row, "Status", "status", "State", "Alert Status", "Resolution Status");
+          const status = parseIncidentStatus(statusRaw);
+          const assets = extractAssets(row);
+          const assignee = getField(row, "Assignee", "assignedTo", "assigned_to", "user", "User", "Owner", "Analyst", "Handler");
+          const recommendation = getField(row, "Recommendation", "recommendation", "Recommended Response", "Remediation", "Fix", "Solution");
+          const source = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource", "Source", "Detection Source", "Alert Source", "Product") || "Import";
+          const category = getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "category", "Category", "Tactic") || null;
+          const dateRaw = getField(row, "Last Updated", "First Seen", "Last Seen", "occurredAt", "occurred_at", "date", "timestamp", "Date", "Timestamp", "Created", "Detection Time", "Event Time");
+          const occurredAt = parseExcelDate(dateRaw);
+
+          incidentBatch.push({
+            tenantId: tid,
+            title,
+            description,
+            severity,
+            status,
+            source: source.substring(0, 100),
+            category: category ? category.substring(0, 100) : null,
+            affectedAssets: assets || null,
+            recommendation: recommendation ? recommendation.substring(0, 2000) : null,
+            assignedTo: assignee ? assignee.substring(0, 255) : null,
+            resolvedAt: status === "resolved" ? occurredAt : null,
+          });
+
+          const eventType = detectEventType(row);
+          const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
+          const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
+          const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score", "Risk Score", "Severity Score", "CVSS");
+          const riskScore = riskScoreRaw ? parseInt(riskScoreRaw) || null : null;
+          const logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Tags", "Log Source", "Data Source");
+          const hostIp = getField(row, "Host Ip", "hostIp", "Targeted Host IP", "Source IP", "Destination IP", "IP Address", "IP");
+          const comments = getField(row, "Comments", "Resolution Reason", "Notes", "Remarks");
+          const senderVal = getField(row, "Sender", "sender", "From", "Source Email", "Source User");
+          const recipientVal = getField(row, "Recipient", "recipient", "To", "Target Email", "Destination User");
+          const protocolVal = getField(row, "Protocol", "protocol", "Network Protocol", "Transport");
+          const countryVal = getField(row, "Asset Regions", "country", "Country", "Region", "Geo Location", "Location");
+          const threatVectorVal = getField(row, "Threat Vector", "threatVector", "Attack Vector", "Vector", "Kill Chain Phase");
+          const appVal = getField(row, "app", "App", "Business Application Names", "Application", "Service Name");
+
+          eventBatch.push({
+            tenantId: tid,
+            eventType,
+            severity,
+            threat: title.substring(0, 500),
+            target: (assets || hostIp).substring(0, 500) || null,
+            attacker: getField(row, "Attacker", "attacker", "Source IP", "Threat Actor", "Adversary").substring(0, 500) || null,
+            asset: assets ? assets.split(",")[0]?.trim().substring(0, 500) : null,
+            app: appVal.substring(0, 255) || null,
+            description: (description + (comments ? "\n" + comments : "")).substring(0, 2000),
+            threatVector: threatVectorVal.substring(0, 200) || null,
+            mitreTactic: mitreTactic.substring(0, 200) || null,
+            mitreTechnique: mitreTechnique.substring(0, 200) || null,
+            action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required", "Action Taken", "Response Action", "Remediation Action").substring(0, 100) || null,
+            sourceType: getField(row, "Asset Types", "sourceType", "Source Type", "Device Type", "Endpoint Type").substring(0, 100) || null,
+            logSource: logSource.substring(0, 200) || null,
+            sender: senderVal.substring(0, 500) || null,
+            recipient: recipientVal.substring(0, 500) || null,
+            protocol: protocolVal.substring(0, 50) || null,
+            country: countryVal.substring(0, 100) || null,
+            riskScore,
+            rawPayload: buildRawPayload(row),
+            occurredAt,
+          });
+        }
+
+        for (const inc of incidentBatch) {
           try {
             await storage.createIncident(inc);
             incidentsCreated++;
@@ -1969,19 +2058,20 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
             skippedRows++;
           }
         }
-      }
-      for (let i = 0; i < eventBatch.length; i += batchSize) {
-        const batch = eventBatch.slice(i, i + batchSize);
-        try {
-          await storage.createSecurityEvents(batch);
-          eventsCreated += batch.length;
-        } catch (e) {
-          for (const evt of batch) {
-            try {
-              await storage.createSecurityEvents([evt]);
-              eventsCreated++;
-            } catch (e2) {
-              // skip invalid event
+
+        for (let i = 0; i < eventBatch.length; i += 100) {
+          const evtChunk = eventBatch.slice(i, i + 100);
+          try {
+            await storage.createSecurityEvents(evtChunk);
+            eventsCreated += evtChunk.length;
+          } catch (e) {
+            for (const evt of evtChunk) {
+              try {
+                await storage.createSecurityEvents([evt]);
+                eventsCreated++;
+              } catch (e2) {
+                // skip invalid event row
+              }
             }
           }
         }
@@ -1993,11 +2083,185 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         eventsCreated,
         imported: incidentsCreated + eventsCreated,
         total: rows.length,
-        skipped: rows.length - incidentsCreated,
+        skipped: skippedRows,
+        columnsDetected: detectedColumns,
       });
     } catch (error: any) {
       console.error("Import error:", error);
       res.status(error.status || 500).json({ message: error.message || "Failed to import data" });
+    }
+  });
+
+  app.post("/api/ai/enrich-events", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      await assertTenantAccess(req, tenantId);
+
+      const events = await storage.getSecurityEvents(tenantId);
+      const unenriched = events.filter(e => !e.threatVector && !e.mitreTactic);
+      if (unenriched.length === 0) {
+        return res.json({ message: "All events already enriched", enriched: 0 });
+      }
+
+      const sampleSize = Math.min(50, unenriched.length);
+      const sample = unenriched.slice(0, sampleSize);
+
+      const prompt = `You are a senior SOC analyst. Analyze these ${sampleSize} security events and enrich each with:
+- mitreTactic: MITRE ATT&CK tactic (e.g., "TA0001 - Initial Access")
+- mitreTechnique: MITRE ATT&CK technique (e.g., "T1566 - Phishing")
+- threatVector: attack vector category (e.g., "email", "web", "network", "insider", "supply_chain", "physical", "social_engineering")
+- riskScore: numeric 1-100 risk score based on severity and impact
+- enrichedEventType: refined event type if the current one seems wrong
+
+Events to analyze:
+${JSON.stringify(sample.map(e => ({ id: e.id, eventType: e.eventType, threat: e.threat, severity: e.severity, description: e.description?.substring(0, 300), asset: e.asset, target: e.target })), null, 2)}
+
+Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTechnique": string, "threatVector": string, "riskScore": number }] }`;
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 4096,
+      });
+
+      const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+      let enrichedCount = 0;
+
+      if (result.enrichments && Array.isArray(result.enrichments)) {
+        for (const enrichment of result.enrichments) {
+          try {
+            const existing = events.find(e => e.id === enrichment.id);
+            if (existing) {
+              await storage.updateSecurityEvent(existing.id, {
+                mitreTactic: enrichment.mitreTactic || existing.mitreTactic,
+                mitreTechnique: enrichment.mitreTechnique || existing.mitreTechnique,
+                threatVector: enrichment.threatVector || existing.threatVector,
+                riskScore: enrichment.riskScore || existing.riskScore,
+              });
+              enrichedCount++;
+            }
+          } catch (e) {
+            // skip individual failures
+          }
+        }
+      }
+
+      res.json({
+        message: `Enriched ${enrichedCount} events with AI-powered threat intelligence`,
+        enriched: enrichedCount,
+        totalUnenriched: unenriched.length,
+        remaining: unenriched.length - enrichedCount,
+      });
+    } catch (error: any) {
+      console.error("AI enrichment error:", error);
+      res.status(error.status || 500).json({ message: error.message || "Failed to enrich events" });
+    }
+  });
+
+  app.get("/api/assets/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+
+      const events = await storage.getSecurityEvents(tenantId);
+      const incidents = await storage.getIncidents(tenantId);
+
+      const assetMap: Record<string, {
+        name: string; eventCount: number; incidentCount: number;
+        criticalCount: number; highCount: number; mediumCount: number; lowCount: number;
+        eventTypes: Set<string>; firstSeen: Date; lastSeen: Date;
+        riskScore: number; mitreTactics: Set<string>;
+        logSources: Set<string>; ips: Set<string>;
+      }> = {};
+
+      const addAsset = (name: string, severity: string, eventType: string, date: Date, riskScore: number | null, mitreTactic: string | null, logSource: string | null, ip: string | null, isIncident: boolean) => {
+        const key = name.toLowerCase().trim();
+        if (!key || key.length < 2) return;
+        if (!assetMap[key]) {
+          assetMap[key] = {
+            name, eventCount: 0, incidentCount: 0,
+            criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+            eventTypes: new Set(), firstSeen: date, lastSeen: date,
+            riskScore: 0, mitreTactics: new Set(),
+            logSources: new Set(), ips: new Set(),
+          };
+        }
+        const a = assetMap[key];
+        if (isIncident) a.incidentCount++; else a.eventCount++;
+        if (severity === "critical") a.criticalCount++;
+        else if (severity === "high") a.highCount++;
+        else if (severity === "medium") a.mediumCount++;
+        else a.lowCount++;
+        a.eventTypes.add(eventType);
+        if (date < a.firstSeen) a.firstSeen = date;
+        if (date > a.lastSeen) a.lastSeen = date;
+        if (riskScore && riskScore > a.riskScore) a.riskScore = riskScore;
+        if (mitreTactic) a.mitreTactics.add(mitreTactic.split(",")[0]?.trim());
+        if (logSource) a.logSources.add(logSource.split(",")[0]?.trim());
+        if (ip) a.ips.add(ip);
+      };
+
+      for (const evt of events) {
+        if (evt.asset) {
+          evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false));
+        }
+        if (evt.target && evt.target !== evt.asset) {
+          addAsset(evt.target, evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false);
+        }
+      }
+
+      for (const inc of incidents) {
+        if (inc.affectedAssets) {
+          inc.affectedAssets.split(",").forEach(a => addAsset(a.trim(), inc.severity, inc.category || "incident", inc.createdAt, null, inc.category, inc.source, null, true));
+        }
+      }
+
+      const assets = Object.values(assetMap)
+        .map(a => ({
+          ...a,
+          totalEvents: a.eventCount + a.incidentCount,
+          riskLevel: a.criticalCount > 0 ? "critical" : a.highCount > 2 ? "high" : a.mediumCount > 5 ? "medium" : "low",
+          eventTypes: Array.from(a.eventTypes),
+          mitreTactics: Array.from(a.mitreTactics),
+          logSources: Array.from(a.logSources),
+          ips: Array.from(a.ips),
+        }))
+        .sort((a, b) => b.totalEvents - a.totalEvents);
+
+      const summary = {
+        totalAssets: assets.length,
+        criticalAssets: assets.filter(a => a.riskLevel === "critical").length,
+        highRiskAssets: assets.filter(a => a.riskLevel === "high").length,
+        mediumRiskAssets: assets.filter(a => a.riskLevel === "medium").length,
+        lowRiskAssets: assets.filter(a => a.riskLevel === "low").length,
+        topAssetsByEvents: assets.slice(0, 20),
+        assetsByEventType: {} as Record<string, number>,
+        riskDistribution: [
+          { name: "Critical", value: assets.filter(a => a.riskLevel === "critical").length },
+          { name: "High", value: assets.filter(a => a.riskLevel === "high").length },
+          { name: "Medium", value: assets.filter(a => a.riskLevel === "medium").length },
+          { name: "Low", value: assets.filter(a => a.riskLevel === "low").length },
+        ],
+      };
+
+      const eventTypeCounts: Record<string, Set<string>> = {};
+      for (const a of assets) {
+        for (const et of a.eventTypes) {
+          if (!eventTypeCounts[et]) eventTypeCounts[et] = new Set();
+          eventTypeCounts[et].add(a.name);
+        }
+      }
+      for (const [et, names] of Object.entries(eventTypeCounts)) {
+        summary.assetsByEventType[et] = names.size;
+      }
+
+      res.json({ assets: assets.slice(0, 200), summary });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch assets" });
     }
   });
 
