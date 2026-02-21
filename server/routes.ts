@@ -41,6 +41,87 @@ const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
+function classifyIncidentType(title: string, description?: string | null, source?: string | null, category?: string | null): string {
+  const text = `${title} ${description || ""} ${source || ""} ${category || ""}`.toLowerCase();
+
+  if (/vulnerable driver|loldriver|byovd|bring your own vulnerable/i.test(text)) return "Endpoint Security";
+  if (/suspicious executable|malicious (file|binary|payload)|ransomware|trojan|worm|rootkit|backdoor|keylogger|spyware|adware|cryptominer|coinminer/i.test(text)) return "Endpoint Security";
+  if (/local threat detected|xdr agent|endpoint (protection|detection)|edr |cortex|crowdstrike|sentinel|defender for endpoint/i.test(text)) return "Endpoint Security";
+  if (/process (execution|injection|hollowing)|dll (injection|sideload|hijack)|memory (manipulation|injection)/i.test(text)) return "Endpoint Security";
+  if (/suspicious (process|service|registry|driver|module|script)|fileless|powershell|wmi.*process|living.off.the.land|lolbin/i.test(text)) return "Endpoint Security";
+  if (/accessibility feature escalation|privilege escalation.*endpoint|sync.*escalation/i.test(text)) return "Endpoint Security";
+  if (/anti.?webshell|webshell/i.test(text)) return "Endpoint Security";
+
+  if (/compute.attached identity|unusual asn|cloud (api|iam|identity|credential|account|trail|watch)|aws (guard|cloud|iam|sts|s3.*anomal)|azure (sentinel|security|ad.*anomal)|gcp (security|iam)/i.test(text)) return "Cloud Security";
+  if (/instance metadata|imds|ec2.*api|lambda.*anomal|k8s.*anomal|container.*escape|s3.*bucket.*public|cloud.*misconfig/i.test(text)) return "Cloud Security";
+  if (/geographic.*anomal|geo.*improbab|unusual.*region|api.*call.*from/i.test(text)) return "Cloud Security";
+
+  if (/failed connection|port scan|network (scan|sweep|flood)|syn (flood|scan)|tcp.*scan|udp.*flood|icmp|ddos|dos attack|packet.*flood|bandwidth.*anomal/i.test(text)) return "Network Security";
+  if (/lateral movement|smb.*brute|rdp.*brute|ssh.*brute|network.*intrusion|ids.*alert|ips.*alert|firewall.*block/i.test(text)) return "Network Security";
+
+  if (/phish|spear.?phish|spoofed.*email|malicious.*email|email.*threat|bec |business email compromise|email.*gateway|dmarc|spf.*fail|dkim/i.test(text)) return "Email Threat";
+
+  if (/brute.?force|credential.?(stuff|dump|harvest|spray|theft|abuse)|password.*spray|login.*fail.*multiple|authentication.*anomal|account.*lock/i.test(text)) return "Credential Abuse";
+
+  if (/data (exfiltration|leak|loss|theft)|dlp|unusual.*(download|upload|transfer|data)|large.*(download|upload|transfer|file)|sensitive.*data.*access/i.test(text)) return "Data Exfiltration";
+
+  if (/vulnerab|cve-|patch.*missing|unpatched|exploit.*vuln|security.*flaw/i.test(text) && !/driver|endpoint|agent/i.test(text)) return "Vulnerability";
+
+  if (/unauthorized (access|login|entry)|privilege (escalation|abuse)|insider.*threat|rogue.*admin|suspicious.*user.*activity/i.test(text)) return "Unauthorized Access";
+
+  if (/casb|shadow.*it|unsanctioned.*app|cloud.*app.*control/i.test(text)) return "Cloud App Security";
+  if (/waf|web.application.firewall|sql.*inject|xss|cross.site|owasp/i.test(text)) return "Web Application Security";
+
+  if (/remote wmi|remote (process|command|execution|code)|psexec|winrm|remote.*shell/i.test(text)) return "Endpoint Security";
+
+  return "";
+}
+
+const ENRICHMENT_SYSTEM_PROMPT = `You are a senior SOC analyst specializing in MSSP operations. For each incident, provide precise security classification and enrichment.
+
+CRITICAL CLASSIFICATION RULES (incidentType field):
+- "Endpoint Security": Malware, suspicious executables, vulnerable drivers (BYOVD/loldrivers), process injection, fileless attacks, EDR/XDR agent detections, local threats, privilege escalation on endpoints, webshell protection, suspicious WMI/PowerShell, remote process execution, accessibility feature escalation
+- "Cloud Security": Cloud IAM anomalies, compute-attached identity misuse, unusual ASN/geographic API calls, AWS/Azure/GCP security events, cloud credential compromise, S3 bucket exposure, IMDS exploitation, cloud misconfigurations
+- "Network Security": Port scanning, network intrusion, firewall blocks, DDoS, lateral movement via network, failed connections (NOT failed logins), IDS/IPS alerts
+- "Email Threat": Phishing, spear-phishing, BEC, malicious email, spoofed sender, DMARC/SPF failures
+- "Credential Abuse": Brute force, credential stuffing/spraying/dumping, authentication anomalies, account lockouts, password attacks
+- "Data Exfiltration": DLP alerts, unusual data downloads/uploads/transfers, large file transfers, sensitive data access anomalies
+- "Vulnerability": CVE-based vulnerability findings, missing patches, scan results (NOT vulnerable drivers - those are Endpoint Security)
+- "Unauthorized Access": Unauthorized logins, privilege abuse, insider threat, rogue admin activity
+- "Cloud App Security": CASB alerts, shadow IT, unsanctioned cloud apps
+- "Web Application Security": WAF alerts, SQL injection, XSS, OWASP-related attacks
+
+IMPORTANT DISTINCTIONS:
+- "Vulnerable driver dropped" (loldrivers, BYOVD) = Endpoint Security (T1068/T1211), NOT Vulnerability
+- "Unusual data download" = Data Exfiltration (T1041/T1567), NOT Network Security
+- "Compute-attached identity from unusual ASN" = Cloud Security (T1078.004), NOT Network Security
+- "Anti Webshell Protection" = Endpoint Security (T1505.003), NOT Cloud Security
+- "Suspicious remote WMI process execution" = Endpoint Security (T1047), NOT Network Security
+- "Failed Connections" detected by XDR = Network Security (connection failures are network-layer)
+- "Local Threat Detected" by XDR Agent = Endpoint Security
+
+Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"reconnaissance|weaponization|delivery|exploitation|installation|command_and_control|actions_on_objectives","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"endpoint_security|cloud_security|network_security|email_threat|credential_abuse|data_exfiltration|vulnerability|unauthorized_access|cloud_app_security|web_app_security|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`;
+
+const AI_TYPE_MAP: Record<string, string> = {
+  endpoint_security: "Endpoint Security",
+  cloud_security: "Cloud Security",
+  network_security: "Network Security",
+  email_threat: "Email Threat",
+  credential_abuse: "Credential Abuse",
+  data_exfiltration: "Data Exfiltration",
+  vulnerability: "Vulnerability",
+  unauthorized_access: "Unauthorized Access",
+  cloud_app_security: "Cloud App Security",
+  web_app_security: "Web Application Security",
+  malware: "Endpoint Security",
+  phishing: "Email Threat",
+  brute_force: "Credential Abuse",
+  dos: "Network Security",
+  insider_threat: "Unauthorized Access",
+  misconfiguration: "Cloud Security",
+  other: "Security Alert",
+};
+
 async function getUserTenantAccess(req: any): Promise<{
   userId: string;
   role: string;
@@ -2143,88 +2224,98 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         }
       }
 
-      let aiEnriched = 0;
-      if (incidentsCreated > 0) {
-        try {
-          const newIncidents = await storage.getIncidents(tid);
-          const unenriched = newIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase);
+      const newIncidents = incidentsCreated > 0 ? await storage.getIncidents(tid) : [];
+      const unenriched = newIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase);
 
-          for (let b = 0; b < unenriched.length; b += 20) {
-            const batch = unenriched.slice(b, b + 20);
-            const summaries = batch.map((inc, i) => `[${i}] Title: ${inc.title}\nSeverity: ${inc.severity}\nDescription: ${(inc.description || "").substring(0, 200)}\nSource: ${inc.source || ""}\nCategory: ${inc.category || ""}\nAssets: ${inc.affectedAssets || ""}`).join("\n---\n");
-
-            try {
-              const aiRes = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                temperature: 0.2,
-                messages: [{
-                  role: "system",
-                  content: `You are a SOC analyst. For each incident, determine:
-1. mitreTactic: The MITRE ATT&CK tactic (e.g., Initial Access, Execution, Persistence, Privilege Escalation, Defense Evasion, Credential Access, Discovery, Lateral Movement, Collection, Command and Control, Exfiltration, Impact)
-2. mitreTechniqueId: The technique ID (e.g., T1566, T1059, T1078)
-3. mitreTechnique: The technique name (e.g., Phishing, Command and Scripting Interpreter)
-4. killChainPhase: Lockheed Martin Kill Chain phase (reconnaissance, weaponization, delivery, exploitation, installation, command_and_control, actions_on_objectives)
-5. confidenceScore: 0-100 confidence in classification
-6. classification: "true_positive", "false_positive", or "suspicious"
-7. iocReputation: For any file hashes, domains, URLs, IPs found - assess reputation (malicious/suspicious/clean/unknown), domain age estimation, geo-location if IP found, DMARC/SPF likelihood
-Return JSON array matching incident indices. Example: [{"index":0,"mitreTactic":"Initial Access","mitreTechniqueId":"T1566","mitreTechnique":"Phishing","killChainPhase":"delivery","confidenceScore":85,"classification":"true_positive","iocReputation":{"indicators":[{"type":"domain","value":"evil.com","reputation":"malicious","country":"RU","domainAge":"30 days"}]}}]`
-                }, {
-                  role: "user",
-                  content: summaries
-                }],
-                response_format: { type: "json_object" },
-              });
-
-              const content = aiRes.choices[0]?.message?.content;
-              if (content) {
-                const parsed = JSON.parse(content);
-                const results = parsed.results || parsed.enrichments || parsed;
-                const arr = Array.isArray(results) ? results : [];
-
-                for (const r of arr) {
-                  const idx = r.index ?? r.i;
-                  if (idx === undefined || idx >= batch.length) continue;
-                  const inc = batch[idx];
-                  const updateData: any = {};
-                  if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
-                  if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
-                  if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
-                  if (r.killChainPhase) updateData.killChainPhase = r.killChainPhase;
-                  if (r.confidenceScore !== undefined) updateData.confidenceScore = Math.min(100, Math.max(0, r.confidenceScore));
-                  if (r.classification) {
-                    updateData.classification = r.classification;
-                    updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
-                  }
-                  if (r.iocReputation) {
-                    updateData.iocData = r.iocReputation;
-                  }
-                  if (Object.keys(updateData).length > 0) {
-                    try {
-                      await storage.updateIncident(inc.id, updateData);
-                      aiEnriched++;
-                    } catch {}
-                  }
-                }
-              }
-            } catch (aiErr) {
-              console.error("AI enrichment batch error:", aiErr);
-            }
-          }
-        } catch (enrichErr) {
-          console.error("AI enrichment error:", enrichErr);
-        }
+      if (unenriched.length === 0) {
+        return res.json({
+          message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events.`,
+          incidentsCreated,
+          eventsCreated,
+          aiEnriched: 0,
+          imported: incidentsCreated + eventsCreated,
+          total: rows.length,
+          skipped: skippedRows,
+          columnsDetected: detectedColumns,
+        });
       }
 
-      res.json({
-        message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events. AI enriched ${aiEnriched} incidents with MITRE/Kill Chain/IOC data.`,
-        incidentsCreated,
-        eventsCreated,
-        aiEnriched,
-        imported: incidentsCreated + eventsCreated,
-        total: rows.length,
-        skipped: skippedRows,
-        columnsDetected: detectedColumns,
-      });
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      const sendImportProgress = (phase: string, aiEnriched: number, aiTotal: number, done: boolean) => {
+        res.write(`data: ${JSON.stringify({ phase, incidentsCreated, eventsCreated, aiEnriched, aiTotal, imported: incidentsCreated + eventsCreated, total: rows.length, skipped: skippedRows, columnsDetected: detectedColumns, done })}\n\n`);
+      };
+
+      sendImportProgress("enriching", 0, unenriched.length, false);
+
+      let aiEnriched = 0;
+      try {
+        for (let b = 0; b < unenriched.length; b += 15) {
+          const batch = unenriched.slice(b, b + 15);
+          const summaries = batch.map((inc, i) => `[${i}] Title: ${inc.title}\nSeverity: ${inc.severity}\nDescription: ${(inc.description || "").substring(0, 200)}\nSource: ${inc.source || ""}\nCategory: ${inc.category || ""}\nAssets: ${inc.affectedAssets || ""}`).join("\n---\n");
+
+          try {
+            const aiRes = await openai.chat.completions.create({
+              model: "gpt-4o-mini",
+              temperature: 0.2,
+              messages: [{ role: "system", content: ENRICHMENT_SYSTEM_PROMPT }, { role: "user", content: summaries }],
+              response_format: { type: "json_object" },
+            });
+
+            const content = aiRes.choices[0]?.message?.content;
+            if (content) {
+              const parsed = JSON.parse(content);
+              const results = parsed.results || parsed.enrichments || parsed;
+              const arr = Array.isArray(results) ? results : [];
+
+              for (const r of arr) {
+                const idx = r.index ?? r.i;
+                if (idx === undefined || idx >= batch.length) continue;
+                const inc = batch[idx];
+                const updateData: any = {};
+                if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
+                if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
+                if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
+                if (r.killChainPhase) updateData.killChainPhase = r.killChainPhase;
+                if (r.confidenceScore !== undefined) updateData.confidenceScore = Math.min(100, Math.max(0, r.confidenceScore));
+                if (r.classification) {
+                  updateData.classification = r.classification;
+                  updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
+                }
+                if (r.iocReputation) updateData.iocData = r.iocReputation;
+                if (r.detectionSource) updateData.detectionSource = r.detectionSource;
+                if (r.actionTaken) updateData.actionTaken = r.actionTaken;
+
+                const keywordType = classifyIncidentType(inc.title, inc.description, inc.source, inc.category);
+                if (keywordType) {
+                  updateData.incidentType = keywordType;
+                } else if (r.incidentType) {
+                  updateData.incidentType = AI_TYPE_MAP[r.incidentType] || r.incidentType;
+                }
+
+                if (Object.keys(updateData).length > 0) {
+                  try {
+                    await storage.updateIncident(inc.id, updateData);
+                    aiEnriched++;
+                  } catch {}
+                }
+              }
+            }
+          } catch (aiErr) {
+            console.error("AI enrichment batch error:", aiErr);
+          }
+
+          sendImportProgress("enriching", aiEnriched, unenriched.length, false);
+        }
+      } catch (enrichErr) {
+        console.error("AI enrichment error:", enrichErr);
+      }
+
+      sendImportProgress("complete", aiEnriched, unenriched.length, true);
+      res.end();
     } catch (error: any) {
       console.error("Import error:", error);
       res.status(error.status || 500).json({ message: error.message || "Failed to import data" });
@@ -2267,11 +2358,7 @@ Return JSON array matching incident indices. Example: [{"index":0,"mitreTactic":
           const aiRes = await openai.chat.completions.create({
             model: "gpt-4o-mini",
             temperature: 0.2,
-            messages: [{
-              role: "system",
-              content: `You are a senior SOC analyst. For each incident, provide MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, IOC reputation analysis, detection source tool, incident type, and recommended action taken.
-Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"delivery|exploitation|...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|phishing|brute_force|data_exfiltration|dos|unauthorized_access|insider_threat|vulnerability|misconfiguration|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`
-            }, { role: "user", content: summaries }],
+            messages: [{ role: "system", content: ENRICHMENT_SYSTEM_PROMPT }, { role: "user", content: summaries }],
             response_format: { type: "json_object" },
           });
 
@@ -2282,6 +2369,7 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
             for (const r of arr) {
               const idx = r.index ?? r.i;
               if (idx === undefined || idx >= batch.length) continue;
+              const inc = batch[idx];
               const updateData: any = {};
               if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
               if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
@@ -2294,18 +2382,17 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
               }
               if (r.iocReputation) updateData.iocData = r.iocReputation;
               if (r.detectionSource) updateData.detectionSource = r.detectionSource;
-              if (r.incidentType && !batch[idx].incidentType) {
-                const aiTypeMap: Record<string, string> = {
-                  malware: "Malware", phishing: "Email Threat", brute_force: "Credential Abuse",
-                  data_exfiltration: "Data Exfiltration", dos: "Network Security", unauthorized_access: "Unauthorized Access",
-                  insider_threat: "Insider Threat", vulnerability: "Vulnerability Exploit", misconfiguration: "Misconfiguration",
-                  other: "Security Alert",
-                };
-                updateData.incidentType = aiTypeMap[r.incidentType] || r.incidentType;
-              }
               if (r.actionTaken) updateData.actionTaken = r.actionTaken;
+
+              const keywordType = classifyIncidentType(inc.title, inc.description, inc.source, inc.category);
+              if (keywordType) {
+                updateData.incidentType = keywordType;
+              } else if (r.incidentType) {
+                updateData.incidentType = AI_TYPE_MAP[r.incidentType] || r.incidentType;
+              }
+
               if (Object.keys(updateData).length > 0) {
-                try { await storage.updateIncident(batch[idx].id, updateData); enriched++; } catch {}
+                try { await storage.updateIncident(inc.id, updateData); enriched++; } catch {}
               }
             }
           }
@@ -2340,14 +2427,26 @@ Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xx
 
       const summary = `Title: ${incident.title}\nSeverity: ${incident.severity}\nStatus: ${incident.status}\nDescription: ${(incident.description || "").substring(0, 500)}\nSource: ${incident.source || ""}\nAssets: ${incident.affectedAssets || ""}\nCategory: ${incident.category || ""}`;
 
+      const singlePrompt = `You are a senior SOC analyst specializing in MSSP operations. Enrich this single incident with precise security classification.
+
+CRITICAL CLASSIFICATION RULES (incidentType field):
+- "endpoint_security": Malware, suspicious executables, vulnerable drivers (BYOVD/loldrivers), process injection, fileless attacks, EDR/XDR agent detections, local threats, privilege escalation on endpoints, webshell protection, suspicious WMI/PowerShell, remote process execution
+- "cloud_security": Cloud IAM anomalies, compute-attached identity misuse, unusual ASN/geographic API calls, AWS/Azure/GCP security events, cloud credential compromise, IMDS exploitation
+- "network_security": Port scanning, network intrusion, firewall blocks, DDoS, lateral movement via network, failed connections, IDS/IPS alerts
+- "email_threat": Phishing, spear-phishing, BEC, malicious email, spoofed sender
+- "credential_abuse": Brute force, credential stuffing/spraying/dumping, authentication anomalies
+- "data_exfiltration": DLP alerts, unusual data downloads/uploads/transfers, large file transfers
+- "vulnerability": CVE-based vulnerability findings, missing patches (NOT vulnerable drivers)
+- "unauthorized_access": Unauthorized logins, privilege abuse, insider threat
+
+IMPORTANT: "Vulnerable driver" = endpoint_security (NOT vulnerability). "Unusual data download" = data_exfiltration (NOT network_security). "Compute-attached identity from unusual ASN" = cloud_security (NOT network_security).
+
+Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"endpoint_security|cloud_security|network_security|email_threat|credential_abuse|data_exfiltration|vulnerability|unauthorized_access|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}`;
+
       const aiRes = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         temperature: 0.2,
-        messages: [{
-          role: "system",
-          content: `You are a senior SOC analyst. Enrich this single incident with MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, detection source, incident type, action taken, and IOC reputation.
-Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|phishing|brute_force|data_exfiltration|dos|unauthorized_access|insider_threat|vulnerability|misconfiguration|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}`
-        }, { role: "user", content: summary }],
+        messages: [{ role: "system", content: singlePrompt }, { role: "user", content: summary }],
         response_format: { type: "json_object" },
       });
 
@@ -2367,16 +2466,14 @@ Return JSON: {"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":".
       }
       if (r.iocReputation) updateData.iocData = r.iocReputation;
       if (r.detectionSource) updateData.detectionSource = r.detectionSource;
-      if (r.incidentType) {
-        const aiTypeMap: Record<string, string> = {
-          malware: "Malware", phishing: "Email Threat", brute_force: "Credential Abuse",
-          data_exfiltration: "Data Exfiltration", dos: "Network Security", unauthorized_access: "Unauthorized Access",
-          insider_threat: "Insider Threat", vulnerability: "Vulnerability Exploit", misconfiguration: "Misconfiguration",
-          other: "Security Alert",
-        };
-        updateData.incidentType = aiTypeMap[r.incidentType] || r.incidentType;
-      }
       if (r.actionTaken) updateData.actionTaken = r.actionTaken;
+
+      const keywordType = classifyIncidentType(incident.title, incident.description, incident.source, incident.category);
+      if (keywordType) {
+        updateData.incidentType = keywordType;
+      } else if (r.incidentType) {
+        updateData.incidentType = AI_TYPE_MAP[r.incidentType] || r.incidentType;
+      }
 
       const updated = await storage.updateIncident(id, updateData);
       res.json(updated);

@@ -42,6 +42,7 @@ export default function ImportPage() {
     incidentsCreated?: number;
     eventsCreated?: number;
     columnsDetected?: string[];
+    aiEnriched?: number;
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [enrichResult, setEnrichResult] = useState<{
@@ -49,6 +50,7 @@ export default function ImportPage() {
     remaining: number;
     message?: string;
   } | null>(null);
+  const [enrichProgress, setEnrichProgress] = useState<{ aiEnriched: number; aiTotal: number; active: boolean }>({ aiEnriched: 0, aiTotal: 0, active: false });
 
   const enrichMutation = useMutation({
     mutationFn: async () => {
@@ -118,15 +120,75 @@ export default function ImportPage() {
         throw new Error(err.message || "Import failed");
       }
 
-      const data = await response.json();
-      setResult(data);
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
-      toast({
-        title: "Import successful",
-        description: data.message,
-      });
+      const contentType = response.headers.get("content-type") || "";
+
+      if (contentType.includes("text/event-stream")) {
+        setEnrichProgress({ aiEnriched: 0, aiTotal: 0, active: true });
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        if (!reader) { setUploading(false); return; }
+
+        let buffer = "";
+        let lastData: any = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const ev = JSON.parse(line.slice(6));
+                lastData = ev;
+                setEnrichProgress({ aiEnriched: ev.aiEnriched || 0, aiTotal: ev.aiTotal || 0, active: !ev.done });
+                if (ev.done) {
+                  setResult({
+                    imported: ev.imported || 0,
+                    total: ev.total || 0,
+                    skipped: ev.skipped || 0,
+                    message: `Imported ${ev.incidentsCreated || 0} incidents and ${ev.eventsCreated || 0} events. AI enriched ${ev.aiEnriched || 0} incidents.`,
+                    incidentsCreated: ev.incidentsCreated,
+                    eventsCreated: ev.eventsCreated,
+                    columnsDetected: ev.columnsDetected,
+                    aiEnriched: ev.aiEnriched,
+                  });
+                }
+              } catch {}
+            }
+          }
+        }
+        setEnrichProgress(p => ({ ...p, active: false }));
+        if (!result && lastData) {
+          setResult({
+            imported: lastData.imported || 0,
+            total: lastData.total || 0,
+            skipped: lastData.skipped || 0,
+            message: `Imported ${lastData.incidentsCreated || 0} incidents and ${lastData.eventsCreated || 0} events. AI enriched ${lastData.aiEnriched || 0} incidents.`,
+            incidentsCreated: lastData.incidentsCreated,
+            eventsCreated: lastData.eventsCreated,
+            columnsDetected: lastData.columnsDetected,
+            aiEnriched: lastData.aiEnriched,
+          });
+        }
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
+        toast({
+          title: "Import & Enrichment Complete",
+          description: lastData ? `Imported ${lastData.incidentsCreated || 0} incidents, ${lastData.eventsCreated || 0} events. AI enriched ${lastData.aiEnriched || 0} incidents.` : "Import complete",
+        });
+      } else {
+        const data = await response.json();
+        setResult(data);
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
+        toast({
+          title: "Import successful",
+          description: data.message,
+        });
+      }
     } catch (err: any) {
       toast({
         title: "Import failed",
@@ -135,6 +197,7 @@ export default function ImportPage() {
       });
     } finally {
       setUploading(false);
+      setEnrichProgress(p => ({ ...p, active: false }));
     }
   };
 
@@ -200,10 +263,17 @@ export default function ImportPage() {
                   data-testid="button-upload"
                 >
                   {uploading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                      Importing...
-                    </>
+                    enrichProgress.active ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                        AI Enriching {enrichProgress.aiEnriched}/{enrichProgress.aiTotal}...
+                      </>
+                    ) : (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                        Importing...
+                      </>
+                    )
                   ) : (
                     <>
                       <Upload className="w-3.5 h-3.5 mr-1.5" />
