@@ -2131,7 +2131,15 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const assets = extractAssets(row);
           const assignee = getField(row, "Assignee", "assignedTo", "assigned_to", "user", "User", "Owner", "Analyst", "Handler");
           const recommendation = getField(row, "Recommendation", "recommendation", "Recommended Response", "Remediation", "Fix", "Solution");
-          const logSourceRaw = getField(row, "Scan Group Name", "scanGroup", "Case Domain", "logSource", "Source", "Detection Source", "Alert Source", "Product") || "";
+          let logSourceRaw = getField(row, "Case Domain", "logSource", "Source", "Detection Source", "Alert Source", "Product") || "";
+          if (!logSourceRaw) {
+            const tagsForSource = getField(row, "Tags");
+            if (tagsForSource) {
+              const egM = tagsForSource.match(/'tag_name':\s*'EG:([^']+)'/);
+              if (egM) logSourceRaw = egM[1];
+            }
+            if (!logSourceRaw) logSourceRaw = getField(row, "Scan Group Name", "scanGroup") || "";
+          }
           const category = getField(row, "MITRE ATT&CK Tactic", "mitreTactic", "category", "Category", "Tactic") || null;
           const dateRaw = getField(row, "Last Updated", "First Seen", "Last Seen", "occurredAt", "occurred_at", "date", "timestamp", "Date", "Timestamp", "Created", "Detection Time", "Event Time");
           const occurredAt = parseExcelDate(dateRaw);
@@ -2161,7 +2169,14 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
           const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score", "Risk Score", "Severity Score", "CVSS");
           const riskScore = riskScoreRaw ? parseInt(riskScoreRaw) || null : null;
-          const logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Tags", "Log Source", "Data Source");
+          let logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Log Source", "Data Source");
+          if (!logSource) {
+            const tagsRaw = getField(row, "Tags");
+            if (tagsRaw) {
+              const egMatch = tagsRaw.match(/'tag_name':\s*'EG:([^']+)'/);
+              logSource = egMatch ? egMatch[1] : tagsRaw;
+            }
+          }
           const hostIp = getField(row, "Host Ip", "hostIp", "Targeted Host IP", "Source IP", "Destination IP", "IP Address", "IP");
           const comments = getField(row, "Comments", "Resolution Reason", "Notes", "Remarks");
           const senderVal = getField(row, "Sender", "sender", "From", "Source Email", "Source User");
@@ -2783,6 +2798,15 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     return new Date(epoch.getTime() + serial * 86400000);
   }
 
+  function extractEndpointGroup(payload: any): string | null {
+    if (!payload) return null;
+    const tagsStr = payload["Tags"];
+    if (!tagsStr || typeof tagsStr !== "string") return null;
+    const egMatch = tagsStr.match(/'tag_name':\s*'EG:([^']+)'/);
+    if (egMatch) return egMatch[1];
+    return null;
+  }
+
   function extractDatesFromPayload(raw: any): { firstSeen: Date | null; lastSeen: Date | null } {
     if (!raw) return { firstSeen: null, lastSeen: null };
     const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -2885,14 +2909,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         let os: string | null = null;
         let memMB = 0;
         let cpuC = 0;
-        let group: string | null = evt.logSource?.split(",")[0]?.trim() || null;
+        let group: string | null = null;
         const raw = evt.rawPayload as any;
         if (raw) {
           const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
           if (payload["OS"] || payload["Operating System"]) os = payload["OS"] || payload["Operating System"];
           if (payload["Memory"]) { const m = parseInt(payload["Memory"]); if (!isNaN(m)) memMB = m; }
           if (payload["CPU"] || payload["Processors"]) { const c = parseInt(payload["CPU"] || payload["Processors"]); if (!isNaN(c)) cpuC = c; }
-          if (payload["Scan Group Name"]) group = payload["Scan Group Name"];
+          const egGroup = extractEndpointGroup(payload);
+          if (egGroup) group = egGroup;
+          else if (payload["Scan Group Name"]) group = payload["Scan Group Name"];
+        }
+        if (!group && evt.logSource) {
+          const egFromLog = evt.logSource.match(/'tag_name':\s*'EG:([^']+)'/);
+          if (egFromLog) group = egFromLog[1];
+          else if (!evt.logSource.includes("tag_id")) group = evt.logSource.split(",")[0]?.trim() || null;
         }
         if (evt.asset) {
           evt.asset.split(",").forEach(a => addAsset(a.trim(), evt.severity, evt.eventType, evt.occurredAt, evt.riskScore, evt.mitreTactic, evt.logSource, evt.target, false, rawFirst, rawLast, group, os, memMB, cpuC));
@@ -2904,8 +2935,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       for (const inc of incidents) {
         if (inc.affectedAssets) {
-          const incGroup = inc.detectionSource || null;
-          inc.affectedAssets.split(",").forEach(a => addAsset(a.trim(), inc.severity, inc.category || "incident", inc.createdAt, null, inc.category, inc.source, null, true, null, null, incGroup));
+          inc.affectedAssets.split(",").forEach(a => addAsset(a.trim(), inc.severity, inc.category || "incident", inc.createdAt, null, inc.category, inc.source, null, true, null, null, null));
         }
       }
 
@@ -3071,7 +3101,23 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (evt.target) ips.add(evt.target);
         if (evt.protocol) protocols.add(evt.protocol);
         if (evt.country) countries.add(evt.country);
-        if (evt.logSource) evt.logSource.split(",").forEach(s => { logSources.add(s.trim()); assetGroups.add(s.trim()); });
+        if (evt.logSource && !evt.logSource.includes("tag_id")) {
+          evt.logSource.split(",").forEach(s => { logSources.add(s.trim()); });
+        }
+        {
+          const raw = evt.rawPayload as any;
+          if (raw) {
+            const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+            const egGroup = extractEndpointGroup(payload);
+            if (egGroup) assetGroups.add(egGroup);
+            else if (payload["Scan Group Name"]) assetGroups.add(payload["Scan Group Name"]);
+          }
+          if (assetGroups.size === 0 && evt.logSource) {
+            const egFromLog = evt.logSource.match(/'tag_name':\s*'EG:([^']+)'/);
+            if (egFromLog) assetGroups.add(egFromLog[1]);
+            else if (!evt.logSource.includes("tag_id")) evt.logSource.split(",").forEach(s => assetGroups.add(s.trim()));
+          }
+        }
         if (evt.mitreTactic) evt.mitreTactic.split(",").forEach(t => mitreTactics.add(t.trim()));
         if (evt.mitreTechnique) evt.mitreTechnique.split(",").forEach(t => mitreTechniques.add(t.trim()));
         if (evt.eventType) eventTypes.add(evt.eventType);
@@ -3111,7 +3157,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           }
           if (payload["Scan Group Name"]) {
             securityControls.add(`Scan Group: ${payload["Scan Group Name"]}`);
-            assetGroups.add(payload["Scan Group Name"]);
           }
           if (payload["Total Risk"]) {
             const tr = parseInt(payload["Total Risk"]);
@@ -3152,7 +3197,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (inc.destinationIp) ips.add(inc.destinationIp);
         if (inc.detectionSource) {
           detectionSources.add(inc.detectionSource);
-          assetGroups.add(inc.detectionSource);
         }
         if (inc.mitreTactic) mitreTactics.add(inc.mitreTactic);
         if (inc.mitreTechnique) mitreTechniques.add(inc.mitreTechnique);
