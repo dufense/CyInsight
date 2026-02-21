@@ -403,7 +403,9 @@ export async function registerRoutes(
       }
 
       const mssRolesCheck = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
-      const canSwitchRoles = tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true || req.session?.isSuperAdmin === true;
+      const assignedRoles = tenantUser.assignedRoles || [tenantUser.role];
+      const hasMultipleRoles = assignedRoles.length > 1;
+      const canSwitchRoles = hasMultipleRoles || tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true || req.session?.isSuperAdmin === true;
       res.json({
         role: tenantUser.role,
         tenantId: tenantUser.tenantId,
@@ -411,6 +413,7 @@ export async function registerRoutes(
         isMSS: mssRolesCheck.includes(tenantUser.role),
         isAdmin: ["platform_admin", "mss_admin", "soc_manager"].includes(tenantUser.role),
         canSwitchRoles,
+        assignedRoles,
       });
     } catch (error) {
       console.error("Error fetching user profile:", error);
@@ -431,15 +434,21 @@ export async function registerRoutes(
         return res.status(404).json({ message: "User not found" });
       }
       const isSuperAdminSession = req.session?.isSuperAdmin === true;
-      const canSwitchRoles = isSuperAdminSession || tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true;
+      const assignedRoles = tenantUser.assignedRoles || [tenantUser.role];
+      const hasMultipleRoles = assignedRoles.length > 1;
+      const canSwitchRoles = hasMultipleRoles || isSuperAdminSession || tenantUser.role === "platform_admin" || req.session?.canSwitchRoles === true;
       if (!canSwitchRoles) {
-        return res.status(403).json({ message: "Only superadmin or platform admin can switch roles" });
+        return res.status(403).json({ message: "You need multiple assigned roles to switch" });
       }
       if (tenantUser.role === "platform_admin" || isSuperAdminSession) {
         req.session.canSwitchRoles = true;
       }
+      if (hasMultipleRoles && !assignedRoles.includes(role) && !isSuperAdminSession && !req.session?.canSwitchRoles) {
+        return res.status(403).json({ message: "You can only switch to your assigned roles" });
+      }
       const updated = await storage.updateTenantUser(tenantUser.id, { role });
       const mssRolesCheck = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
+      const updatedAssignedRoles = updated.assignedRoles || assignedRoles;
       res.json({
         role: updated.role,
         tenantId: updated.tenantId,
@@ -447,6 +456,7 @@ export async function registerRoutes(
         isMSS: mssRolesCheck.includes(updated.role),
         isAdmin: ["platform_admin", "mss_admin", "soc_manager"].includes(updated.role),
         canSwitchRoles: true,
+        assignedRoles: updatedAssignedRoles,
       });
     } catch (error) {
       console.error("Error switching role:", error);
@@ -838,7 +848,7 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Admin access required" });
       }
 
-      const { userId, tenantId, role, email, displayName } = req.body;
+      const { userId, tenantId, role, assignedRoles } = req.body;
       if (!userId || !tenantId || !role) {
         return res.status(400).json({ message: "userId, tenantId, and role are required" });
       }
@@ -850,7 +860,8 @@ export async function registerRoutes(
         return res.status(400).json({ message: "User already exists in this tenant" });
       }
 
-      const tu = await storage.createTenantUser({ userId, tenantId, role });
+      const roles = assignedRoles && assignedRoles.length > 0 ? assignedRoles : [role];
+      const tu = await storage.createTenantUser({ userId, tenantId, role, assignedRoles: roles });
       res.status(201).json(tu);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to create user" });
@@ -865,7 +876,11 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Admin access required" });
       }
       const id = parseInt(req.params.id);
-      const updated = await storage.updateTenantUser(id, req.body);
+      const { role, assignedRoles } = req.body;
+      const updateData: any = {};
+      if (role) updateData.role = role;
+      if (assignedRoles) updateData.assignedRoles = assignedRoles;
+      const updated = await storage.updateTenantUser(id, updateData);
       res.json(updated);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to update user" });

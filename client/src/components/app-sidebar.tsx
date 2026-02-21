@@ -42,37 +42,51 @@ import { Badge } from "@/components/ui/badge";
 import { useTenant } from "@/lib/tenant-context";
 import { useAuth } from "@/hooks/use-auth";
 
-const adminNavItems = [
-  { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-  { title: "Admin Center", url: "/admin-center", icon: Settings },
-  { title: "Incidents", url: "/incidents", icon: AlertTriangle },
-  { title: "Tickets", url: "/tickets", icon: Ticket },
-  { title: "Projects", url: "/projects", icon: FolderKanban },
-  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
-  { title: "Services & SLA", url: "/services", icon: Briefcase },
-  { title: "Shift Roster", url: "/shift-roster", icon: CalendarClock },
-  { title: "Reports", url: "/reports", icon: FileText },
-  { title: "Import Data", url: "/import", icon: Upload },
-];
+function getNavItems(role: string) {
+  const items: { title: string; url: string; icon: any }[] = [
+    { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  ];
 
-const mssNavItems = [
-  { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-  { title: "Incidents", url: "/incidents", icon: AlertTriangle },
-  { title: "Tickets", url: "/tickets", icon: Ticket },
-  { title: "Projects", url: "/projects", icon: FolderKanban },
-  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
-  { title: "Services & SLA", url: "/services", icon: Briefcase },
-  { title: "Shift Roster", url: "/shift-roster", icon: CalendarClock },
-  { title: "Reports", url: "/reports", icon: FileText },
-  { title: "Import Data", url: "/import", icon: Upload },
-];
+  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+  if (adminRoles.includes(role)) {
+    items.push({ title: "Admin Center", url: "/admin-center", icon: Settings });
+  }
 
-const customerNavItems = [
-  { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-  { title: "Tickets", url: "/tickets", icon: Ticket },
-  { title: "Projects", url: "/projects", icon: FolderKanban },
-  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
-];
+  const incidentRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];
+  if (incidentRoles.includes(role)) {
+    items.push({ title: "Incidents", url: "/incidents", icon: AlertTriangle });
+  }
+
+  const ticketRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst", "service_desk", "customer"];
+  if (ticketRoles.includes(role)) {
+    items.push({ title: "Tickets", url: "/tickets", icon: Ticket });
+  }
+
+  const projectRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "service_desk", "customer"];
+  if (projectRoles.includes(role)) {
+    items.push({ title: "Projects", url: "/projects", icon: FolderKanban });
+  }
+
+  items.push({ title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen });
+
+  const serviceRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "service_desk"];
+  if (serviceRoles.includes(role)) {
+    items.push({ title: "Services & SLA", url: "/services", icon: Briefcase });
+  }
+
+  const shiftRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];
+  if (shiftRoles.includes(role)) {
+    items.push({ title: "Shift Roster", url: "/shift-roster", icon: CalendarClock });
+  }
+
+  const mssRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst", "service_desk"];
+  if (mssRoles.includes(role)) {
+    items.push({ title: "Reports", url: "/reports", icon: FileText });
+    items.push({ title: "Import Data", url: "/import", icon: Upload });
+  }
+
+  return items;
+}
 
 export function AppSidebar() {
   const [location] = useLocation();
@@ -80,10 +94,8 @@ export function AppSidebar() {
   const { user, logout } = useAuth();
 
   const mssRoles = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
-  const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
   const isMSS = mssRoles.includes(userRole);
-  const isAdmin = adminRoles.includes(userRole);
-  const navItems = isAdmin ? adminNavItems : isMSS ? mssNavItems : customerNavItems;
+  const navItems = getNavItems(userRole);
 
   const currentTenantType = currentTenant?.type || "customer";
   const isViewingMSSP = currentTenantType === "mssp";

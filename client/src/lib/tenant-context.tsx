@@ -18,6 +18,7 @@ interface TenantContextType {
   isMSS: boolean;
   isAdmin: boolean;
   canSwitchRoles: boolean;
+  assignedRoles: string[];
 }
 
 const TenantContext = createContext<TenantContextType>({
@@ -32,12 +33,13 @@ const TenantContext = createContext<TenantContextType>({
   isMSS: false,
   isAdmin: false,
   canSwitchRoles: false,
+  assignedRoles: [],
 });
 
 export function TenantProvider({ children }: { children: ReactNode }) {
   const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
 
-  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean; isMSS?: boolean; isAdmin?: boolean; canSwitchRoles?: boolean }>({
+  const { data: userProfile, isSuccess: profileLoaded } = useQuery<{ role: string; tenantId: number | null; isPlatformAdmin?: boolean; isMSS?: boolean; isAdmin?: boolean; canSwitchRoles?: boolean; assignedRoles?: string[] }>({
     queryKey: ["/api/user/profile"],
   });
 
@@ -91,6 +93,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         isMSS: userProfile?.isMSS || false,
         isAdmin: userProfile?.isAdmin || false,
         canSwitchRoles: userProfile?.canSwitchRoles || false,
+        assignedRoles: userProfile?.assignedRoles || [],
       }}
     >
       {children}

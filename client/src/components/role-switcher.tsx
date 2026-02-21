@@ -77,7 +77,7 @@ const ROLES = [
 ];
 
 export function RoleSwitcher() {
-  const { userRole, isPlatformAdmin, canSwitchRoles } = useTenant();
+  const { userRole, isPlatformAdmin, canSwitchRoles, assignedRoles } = useTenant();
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
 
@@ -87,8 +87,10 @@ export function RoleSwitcher() {
       return res.json();
     },
     onSuccess: (data) => {
-      queryClient.clear();
-      queryClient.invalidateQueries();
+      queryClient.setQueryData(["/api/user/profile"], data);
+      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "/api/user/profile" });
+      queryClient.invalidateQueries({ queryKey: ["/api/tenants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/tenants/hierarchy"] });
       setOpen(false);
       const roleDef = ROLES.find((r) => r.id === data.role);
       toast({
@@ -104,7 +106,12 @@ export function RoleSwitcher() {
     },
   });
 
-  if (!isPlatformAdmin && !canSwitchRoles) return null;
+  const hasMultipleRoles = assignedRoles.length > 1;
+  if (!hasMultipleRoles && !isPlatformAdmin && !canSwitchRoles) return null;
+
+  const availableRoles = isPlatformAdmin || canSwitchRoles
+    ? ROLES
+    : ROLES.filter((r) => assignedRoles.includes(r.id));
 
   const currentRole = ROLES.find((r) => r.id === userRole);
   const CurrentIcon = currentRole?.icon || User;
@@ -128,7 +135,7 @@ export function RoleSwitcher() {
           Switch Role
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {ROLES.map((role) => {
+        {availableRoles.map((role) => {
           const Icon = role.icon;
           const isActive = userRole === role.id;
           return (

@@ -14,6 +14,7 @@ import {
   Trash2,
   Edit,
   Loader2,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,13 +50,14 @@ import {
 } from "@/components/ui/alert-dialog";
 
 const ROLE_OPTIONS = [
-  { value: "customer", label: "Customer", description: "Dashboard & ticket access only" },
-  { value: "security_engineer", label: "Security Engineer", description: "Full security operations access" },
-  { value: "service_desk", label: "Service Desk", description: "Ticket and service management" },
-  { value: "security_analyst", label: "Security Analyst", description: "Incident analysis and response" },
+  { value: "platform_admin", label: "Platform Admin", description: "Full platform control & administration" },
+  { value: "mss_admin", label: "MSS Admin", description: "Full platform & user management" },
   { value: "soc_manager", label: "SOC Manager", description: "SOC operations & user management" },
   { value: "mss_analyst", label: "MSS Analyst", description: "Full MSS operations access" },
-  { value: "mss_admin", label: "MSS Admin", description: "Full platform & user management" },
+  { value: "security_engineer", label: "Security Engineer", description: "Full security operations access" },
+  { value: "security_analyst", label: "Security Analyst", description: "Incident analysis and response" },
+  { value: "service_desk", label: "Service Desk", description: "Ticket and service management" },
+  { value: "customer", label: "Customer", description: "Dashboard & ticket access only" },
 ];
 
 const ROLE_COLORS: Record<string, string> = {
@@ -80,9 +82,9 @@ export default function AdminCenterPage() {
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUserId, setNewUserId] = useState("");
   const [newUserTenantId, setNewUserTenantId] = useState("");
-  const [newUserRole, setNewUserRole] = useState("");
+  const [newUserRoles, setNewUserRoles] = useState<string[]>([]);
   const [editingUser, setEditingUser] = useState<any>(null);
-  const [editRole, setEditRole] = useState("");
+  const [editRoles, setEditRoles] = useState<string[]>([]);
 
   const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
   const isAdmin = adminRoles.includes(userRole);
@@ -97,7 +99,7 @@ export default function AdminCenterPage() {
   });
 
   const createUserMutation = useMutation({
-    mutationFn: async (data: { userId: string; tenantId: number; role: string }) => {
+    mutationFn: async (data: { userId: string; tenantId: number; role: string; assignedRoles: string[] }) => {
       const res = await apiRequest("POST", "/api/admin/users", data);
       return res.json();
     },
@@ -106,7 +108,7 @@ export default function AdminCenterPage() {
       setShowAddUser(false);
       setNewUserId("");
       setNewUserTenantId("");
-      setNewUserRole("");
+      setNewUserRoles([]);
       toast({ title: "User created successfully" });
     },
     onError: (error: any) => {
@@ -220,34 +222,53 @@ export default function AdminCenterPage() {
                   </Select>
                 </div>
                 <div>
-                  <Label>Role</Label>
-                  <Select value={newUserRole} onValueChange={setNewUserRole}>
-                    <SelectTrigger data-testid="select-new-user-role">
-                      <SelectValue placeholder="Select role" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ROLE_OPTIONS.map(r => (
-                        <SelectItem key={r.value} value={r.value}>
-                          <div>
-                            <span className="font-medium">{r.label}</span>
-                            <span className="text-muted-foreground ml-2 text-xs">- {r.description}</span>
+                  <Label>Roles (select one or more)</Label>
+                  <div className="grid grid-cols-1 gap-1.5 mt-2 border rounded-md p-3 max-h-52 overflow-y-auto" data-testid="select-new-user-roles">
+                    {ROLE_OPTIONS.map(r => {
+                      const selected = newUserRoles.includes(r.value);
+                      return (
+                        <button
+                          key={r.value}
+                          type="button"
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-md text-left text-sm transition-colors ${selected ? "bg-primary/10 border border-primary/30" : "hover:bg-muted"}`}
+                          onClick={() => {
+                            setNewUserRoles(prev =>
+                              prev.includes(r.value) ? prev.filter(x => x !== r.value) : [...prev, r.value]
+                            );
+                          }}
+                          data-testid={`checkbox-role-${r.value}`}
+                        >
+                          <div className={`flex items-center justify-center w-4 h-4 rounded border shrink-0 ${selected ? "bg-primary border-primary" : "border-muted-foreground/40"}`}>
+                            {selected && <Check className="w-3 h-3 text-primary-foreground" />}
                           </div>
-                        </SelectItem>
+                          <div className="flex-1 min-w-0">
+                            <span className="font-medium">{r.label}</span>
+                            <span className="text-muted-foreground ml-2 text-[11px]">{r.description}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {newUserRoles.length > 0 && (
+                    <div className="flex gap-1 flex-wrap mt-2">
+                      {newUserRoles.map(r => (
+                        <Badge key={r} variant="secondary" className="text-[10px]">{formatRole(r)}</Badge>
                       ))}
-                    </SelectContent>
-                  </Select>
+                    </div>
+                  )}
                 </div>
                 <Button
                   className="w-full"
                   onClick={() => {
-                    if (!newUserId || !newUserTenantId || !newUserRole) {
-                      toast({ title: "Please fill all fields", variant: "destructive" });
+                    if (!newUserId || !newUserTenantId || newUserRoles.length === 0) {
+                      toast({ title: "Please fill all fields and select at least one role", variant: "destructive" });
                       return;
                     }
                     createUserMutation.mutate({
                       userId: newUserId,
                       tenantId: parseInt(newUserTenantId),
-                      role: newUserRole,
+                      role: newUserRoles[0],
+                      assignedRoles: newUserRoles,
                     });
                   }}
                   disabled={createUserMutation.isPending}
@@ -338,39 +359,66 @@ export default function AdminCenterPage() {
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           {editingUser?.id === u.id ? (
-                            <div className="flex items-center gap-2">
-                              <Select value={editRole} onValueChange={setEditRole}>
-                                <SelectTrigger className="h-8 w-44" data-testid={`select-edit-role-${u.id}`}>
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {ROLE_OPTIONS.map(r => (
-                                    <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                              <Button
-                                size="sm"
-                                onClick={() => updateUserMutation.mutate({ id: u.id, data: { role: editRole } })}
-                                disabled={updateUserMutation.isPending}
-                                data-testid={`button-save-role-${u.id}`}
-                              >
-                                Save
-                              </Button>
-                              <Button size="sm" variant="outline" onClick={() => setEditingUser(null)}>
-                                Cancel
-                              </Button>
+                            <div className="flex flex-col gap-2 w-72">
+                              <div className="grid grid-cols-1 gap-1 border rounded-md p-2 max-h-40 overflow-y-auto" data-testid={`select-edit-roles-${u.id}`}>
+                                {ROLE_OPTIONS.map(r => {
+                                  const selected = editRoles.includes(r.value);
+                                  return (
+                                    <button
+                                      key={r.value}
+                                      type="button"
+                                      className={`flex items-center gap-2 px-2 py-1.5 rounded text-left text-xs transition-colors ${selected ? "bg-primary/10" : "hover:bg-muted"}`}
+                                      onClick={() => {
+                                        setEditRoles(prev =>
+                                          prev.includes(r.value) ? prev.filter(x => x !== r.value) : [...prev, r.value]
+                                        );
+                                      }}
+                                    >
+                                      <div className={`flex items-center justify-center w-3.5 h-3.5 rounded border shrink-0 ${selected ? "bg-primary border-primary" : "border-muted-foreground/40"}`}>
+                                        {selected && <Check className="w-2.5 h-2.5 text-primary-foreground" />}
+                                      </div>
+                                      <span className="font-medium">{r.label}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <div className="flex gap-2">
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    if (editRoles.length === 0) {
+                                      toast({ title: "Select at least one role", variant: "destructive" });
+                                      return;
+                                    }
+                                    updateUserMutation.mutate({
+                                      id: u.id,
+                                      data: { role: editRoles[0], assignedRoles: editRoles },
+                                    });
+                                  }}
+                                  disabled={updateUserMutation.isPending}
+                                  data-testid={`button-save-role-${u.id}`}
+                                >
+                                  Save
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => setEditingUser(null)}>
+                                  Cancel
+                                </Button>
+                              </div>
                             </div>
                           ) : (
                             <>
-                              <Badge className={`text-[10px] ${ROLE_COLORS[u.role] || ""}`} data-testid={`badge-role-${u.id}`}>
-                                {formatRole(u.role)}
-                              </Badge>
+                              <div className="flex gap-1 flex-wrap">
+                                {(u.assignedRoles && u.assignedRoles.length > 0 ? u.assignedRoles : [u.role]).map((r: string) => (
+                                  <Badge key={r} className={`text-[10px] ${ROLE_COLORS[r] || ""}`} data-testid={`badge-role-${u.id}-${r}`}>
+                                    {formatRole(r)}
+                                  </Badge>
+                                ))}
+                              </div>
                               <Button
                                 size="icon"
                                 variant="ghost"
                                 className="h-7 w-7"
-                                onClick={() => { setEditingUser(u); setEditRole(u.role); }}
+                                onClick={() => { setEditingUser(u); setEditRoles(u.assignedRoles && u.assignedRoles.length > 0 ? [...u.assignedRoles] : [u.role]); }}
                                 data-testid={`button-edit-user-${u.id}`}
                               >
                                 <Edit className="w-3.5 h-3.5" />

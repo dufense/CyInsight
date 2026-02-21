@@ -35,6 +35,7 @@ export const tenantUsers = pgTable("tenant_users", {
   userId: varchar("user_id").notNull(),
   tenantId: integer("tenant_id").notNull().references(() => tenants.id),
   role: roleEnum("role").default("customer").notNull(),
+  assignedRoles: text("assigned_roles").array(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

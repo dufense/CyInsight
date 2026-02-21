@@ -69,15 +69,22 @@ Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType
 - AI-powered report generation (Daily Project Status, Weekly Project Summary)
 - Enhanced task cards with assignee, due dates, overdue indicators
 
-### Role Switcher
-- Production role switcher for superadmin and platform_admin users
-- Dropdown in top-right header showing current role with icon
-- 8 roles available: Platform Admin, MSS Admin, SOC Manager, MSS Analyst, Security Engineer, Security Analyst, Service Desk, Customer
-- Each role shows name + description + icon with checkmark for active role
-- Actually updates the user's role in the database via PUT /api/user/role
-- Session-based canSwitchRoles flag allows switching back to platform_admin after switching away
+### Multi-Role Assignment & Role Switcher
+- Users can be assigned multiple roles via Admin Center (assignedRoles array in tenant_users)
+- Role switcher visible to any user with 2+ assigned roles (plus platform_admin/superadmin)
+- Users with multiple roles see only their assigned roles in the switcher
+- Platform admin and superadmin see all 8 roles
+- Dropdown in top-right header showing current role with icon + checkmark for active
+- Actually updates the user's active role in the database via PUT /api/user/role
 - All cached queries cleared on role switch for immediate UI update
 - Tenant context resets currentTenant if it becomes invalid after role change
+
+### Role-Based Navigation
+- Security Analyst: Dashboard, Incidents, Tickets, Shift Roster, Knowledge Base, Reports, Import (NO Projects, NO Services, NO Admin Center)
+- Security Engineer: Dashboard, Incidents, Tickets, Projects, Knowledge Base, Services, Shift Roster, Reports, Import
+- Service Desk: Dashboard, Tickets, Projects, Knowledge Base, Services, Reports, Import
+- Customer: Dashboard, Tickets, Projects, Knowledge Base
+- Admin roles (platform_admin, mss_admin, soc_manager): Full access including Admin Center
 
 ### Superadmin & Tenant Administration
 - Standalone superadmin login (username/password: admin/Admin@123)
