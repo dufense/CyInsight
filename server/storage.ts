@@ -551,7 +551,11 @@ export class DatabaseStorage implements IStorage {
       ? Math.round(allEvents.reduce((s, e) => s + (e.riskScore || 0), 0) / allEvents.filter(e => e.riskScore).length)
       : 0;
     const criticalEvents = allEvents.filter(e => e.severity === "critical").length;
-    const blockedEvents = allEvents.filter(e => e.action === "blocked" || e.action === "dropped").length;
+    const blockedEvents = allEvents.filter(e => {
+      const a = (e.action || "").toLowerCase();
+      if (a.includes("no auto-remediation") || a.includes("no remediation") || a === "no action") return false;
+      return a.includes("remediat") || a.includes("blocked") || a.includes("quarantin") || a.includes("isolat") || a.includes("dropped");
+    }).length;
 
     let mttrHours = 0;
     if (resolvedIncidents > 0) {
@@ -607,12 +611,18 @@ export class DatabaseStorage implements IStorage {
       return m;
     };
 
-    const endpointEvents = allEvents.filter(e => e.eventType === "endpoint");
+    const endpointEvents = allEvents;
     const endpointByThreat = topN(countBy(endpointEvents, "threat"), 10);
     const endpointActions = Object.entries(countBy(endpointEvents, "action")).map(([name, value]) => ({ name, value }));
     const topInfectedHosts = topN(countBy(endpointEvents, "target"), 10);
     const endpointLogSources = topN(cleanLogSource(endpointEvents), 6);
     const endpointThreatVectors = topN(countBy(endpointEvents, "threatVector"), 8);
+    const remediatedCount = allEvents.filter(e => {
+      const a = (e.action || "").toLowerCase();
+      if (a.includes("no auto-remediation") || a.includes("no remediation") || a === "no action") return false;
+      return a.includes("remediat") || a.includes("blocked") || a.includes("quarantin") || a.includes("isolat") || a.includes("dropped");
+    }).length;
+    const noRemediationCount = allEvents.length - remediatedCount;
 
     const casbEvents = allEvents.filter(e => e.eventType === "casb");
     const wafEvents = allEvents.filter(e => e.eventType === "waf");
@@ -679,7 +689,7 @@ export class DatabaseStorage implements IStorage {
       topThreats, topTargets, topAttackers, topVulnerableApps, vulnerabilitySeverity,
       incidentsByThreatVector, mitreTactics, topMitreTechniques, incidentsByAction,
       emailByThreat, topSenders, topRecipients, emailActions, emailSeverity, emailThreatVectors, emailTotal: emailEvents.length,
-      endpointByThreat, endpointActions, topInfectedHosts, endpointLogSources, endpointThreatVectors, endpointTotal: endpointEvents.length,
+      endpointByThreat, endpointActions, topInfectedHosts, endpointLogSources, endpointThreatVectors, endpointTotal: endpointEvents.length, remediatedCount, noRemediationCount,
       casbApps, casbActions, casbTotal: casbEvents.length,
       wafAttackTypes, wafActions, wafTargets, wafTotal: wafEvents.length,
       dlpByThreat, dlpActions, dlpTotal: dlpEvents.length,

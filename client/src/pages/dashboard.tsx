@@ -442,6 +442,7 @@ export default function DashboardPage() {
   });
 
   const [chartTypes, setChartTypes] = useState<Record<string, string>>({});
+  const [endpointTimeline, setEndpointTimeline] = useState<string>("90D");
 
   const ct = (id: string, fallback: string) => chartTypes[id] || fallback;
   const setCt = (id: string, val: string) => setChartTypes(prev => ({ ...prev, [id]: val }));
@@ -492,7 +493,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard title="Total Incidents" value={s.totalIncidents} sub={`${s.openIncidents} open`} icon={AlertTriangle} color={C.red} />
         <MetricCard title="Critical Alerts" value={s.criticalEvents} icon={ShieldAlert} color={C.orange} />
-        <MetricCard title="Events Blocked" value={s.blockedEvents} icon={Ban} color={C.green} />
+        <MetricCard title="Remediated" value={s.blockedEvents} icon={ShieldCheck} color={C.green} />
         <MetricCard title="Risk Score" value={s.avgRiskScore} sub="/100" icon={Gauge} color={s.avgRiskScore >= 70 ? C.red : C.orange} />
         <MetricCard title="MTTR" value={`${s.mttrHours}h`} sub="Mean Time to Resolve" icon={Timer} color={C.blue} />
         <MetricCard title="MTTD" value={`${s.mttdMinutes}m`} sub="Mean Time to Detect" icon={Clock} color={C.purple} />
@@ -781,11 +782,21 @@ export default function DashboardPage() {
 
         {/* Endpoint Protection */}
         <TabsContent value="endpoint" className="space-y-4">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <MetricCard title="Endpoint Events" value={s.endpointTotal} icon={Monitor} color={C.red} />
-            <MetricCard title="Blocked" value={(s.endpointActions || []).find((a: any) => a.name === "blocked")?.value || 0} icon={Ban} color={C.green} />
-            <MetricCard title="Quarantined" value={(s.endpointActions || []).find((a: any) => a.name === "quarantined")?.value || 0} icon={ShieldAlert} color={C.orange} />
-            <MetricCard title="Isolated" value={(s.endpointActions || []).find((a: any) => a.name === "isolated")?.value || 0} icon={XCircle} color={C.purple} />
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 flex-1">
+              <MetricCard title="Endpoint Events" value={s.endpointTotal} icon={Monitor} color={C.red} />
+              <MetricCard title="Remediated" value={s.remediatedCount || 0} icon={ShieldCheck} color={C.green} />
+              <MetricCard title="No Remediation" value={s.noRemediationCount || 0} icon={ShieldOff} color={C.orange} />
+              <MetricCard title="Remediation Rate" value={`${s.endpointTotal > 0 ? Math.round(((s.remediatedCount || 0) / s.endpointTotal) * 100) : 0}%`} icon={Gauge} color={C.blue} />
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border p-1 bg-muted/30" data-testid="endpoint-timeline-selector">
+              {(["24H", "7D", "15D", "30D", "60D", "90D"] as const).map(t => (
+                <button key={t} data-testid={`timeline-${t}`}
+                  onClick={() => setEndpointTimeline(t)}
+                  className={`px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors ${endpointTimeline === t ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground hover:bg-muted"}`}
+                >{t}</button>
+              ))}
+            </div>
           </div>
           <div className="grid lg:grid-cols-3 gap-4">
             <Top10 title="Malware Families" data={s.endpointByThreat} icon={Bug} />
