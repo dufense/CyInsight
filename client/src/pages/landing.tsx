@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Shield, BarChart3, Lock, Zap, ArrowRight, ChevronRight, KeyRound } from "lucide-react";
+import { Shield, BarChart3, Lock, Zap, ChevronRight, User, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -32,28 +32,28 @@ const features = [
 
 export default function LandingPage() {
   const { toast } = useToast();
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
-  const [adminUsername, setAdminUsername] = useState("");
-  const [adminPassword, setAdminPassword] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
-  const handleAdminLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginLoading(true);
     try {
-      const res = await fetch("/api/superadmin/login", {
+      const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ username: adminUsername, password: adminPassword }),
+        body: JSON.stringify({ username, password }),
       });
       if (!res.ok) {
         const data = await res.json();
         toast({ title: "Login failed", description: data.message || "Invalid credentials", variant: "destructive" });
         return;
       }
-      await queryClient.invalidateQueries({ queryKey: ["/api/superadmin/session"] });
-      window.location.reload();
+      await queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/user/profile"] });
+      window.location.href = "/";
     } catch (error) {
       toast({ title: "Login failed", description: "Connection error", variant: "destructive" });
     } finally {
@@ -75,64 +75,8 @@ export default function LandingPage() {
             <a href="#features" className="text-sm text-muted-foreground transition-colors">Features</a>
             <a href="#platform" className="text-sm text-muted-foreground transition-colors">Platform</a>
           </div>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={() => setShowAdminLogin(!showAdminLogin)} data-testid="button-admin-login-toggle">
-              <KeyRound className="w-3.5 h-3.5 mr-1" />
-              Admin
-            </Button>
-            <a href="/api/login">
-              <Button size="sm" data-testid="button-login">
-                Sign In
-                <ArrowRight className="w-3.5 h-3.5 ml-1" />
-              </Button>
-            </a>
-          </div>
         </div>
       </nav>
-
-      {showAdminLogin && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowAdminLogin(false)}>
-          <Card className="w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
-            <CardContent className="p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <div className="flex items-center justify-center w-8 h-8 rounded-md bg-red-600">
-                  <Shield className="w-4 h-4 text-white" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold">Super Admin Login</h2>
-                  <p className="text-[10px] text-muted-foreground">Tenant Administration Access</p>
-                </div>
-              </div>
-              <form onSubmit={handleAdminLogin} className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Username</Label>
-                  <Input
-                    value={adminUsername}
-                    onChange={e => setAdminUsername(e.target.value)}
-                    placeholder="admin"
-                    required
-                    data-testid="input-admin-username"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Password</Label>
-                  <Input
-                    type="password"
-                    value={adminPassword}
-                    onChange={e => setAdminPassword(e.target.value)}
-                    placeholder="Enter password"
-                    required
-                    data-testid="input-admin-password"
-                  />
-                </div>
-                <Button type="submit" className="w-full" size="sm" disabled={loginLoading} data-testid="button-admin-login-submit">
-                  {loginLoading ? "Signing in..." : "Sign In as Super Admin"}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      )}
 
       <section className="pt-32 pb-20 px-6">
         <div className="max-w-7xl mx-auto">
@@ -150,14 +94,6 @@ export default function LandingPage() {
                 The complete platform for Managed Security Service Providers. Orchestrate incidents,
                 generate premium reports, and manage client operations with intelligence.
               </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <a href="/api/login">
-                  <Button size="lg" data-testid="button-get-started">
-                    Get Started
-                    <ChevronRight className="w-4 h-4 ml-1" />
-                  </Button>
-                </a>
-              </div>
               <div className="flex items-center gap-6 pt-2">
                 <div className="flex items-center gap-1.5">
                   <Lock className="w-3.5 h-3.5 text-chart-2" />
@@ -170,37 +106,53 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <div className="relative hidden lg:block">
-              <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-chart-3/5 rounded-2xl" />
-              <Card className="relative">
-                <CardContent className="p-6 space-y-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium">Security Posture Score</span>
-                    <span className="text-2xl font-bold text-chart-2">87</span>
+            <div className="relative">
+              <Card className="relative max-w-md mx-auto">
+                <CardContent className="p-8">
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-primary">
+                      <Shield className="w-5 h-5 text-primary-foreground" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold">Sign In</h2>
+                      <p className="text-xs text-muted-foreground">Access your security dashboard</p>
+                    </div>
                   </div>
-                  <div className="w-full bg-muted rounded-full h-2">
-                    <div className="bg-chart-2 h-2 rounded-full" style={{ width: "87%" }} />
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 pt-2">
-                    {[
-                      { label: "Critical", value: "3", color: "text-destructive" },
-                      { label: "High", value: "12", color: "text-chart-4" },
-                      { label: "Medium", value: "28", color: "text-chart-1" },
-                    ].map(stat => (
-                      <div key={stat.label} className="text-center p-3 rounded-md bg-muted/50">
-                        <div className={`text-lg font-bold ${stat.color}`}>{stat.value}</div>
-                        <div className="text-[10px] text-muted-foreground">{stat.label}</div>
+                  <form onSubmit={handleLogin} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label className="text-sm">Username</Label>
+                      <div className="relative">
+                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          value={username}
+                          onChange={e => setUsername(e.target.value)}
+                          placeholder="Enter username"
+                          className="pl-10"
+                          required
+                          data-testid="input-username"
+                        />
                       </div>
-                    ))}
-                  </div>
-                  <div className="space-y-2 pt-2">
-                    {["Firewall breach attempt detected", "Suspicious login from new geo", "Malware signature matched"].map((item, i) => (
-                      <div key={i} className="flex items-center gap-2 p-2 rounded-md bg-muted/30">
-                        <div className={`w-1.5 h-1.5 rounded-full ${i === 0 ? "bg-destructive" : i === 1 ? "bg-chart-4" : "bg-chart-1"}`} />
-                        <span className="text-xs text-muted-foreground">{item}</span>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm">Password</Label>
+                      <div className="relative">
+                        <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          type="password"
+                          value={password}
+                          onChange={e => setPassword(e.target.value)}
+                          placeholder="Enter password"
+                          className="pl-10"
+                          required
+                          data-testid="input-password"
+                        />
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                    <Button type="submit" className="w-full" disabled={loginLoading} data-testid="button-login-submit">
+                      {loginLoading ? "Signing in..." : "Sign In"}
+                      {!loginLoading && <ChevronRight className="w-4 h-4 ml-1" />}
+                    </Button>
+                  </form>
                 </CardContent>
               </Card>
             </div>
