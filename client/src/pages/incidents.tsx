@@ -181,6 +181,65 @@ export default function IncidentsPage() {
   });
 
   const [enrichProgress, setEnrichProgress] = useState<{ enriched: number; total: number; active: boolean }>({ enriched: 0, total: 0, active: false });
+  const [eventEnrichProgress, setEventEnrichProgress] = useState<{ enriched: number; total: number; active: boolean; currentTenant?: string }>({ enriched: 0, total: 0, active: false });
+
+  const startEventEnrich = async () => {
+    if (eventEnrichProgress.active) return;
+    setEventEnrichProgress({ enriched: 0, total: 0, active: true });
+
+    try {
+      const res = await fetch("/api/ai/enrich-all-events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: "Failed" }));
+        toast({ title: "Event enrichment failed", description: err.message, variant: "destructive" });
+        setEventEnrichProgress(p => ({ ...p, active: false }));
+        return;
+      }
+
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await res.json();
+        toast({ title: "Event Enrichment Complete", description: data.message });
+        setEventEnrichProgress({ enriched: 0, total: 0, active: false });
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) { setEventEnrichProgress(p => ({ ...p, active: false })); return; }
+
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const ev = JSON.parse(line.slice(6));
+              setEventEnrichProgress({ enriched: ev.enriched, total: ev.total, active: !ev.done, currentTenant: ev.currentTenant });
+              if (ev.done) {
+                queryClient.invalidateQueries({ queryKey: ["/api/security-events"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+                toast({ title: "Event Enrichment Complete", description: `Enriched ${ev.enriched} of ${ev.total} events across all tenants` });
+              }
+            } catch {}
+          }
+        }
+      }
+      setEventEnrichProgress(p => ({ ...p, active: false }));
+    } catch (err) {
+      toast({ title: "Event enrichment failed", variant: "destructive" });
+      setEventEnrichProgress(p => ({ ...p, active: false }));
+    }
+  };
 
   const startBulkEnrich = async () => {
     if (enrichProgress.active || !currentTenant?.id) return;
@@ -353,14 +412,27 @@ export default function IncidentsPage() {
             <Button
               size="sm"
               variant="outline"
+              onClick={startEventEnrich}
+              disabled={eventEnrichProgress.active || enrichProgress.active}
+              data-testid="button-enrich-events"
+            >
+              {eventEnrichProgress.active ? (
+                <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Events {eventEnrichProgress.enriched}/{eventEnrichProgress.total}{eventEnrichProgress.currentTenant ? ` (${eventEnrichProgress.currentTenant})` : ""}...</>
+              ) : (
+                <><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Enrich Events</>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={startBulkEnrich}
-              disabled={enrichProgress.active}
+              disabled={enrichProgress.active || eventEnrichProgress.active}
               data-testid="button-bulk-enrich"
             >
               {enrichProgress.active ? (
                 <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Enriching {enrichProgress.enriched}/{enrichProgress.total}...</>
               ) : (
-                <><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Enrich All</>
+                <><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Enrich Incidents</>
               )}
             </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

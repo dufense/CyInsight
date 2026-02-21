@@ -2513,6 +2513,124 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
     }
   });
 
+  app.post("/api/ai/enrich-all-events", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const allTenants = await storage.getTenants();
+      const accessibleTenants = allTenants.filter(t => {
+        if (access.role === "platform_admin") return true;
+        if (access.role === "mss_admin" || access.role === "mss_analyst") {
+          return t.id === access.tenantId || t.parentId === access.tenantId;
+        }
+        return t.id === access.tenantId;
+      });
+
+      const allUnenriched: Array<{ event: any; tenantName: string }> = [];
+      const tenantStats: Record<number, { name: string; total: number; unenriched: number }> = {};
+
+      for (const tenant of accessibleTenants) {
+        const events = await storage.getSecurityEvents(tenant.id);
+        const unenriched = events.filter(e => !e.mitreTactic || !e.mitreTechnique || !e.threatVector || !e.riskScore);
+        tenantStats[tenant.id] = { name: tenant.name, total: events.length, unenriched: unenriched.length };
+        for (const event of unenriched) {
+          allUnenriched.push({ event, tenantName: tenant.name });
+        }
+      }
+
+      if (allUnenriched.length === 0) {
+        return res.json({ message: "All events already enriched across all tenants", enriched: 0, total: 0, tenantStats });
+      }
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      const sendProgress = (enriched: number, total: number, done: boolean, currentTenant?: string, error?: string) => {
+        const data = JSON.stringify({ enriched, total, done, currentTenant, tenantStats, error });
+        res.write(`data: ${data}\n\n`);
+      };
+
+      const EVENT_ENRICH_PROMPT = `You are a senior SOC analyst. Enrich these security events with MITRE ATT&CK mapping, threat classification, and risk assessment.
+
+For each event, provide:
+- mitreTactic: The MITRE ATT&CK tactic (e.g., Initial Access, Execution, Persistence, Privilege Escalation, Defense Evasion, Credential Access, Discovery, Lateral Movement, Collection, Exfiltration, Command and Control, Impact)
+- mitreTechnique: The specific MITRE technique name (e.g., Phishing, Command and Scripting Interpreter, Valid Accounts)
+- threatVector: The attack vector (e.g., Email, Network, Endpoint, Cloud, Web Application, Identity, Insider)
+- riskScore: Risk score 0-100 based on severity and potential impact
+- action: Recommended action (Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action)
+
+Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechnique":"...","threatVector":"...","riskScore":0-100,"action":"..."}]}`;
+
+      const total = allUnenriched.length;
+      let enriched = 0;
+      const BATCH_SIZE = 15;
+
+      sendProgress(0, total, false);
+
+      for (let b = 0; b < allUnenriched.length; b += BATCH_SIZE) {
+        const batch = allUnenriched.slice(b, b + BATCH_SIZE);
+        const currentTenant = batch[0]?.tenantName || "";
+        const summaries = batch.map((item, i) =>
+          `[${i}] EventType: ${item.event.eventType}\nSeverity: ${item.event.severity}\nThreat: ${item.event.threat || ""}\nTarget: ${item.event.target || ""}\nAttacker: ${item.event.attacker || ""}\nAsset: ${item.event.asset || ""}\nDescription: ${(item.event.description || "").substring(0, 250)}\nSource: ${item.event.sourceType || ""}\nProtocol: ${item.event.protocol || ""}\nCountry: ${item.event.country || ""}`
+        ).join("\n---\n");
+
+        try {
+          const aiRes = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            temperature: 0.2,
+            messages: [{ role: "system", content: EVENT_ENRICH_PROMPT }, { role: "user", content: summaries }],
+            response_format: { type: "json_object" },
+          });
+
+          const content = aiRes.choices[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content);
+            const arr = Array.isArray(parsed.results || parsed) ? (parsed.results || parsed) : [];
+            for (const r of arr) {
+              const idx = r.index ?? r.i;
+              if (idx === undefined || idx >= batch.length) continue;
+              const item = batch[idx];
+              const updateData: any = {};
+              if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
+              if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
+              if (r.threatVector) updateData.threatVector = r.threatVector;
+              if (r.riskScore !== undefined) updateData.riskScore = Math.min(100, Math.max(0, r.riskScore));
+              if (r.action) updateData.action = r.action;
+
+              if (Object.keys(updateData).length > 0) {
+                try {
+                  await storage.updateSecurityEvent(item.event.id, updateData);
+                  enriched++;
+                  if (tenantStats[item.event.tenantId]) {
+                    tenantStats[item.event.tenantId].unenriched = Math.max(0, tenantStats[item.event.tenantId].unenriched - 1);
+                  }
+                } catch {}
+              }
+            }
+          }
+        } catch (aiErr: any) {
+          console.error("AI event enrich batch error:", aiErr);
+          sendProgress(enriched, total, false, currentTenant, `Batch error: ${aiErr.message?.substring(0, 100)}`);
+        }
+
+        sendProgress(enriched, total, false, currentTenant);
+      }
+
+      sendProgress(enriched, total, true);
+      res.end();
+    } catch (error: any) {
+      if (!res.headersSent) {
+        res.status(error.status || 500).json({ message: error.message || "Failed to enrich events" });
+      } else {
+        res.write(`data: ${JSON.stringify({ enriched: 0, total: 0, done: true, error: error.message })}\n\n`);
+        res.end();
+      }
+    }
+  });
+
   app.post("/api/ai/enrich-incident/:id", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
