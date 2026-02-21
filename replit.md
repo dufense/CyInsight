@@ -1,211 +1,67 @@
 # SecureOps - MSSP Reporting Platform
 
 ## Overview
-Multi-level multi-tenant MSSP (Managed Security Service Provider) platform for managing security operations across client organizations. Features hierarchical tenant architecture (MSSP → Customers), incident orchestration, AI-powered report generation, support ticketing with SLA tracking and AI-powered suggestions, project management with Kanban boards and AI risk assessment/task breakdown, Knowledge Base with document management (8 categories), enterprise-grade CISO-level security dashboards, Solutions & Services management with MSA/SLA tracking, shift roster management for Implementation and MSS teams, and automated project reporting.
+SecureOps is a multi-level, multi-tenant Managed Security Service Provider (MSSP) platform designed to streamline security operations for client organizations. It offers a hierarchical tenant architecture (MSSP to Customers), incident orchestration, AI-powered report generation, and robust support ticketing with SLA tracking and AI suggestions. The platform also includes project management with Kanban boards and AI risk assessment, a comprehensive Knowledge Base with document management, and enterprise-grade CISO-level security dashboards. Additionally, it provides solutions & services management with MSA/SLA tracking, shift roster management for security teams, and automated project reporting. The business vision is to provide a comprehensive, AI-enhanced security management solution that empowers MSSPs to efficiently manage security for their diverse client base, offering significant market potential in the cybersecurity services sector.
 
-## Architecture
-- **Frontend**: React + Vite + TailwindCSS + shadcn/ui + Recharts + wouter routing
-- **Backend**: Express.js with session-based auth (Replit Auth)
-- **Database**: PostgreSQL (Neon) with Drizzle ORM
-- **AI**: OpenAI via Replit AI Integrations for report generation, ticket suggestions, project risk assessment, task breakdown, document content generation
-- **Auth**: Replit OIDC Auth with role-based access control
+## User Preferences
+- All dashboard charts should support type switching (bar/line/area/pie) via ChartTypeSelector buttons in card headers.
+- Interactive elements like clickable legends, enhanced tooltips, and hover effects are preferred for charts.
+- Incident enrichment should include MITRE ATT&CK (tactic, technique ID, technique name) and Lockheed Martin Cyber Kill Chain phase mapping, with visual indicators for progress and classification (True Positive/False Positive).
+- Confidence scoring for incidents (0-100) with a progress bar visualization is desired.
+- A 90-day alert data retention indicator showing days old and retention status is important.
+- Framework badges (MITRE, LMKC, TP/FP) should be visible on incident table rows.
+- Stats bars showing TP/FP/Unclassified counts and average confidence are preferred.
+- Inline editing for MSS users on all enrichment fields is required.
+- Tenant industry field should be a dropdown with 20 standard options (e.g., Banking, Healthcare, Technology).
+- Quick TP/FP classification buttons directly on incident table rows for MSS users are needed, with toggle behavior to unset classification. Non-MSS users should see read-only badges.
+- IOC data should be stored per incident via AI enrichment, and incident details should include an IOC reputation panel with indicator type, value, reputation, and country, using color-coded badges (malicious, suspicious, clean).
+- A "Bulk AI Enrich All" button on the incidents page for MSS users is desired, capable of enriching up to 100 unenriched incidents in batches of 15, adding MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, and IOC reputation.
+- Cross-source event correlation is a key feature, identifying IOCs appearing in 2+ event types and returning the top 20 correlated indicators with event counts, severity, data source types, and timestamps.
+- Service definitions should include MSA tracking (start/end dates, contract value) and SLA definitions (response time, resolution time, uptime targets). An SLA Dashboard with compliance indicators (green/yellow/red) is necessary.
+- Two team types for shift roster management: Implementation (Ticketing & Projects) and MSS (Incidents & Dashboards), with visual shift type indicators and color coding.
+- Enhanced ticketing should feature an activity dashboard, SLA compliance indicators, priority distribution charts, and service linkage for SLA tracking.
+- Enhanced project management should include an activity dashboard, per-project progress bars, AI-powered report generation (Daily Project Status, Weekly Project Summary), and enhanced task cards.
+- Users should be assignable to multiple roles, with a role switcher visible to users with 2+ assigned roles. The active role should be updated in the database, and cached queries cleared on role switch.
+- Role-based navigation should be strictly enforced, ensuring users only see relevant sections based on their assigned roles.
+- A dedicated standalone Admin Portal at `/admin` is required for multi-tenancy management, accessible by specific admin roles. It should include tabs for Overview, Tenants, Users, and Licenses, with full CRUD capabilities and search.
 
-## Key Files
-- `shared/schema.ts` - Database schema (tenants, incidents, tickets, projects, tasks, reports, security_events, services, sla_definitions, team_members, shift_rosters, documents, ticket_feedback, ticket_attachments, superadmins, licenses)
-- `server/routes.ts` - API routes with tenant access control middleware
-- `server/storage.ts` - Database storage layer (IStorage interface) with CRUD for all entities
-- `server/seed.ts` - Disabled (production-ready, no seed data)
-- `client/src/App.tsx` - Main app with routing and auth flow
-- `client/src/components/app-sidebar.tsx` - Sidebar navigation with hierarchical tenant selector and role-based menu
-- `client/src/lib/tenant-context.tsx` - Multi-tenant context provider with hierarchy support, isMSS, isAdmin flags
-- `client/src/pages/dashboard.tsx` - CISO-grade dashboard with 9 tabs (incl. Asset Inventory)
-- `client/src/pages/tickets.tsx` - Ticketing with SLA indicators, activity dashboard, detail dialog with comments/attachments/feedback
-- `client/src/pages/projects.tsx` - Project management with activity dashboard, report generation, read-only mode for customers
-- `client/src/pages/knowledge-base.tsx` - Knowledge Base with document management and AI content generation
-- `client/src/pages/services.tsx` - Solutions & Services management with SLA tracking
-- `client/src/pages/shift-roster.tsx` - Shift roster management for Implementation and MSS teams
-- `client/src/pages/reports.tsx` - AI-powered report generation with 13 report types
-- `client/src/pages/import.tsx` - Data import (CSV/Excel/PDF) with AI enrichment and column detection
-- `client/src/pages/admin-portal.tsx` - Dedicated Admin Portal with standalone layout (Overview, Tenants, Users, Licenses tabs)
-- `client/src/pages/admin-center.tsx` - (Legacy) Admin Center for tenant user management
+## System Architecture
+The platform utilizes a modern web stack: React with Vite, TailwindCSS, shadcn/ui, and Recharts for the frontend, and Express.js for the backend. Data persistence is handled by PostgreSQL (Neon) with Drizzle ORM. AI capabilities are integrated via OpenAI through Replit AI Integrations, powering features like report generation, ticket suggestions, project risk assessment, task breakdown, and document content generation. Authentication is managed by Replit OIDC Auth with robust role-based access control.
 
-## Security Events Architecture
-10 event types: email, endpoint, vulnerability, casb, waf, dlp, sse, network, identity, cloud
-Enriched metadata: threatVector, mitreTactic, mitreTechnique, action, sourceType, logSource, sender, recipient, protocol, country, riskScore
+**UI/UX Decisions:**
+- **Color Schemes:** Uses shadcn/ui for component styling, implying a modern, accessible, and customizable design system.
+- **Templates:** Standardized layouts for dashboards, tables, and forms across the application.
+- **Design Approaches:** Emphasis on intuitive navigation, data visualization through interactive charts (bar, line, area, pie with type switching), and clear indicators for status and compliance (e.g., SLA compliance, confidence scores, reputation badges).
+- **Multi-tenant context provider** (`client/src/lib/tenant-context.tsx`) supports hierarchical tenant selection and role-based feature access.
+- **Admin Portal** (`client/src/pages/admin-portal.tsx`) is a standalone application with a distinct layout for managing platform-level entities, ensuring clear separation from operational dashboards.
 
-## Dashboard Tabs (with switchable chart types)
-All dashboard charts support type switching (bar/line/area/pie) via ChartTypeSelector buttons in card headers.
-1. **SOC Overview** - Risk/compliance gauges, incident trends, severity breakdown, recent incidents
-2. **Threat Intel** - MITRE ATT&CK radar, threat vectors, top threats/targets/attackers, attack origins
-3. **Email Security** - Email threats, top senders/recipients, action distribution, threat vectors
-4. **Endpoint** - Malware families, infected hosts, EDR actions, threat vector icons
-5. **Cloud & WAF** - WAF attacks, CASB shadow IT apps, DLP violations, cloud misconfigs
-6. **Network & Identity** - Network threats, identity attacks, protocols, geographic origins
-7. **Log Sources** - Event ingestion trends, log source health, source type distribution, EPS
-8. **Vulnerabilities** - Vulnerable apps, severity distribution, event severity
+**Technical Implementations:**
+- **Database Schema:** Defined in `shared/schema.ts`, covering a wide array of entities from tenants and incidents to team members and licenses.
+- **API Routes:** Implemented in `server/routes.ts` with tenant access control middleware.
+- **Storage Layer:** Abstracted through an `IStorage` interface in `server/storage.ts`, providing CRUD operations for all entities.
+- **Security Events:** Supports 10 event types (email, endpoint, vulnerability, etc.) with enriched metadata like `threatVector`, `mitreTactic`, `riskScore`.
+- **Dashboard Charts:** Reusable `FlexChart` component for dynamic chart rendering with interactive features.
+- **Incident Enrichment:** AI-driven enrichment for MITRE ATT&CK, Kill Chain, confidence scoring, and classification. IOC data is stored in a JSONB column (`iocData`) for flexible storage.
+- **Cross-Source Event Correlation:** Dedicated API endpoint (`POST /api/ai/correlate-events`) for advanced threat detection.
+- **Multi-Role Assignment & Role Switcher:** Dynamic role management with immediate UI updates upon role change by clearing cached queries.
+- **Access Control:** Implemented with `assertTenantAccess` middleware on the server-side and role-based navigation on the client-side.
+- **Data Import:** Supports CSV/Excel/PDF with AI enrichment and column detection.
+- **Database Migrations:** Utilizes `drizzle-kit generate` and `drizzle-orm migrate` for safe, incremental schema updates, automatically run on server startup.
 
-## New Features (Feb 2026 - Latest)
-### Interactive Dashboard Charts
-- All dashboard charts support type switching: bar, line, area, pie via ChartTypeSelector icons
-- FlexChart reusable component renders data in any chart type with animations
-- Clickable legends to show/hide series, enhanced tooltips, hover effects
-- Each chart widget has a small icon toolbar in the card header for type switching
+**Feature Specifications:**
+- **Multi-Level Tenant Hierarchy:** `tenants` table with `type` (mssp/customer) and `parentId` for hierarchical relationships.
+- **Roles:** `platform_admin`, `mss_admin`, `mss_analyst`, `customer`, and others, each with specific access privileges.
+- **Reports:** 13 report types, including `executive_summary`, `endpoint`, `email`, `vulnerability`, etc., generated via AI.
+- **AI Integrations:** OpenAI for various functionalities including report generation, ticket suggestions, project risk assessment, and document content creation.
 
-### Incident Enrichment (MITRE ATT&CK & Kill Chain)
-- MITRE ATT&CK enrichment: tactic, technique ID, technique name per incident
-- Lockheed Martin Cyber Kill Chain phase mapping with visual progress indicator
-- True Positive / False Positive classification with color-coded toggles
-- Confidence scoring (0-100) with progress bar visualization
-- 90-day alert data retention indicator showing days old and retention status
-- Framework badges on incident table rows (MITRE, LMKC, TP/FP)
-- Stats bar showing TP/FP/Unclassified counts and average confidence
-- Inline editing for MSS users on all enrichment fields
-
-### Industry Dropdown Standardization
-- Tenant industry field is now a dropdown with 20 standard options (Banking, Healthcare, Technology, etc.)
-- Applied to both Add and Edit tenant dialogs in Admin Portal
-
-### Data Cleanup
-- All dummy/test data cleared from database for fresh real data ingestion
-
-## Previous Features (Feb 2026)
-### Solutions & Services Management
-- Service definitions with MSA tracking (start/end dates, contract value)
-- SLA definitions per service (response time, resolution time, uptime targets)
-- SLA Dashboard with compliance indicators (green/yellow/red)
-- Service types: managed_soc, vulnerability_management, email_security, endpoint_protection, cloud_security, compliance_advisory, incident_response, penetration_testing
-
-### Shift Roster Management
-- Two team types: Implementation (Ticketing & Projects) and MSS (Incidents & Dashboards)
-- Team member management with active/inactive status
-- Shift scheduling: day, night, swing, on-call shifts
-- Visual shift type indicators with color coding
-
-### Enhanced Ticketing
-- Activity dashboard with stats (total, open, in progress, waiting, resolved)
-- SLA compliance indicator with visual percentage
-- Priority distribution donut chart
-- Service linkage for SLA tracking
-- SLA breach indicators on ticket cards
-- Service filter dropdown
-
-### Enhanced Project Management
-- Activity dashboard with cross-project stats
-- Per-project progress bars (tasks done/total)
-- AI-powered report generation (Daily Project Status, Weekly Project Summary)
-- Enhanced task cards with assignee, due dates, overdue indicators
-
-### Multi-Role Assignment & Role Switcher
-- Users can be assigned multiple roles via Admin Center (assignedRoles array in tenant_users)
-- Role switcher visible to any user with 2+ assigned roles (plus platform_admin/superadmin)
-- Users with multiple roles see only their assigned roles in the switcher
-- Platform admin and superadmin see all 8 roles
-- Dropdown in top-right header showing current role with icon + checkmark for active
-- Actually updates the user's active role in the database via PUT /api/user/role
-- All cached queries cleared on role switch for immediate UI update
-- Tenant context resets currentTenant if it becomes invalid after role change
-
-### Role-Based Navigation
-- Security Analyst: Dashboard, Incidents, Tickets, Shift Roster, Knowledge Base, Reports, Import (NO Projects, NO Services, NO Admin Center)
-- Security Engineer: Dashboard, Incidents, Tickets, Projects, Knowledge Base, Services, Shift Roster, Reports, Import
-- Service Desk: Dashboard, Tickets, Projects, Knowledge Base, Services, Reports, Import
-- Customer: Dashboard, Tickets, Projects, Knowledge Base
-- Admin roles (platform_admin, mss_admin, soc_manager): Full access including Admin Center
-
-### Admin Portal (Standalone Multi-Tenancy Management)
-- Dedicated standalone Admin Portal at `/admin` with its own header bar (separate from sidebar)
-- Header shows SecureOps branding, "Go to SecureOps" button, theme toggle, logout
-- Accessible to superadmin (via login), platform_admin, mss_admin, and soc_manager
-- Superadmin login still at root with username/password: admin/Admin@123
-- 4 tabs with clean table-based UI:
-  - Overview: Platform stats cards (6 metrics) + MSSP hierarchy view
-  - Tenants: Full CRUD with table layout (Name, Type, Industry, Parent, Status, Created, Actions)
-  - Users: User management with multi-role assignment, role badges, search
-  - Licenses: License CRUD with table layout (Tenant, Type, Users, Status, Dates, Actions)
-- All tables have search, add/edit/delete with confirmation dialogs
-
-## Database Tables
-- `superadmins` - Superadmin credentials (username, password_hash, display_name)
-- `licenses` - Tenant license management (tenant_id, license_type, max_users, status, dates)
-- `tenants` - Organizations (MSSP/customer hierarchy)
-- `tenant_users` - User-tenant-role mappings
-- `incidents` - Security incidents
-- `tickets` - Support tickets with SLA fields (serviceId, firstResponseAt, slaBreached)
-- `ticket_comments` - Ticket discussion threads
-- `projects` - Project management
-- `tasks` - Kanban tasks with assignee and due dates
-- `reports` - Generated reports
-- `security_events` - Security event telemetry
-- `services` - Solutions & services with MSA tracking
-- `sla_definitions` - SLA targets per service per priority
-- `team_members` - Team member profiles (implementation/mss teams)
-- `shift_rosters` - Shift schedule entries
-- `documents` - Knowledge Base documents with categories and visibility controls
-
-## Report Types
-executive_summary, endpoint, email, vulnerability, compliance, threat_intelligence, incident_response, cloud_security
-
-## Multi-Level Tenant Hierarchy
-Tenants table has `type` field (mssp/customer) and `parentId` (nullable, references parent MSSP).
-First user auto-provisions as platform_admin with auto-created MSSP tenant.
-Customer tenants can be created via POST /api/tenants by MSS admins.
-
-## Roles
-- `platform_admin` - Super-admin with full visibility across ALL MSSPs and their customers, can create MSSP tenants
-- `mss_admin` - Full platform access, can manage MSSP and all child customer tenants
-- `mss_analyst` - Operational access to incidents, tickets, projects, reports within MSSP scope
-- `customer` - Dashboard-only view with ticket submission, limited to own tenant
-
-## API Routes
-### Superadmin Auth
-- `POST /api/superadmin/login` - Superadmin login (username/password)
-- `GET /api/superadmin/session` - Check superadmin session
-- `POST /api/superadmin/logout` - Superadmin logout
-### Tenant Admin (superadmin/platform_admin only)
-- `GET /api/tenant-admin/stats` - Platform statistics
-- `GET/POST/PUT /api/tenant-admin/tenants` - Tenant CRUD
-- `GET/POST /api/tenant-admin/tenant-users` - Tenant user management
-- `GET/POST/PUT/DELETE /api/tenant-admin/licenses` - License management
-### Regular API
-- `GET /api/tenants` - List accessible tenants
-- `POST /api/tenants` - Create customer tenant (MSS role)
-- `GET /api/tenants/hierarchy` - Hierarchical tenant structure
-- `GET /api/user/profile` - User role and tenant info (auto-provisions first user)
-- `PUT /api/user/role` - Switch user role (superadmin/platform_admin only)
-- `GET /api/dashboard/:tenantId` - Enhanced dashboard statistics
-- `GET/POST/PATCH /api/incidents` - Incident CRUD
-- `GET/POST/PATCH /api/tickets` - Ticket CRUD with SLA fields
-- `GET/POST/PATCH /api/projects` - Project CRUD
-- `GET/POST/PATCH /api/tasks` - Task CRUD
-- `GET/POST/PATCH /api/services` - Service CRUD (MSS role)
-- `GET/POST /api/sla-definitions` - SLA definition management
-- `DELETE /api/sla-definitions/:id` - Delete SLA definition
-- `GET/POST/PATCH /api/team-members` - Team member CRUD
-- `GET/POST/PATCH/DELETE /api/shift-rosters` - Shift roster CRUD
-- `GET /api/reports/:tenantId` - List reports
-- `POST /api/reports/generate` - AI-powered report generation
-- `GET/POST/PATCH/DELETE /api/documents` - Document CRUD with tenant-scoped access
-- `POST /api/ai/generate-document` - AI-powered document content generation
-- `POST /api/ai/ticket-suggest` - AI ticket auto-categorize and priority suggestion
-- `POST /api/ai/ticket-response` - AI-generated ticket response
-- `POST /api/ai/project-risk` - AI project risk assessment
-- `POST /api/ai/task-breakdown` - AI task breakdown from goal
-- `POST /api/import` - File import (CSV/Excel/PDF)
-- `GET /api/reports/download/:id` - Download report file
-
-## Access Control
-- MSS users can access their MSSP and all child customer tenants
-- Customer users can only access their own tenant
-- Tenant access validated server-side via assertTenantAccess middleware
-- Input validation via Zod schemas on all create/update endpoints
-
-## Database Migrations
-- Uses drizzle-kit generate + drizzle-orm migrate for safe incremental migrations
-- Migration runner (`server/migrate.ts`) runs automatically on server startup
-- Detects existing databases and creates baseline migration journal entry
-- New schema changes should use `npx drizzle-kit generate` to create migration files
-- Migration files are in `migrations/` directory with journal in `migrations/meta/`
-- NEVER use `db:push` as it can drop and recreate tables, causing data loss
-
-## Running
-Workflow "Start application" runs `npm run dev` which starts Express + Vite on port 5000.
+## External Dependencies
+- **Frontend Framework:** React
+- **Build Tool:** Vite
+- **Styling:** TailwindCSS, shadcn/ui
+- **Charting Library:** Recharts
+- **Routing:** wouter
+- **Backend Framework:** Express.js
+- **Database:** PostgreSQL (Neon)
+- **ORM:** Drizzle ORM
+- **Artificial Intelligence:** OpenAI (via Replit AI Integrations)
+- **Authentication:** Replit OIDC Auth

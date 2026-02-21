@@ -571,7 +571,15 @@ export async function registerRoutes(
     try {
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
-      const incidentsList = await storage.getIncidents(tenantId);
+      const tenant = await storage.getTenant(tenantId);
+      let incidentsList;
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const tenantIds = [tenantId, ...children.map(c => c.id)];
+        incidentsList = await storage.getIncidentsForTenants(tenantIds);
+      } else {
+        incidentsList = await storage.getIncidents(tenantId);
+      }
       res.json(incidentsList);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch incidents" });
@@ -628,7 +636,15 @@ export async function registerRoutes(
     try {
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
-      const ticketsList = await storage.getTickets(tenantId);
+      const tenant = await storage.getTenant(tenantId);
+      let ticketsList;
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const tenantIds = [tenantId, ...children.map(c => c.id)];
+        ticketsList = await storage.getTicketsForTenants(tenantIds);
+      } else {
+        ticketsList = await storage.getTickets(tenantId);
+      }
       res.json(ticketsList);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch tickets" });
@@ -2099,10 +2115,83 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         }
       }
 
+      let aiEnriched = 0;
+      if (incidentsCreated > 0) {
+        try {
+          const newIncidents = await storage.getIncidents(tid);
+          const unenriched = newIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase).slice(0, 200);
+
+          for (let b = 0; b < unenriched.length; b += 20) {
+            const batch = unenriched.slice(b, b + 20);
+            const summaries = batch.map((inc, i) => `[${i}] Title: ${inc.title}\nSeverity: ${inc.severity}\nDescription: ${(inc.description || "").substring(0, 200)}\nSource: ${inc.source || ""}\nCategory: ${inc.category || ""}\nAssets: ${inc.affectedAssets || ""}`).join("\n---\n");
+
+            try {
+              const aiRes = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                temperature: 0.2,
+                messages: [{
+                  role: "system",
+                  content: `You are a SOC analyst. For each incident, determine:
+1. mitreTactic: The MITRE ATT&CK tactic (e.g., Initial Access, Execution, Persistence, Privilege Escalation, Defense Evasion, Credential Access, Discovery, Lateral Movement, Collection, Command and Control, Exfiltration, Impact)
+2. mitreTechniqueId: The technique ID (e.g., T1566, T1059, T1078)
+3. mitreTechnique: The technique name (e.g., Phishing, Command and Scripting Interpreter)
+4. killChainPhase: Lockheed Martin Kill Chain phase (reconnaissance, weaponization, delivery, exploitation, installation, command_and_control, actions_on_objectives)
+5. confidenceScore: 0-100 confidence in classification
+6. classification: "true_positive", "false_positive", or "suspicious"
+7. iocReputation: For any file hashes, domains, URLs, IPs found - assess reputation (malicious/suspicious/clean/unknown), domain age estimation, geo-location if IP found, DMARC/SPF likelihood
+Return JSON array matching incident indices. Example: [{"index":0,"mitreTactic":"Initial Access","mitreTechniqueId":"T1566","mitreTechnique":"Phishing","killChainPhase":"delivery","confidenceScore":85,"classification":"true_positive","iocReputation":{"indicators":[{"type":"domain","value":"evil.com","reputation":"malicious","country":"RU","domainAge":"30 days"}]}}]`
+                }, {
+                  role: "user",
+                  content: summaries
+                }],
+                response_format: { type: "json_object" },
+              });
+
+              const content = aiRes.choices[0]?.message?.content;
+              if (content) {
+                const parsed = JSON.parse(content);
+                const results = parsed.results || parsed.enrichments || parsed;
+                const arr = Array.isArray(results) ? results : [];
+
+                for (const r of arr) {
+                  const idx = r.index ?? r.i;
+                  if (idx === undefined || idx >= batch.length) continue;
+                  const inc = batch[idx];
+                  const updateData: any = {};
+                  if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
+                  if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
+                  if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
+                  if (r.killChainPhase) updateData.killChainPhase = r.killChainPhase;
+                  if (r.confidenceScore !== undefined) updateData.confidenceScore = Math.min(100, Math.max(0, r.confidenceScore));
+                  if (r.classification) {
+                    updateData.classification = r.classification;
+                    updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
+                  }
+                  if (r.iocReputation) {
+                    updateData.iocData = r.iocReputation;
+                  }
+                  if (Object.keys(updateData).length > 0) {
+                    try {
+                      await storage.updateIncident(inc.id, updateData);
+                      aiEnriched++;
+                    } catch {}
+                  }
+                }
+              }
+            } catch (aiErr) {
+              console.error("AI enrichment batch error:", aiErr);
+            }
+          }
+        } catch (enrichErr) {
+          console.error("AI enrichment error:", enrichErr);
+        }
+      }
+
       res.json({
-        message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events`,
+        message: `Imported ${incidentsCreated} incidents and ${eventsCreated} security events. AI enriched ${aiEnriched} incidents with MITRE/Kill Chain/IOC data.`,
         incidentsCreated,
         eventsCreated,
+        aiEnriched,
         imported: incidentsCreated + eventsCreated,
         total: rows.length,
         skipped: skippedRows,
@@ -2111,6 +2200,116 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
     } catch (error: any) {
       console.error("Import error:", error);
       res.status(error.status || 500).json({ message: error.message || "Failed to import data" });
+    }
+  });
+
+  app.post("/api/ai/enrich-incidents", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      await assertTenantAccess(req, tenantId);
+
+      const allIncidents = await storage.getIncidents(tenantId);
+      const unenriched = allIncidents.filter(inc => !inc.mitreTactic && !inc.killChainPhase).slice(0, 100);
+      if (unenriched.length === 0) return res.json({ message: "All incidents already enriched", enriched: 0 });
+
+      let enriched = 0;
+      for (let b = 0; b < unenriched.length; b += 15) {
+        const batch = unenriched.slice(b, b + 15);
+        const summaries = batch.map((inc, i) => `[${i}] Title: ${inc.title}\nSeverity: ${inc.severity}\nDescription: ${(inc.description || "").substring(0, 250)}\nSource: ${inc.source || ""}\nAssets: ${inc.affectedAssets || ""}`).join("\n---\n");
+
+        try {
+          const aiRes = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            temperature: 0.2,
+            messages: [{
+              role: "system",
+              content: `You are a senior SOC analyst. For each incident, provide MITRE ATT&CK mapping, Kill Chain phase, confidence score, classification, and IOC reputation analysis.
+Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"delivery|exploitation|...","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX","domainAge":"...","dmarcStatus":"pass|fail|none","spfStatus":"pass|fail|none"}]}}]}`
+            }, { role: "user", content: summaries }],
+            response_format: { type: "json_object" },
+          });
+
+          const content = aiRes.choices[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content);
+            const arr = Array.isArray(parsed.results || parsed) ? (parsed.results || parsed) : [];
+            for (const r of arr) {
+              const idx = r.index ?? r.i;
+              if (idx === undefined || idx >= batch.length) continue;
+              const updateData: any = {};
+              if (r.mitreTactic) updateData.mitreTactic = r.mitreTactic;
+              if (r.mitreTechniqueId) updateData.mitreTechniqueId = r.mitreTechniqueId;
+              if (r.mitreTechnique) updateData.mitreTechnique = r.mitreTechnique;
+              if (r.killChainPhase) updateData.killChainPhase = r.killChainPhase;
+              if (r.confidenceScore !== undefined) updateData.confidenceScore = Math.min(100, Math.max(0, r.confidenceScore));
+              if (r.classification) {
+                updateData.classification = r.classification;
+                updateData.isTruePositive = r.classification === "true_positive" ? true : r.classification === "false_positive" ? false : null;
+              }
+              if (r.iocReputation) updateData.iocData = r.iocReputation;
+              if (Object.keys(updateData).length > 0) {
+                try { await storage.updateIncident(batch[idx].id, updateData); enriched++; } catch {}
+              }
+            }
+          }
+        } catch (aiErr) {
+          console.error("AI enrich batch error:", aiErr);
+        }
+      }
+
+      res.json({ message: `Enriched ${enriched} incidents with MITRE/Kill Chain/IOC data`, enriched });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to enrich incidents" });
+    }
+  });
+
+  app.post("/api/ai/correlate-events", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      await assertTenantAccess(req, tenantId);
+
+      const events = await storage.getSecurityEvents(tenantId);
+      if (events.length < 2) return res.json({ message: "Not enough events to correlate", correlations: [] });
+
+      const iocMap: Record<string, { events: any[], types: Set<string> }> = {};
+      for (const evt of events) {
+        const indicators: string[] = [];
+        if (evt.target) indicators.push(evt.target);
+        if (evt.attacker) indicators.push(evt.attacker);
+        if (evt.sender) indicators.push(evt.sender);
+        if (evt.asset) evt.asset.split(",").forEach(a => indicators.push(a.trim()));
+        for (const ind of indicators) {
+          if (!ind || ind.length < 3) continue;
+          const key = ind.toLowerCase().trim();
+          if (!iocMap[key]) iocMap[key] = { events: [], types: new Set() };
+          iocMap[key].events.push(evt);
+          iocMap[key].types.add(evt.eventType);
+        }
+      }
+
+      const correlations = Object.entries(iocMap)
+        .filter(([_, v]) => v.types.size >= 2 && v.events.length >= 2)
+        .sort((a, b) => b[1].events.length - a[1].events.length)
+        .slice(0, 20)
+        .map(([indicator, data]) => ({
+          indicator,
+          eventCount: data.events.length,
+          dataSourceTypes: Array.from(data.types),
+          severities: data.events.map(e => e.severity),
+          highestSeverity: data.events.some(e => e.severity === "critical") ? "critical" : data.events.some(e => e.severity === "high") ? "high" : "medium",
+          firstSeen: data.events.reduce((min, e) => e.occurredAt < min ? e.occurredAt : min, data.events[0].occurredAt),
+          lastSeen: data.events.reduce((max, e) => e.occurredAt > max ? e.occurredAt : max, data.events[0].occurredAt),
+        }));
+
+      res.json({ correlations, totalIndicators: Object.keys(iocMap).length, crossSourceCount: correlations.length });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to correlate events" });
     }
   });
 
@@ -2182,8 +2381,17 @@ Provide a JSON response with:
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
 
-      const events = await storage.getSecurityEvents(tenantId);
-      const incidents = await storage.getIncidents(tenantId);
+      const tenant = await storage.getTenant(tenantId);
+      let events, incidents;
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const tenantIds = [tenantId, ...children.map(c => c.id)];
+        events = await storage.getSecurityEventsForTenants(tenantIds);
+        incidents = await storage.getIncidentsForTenants(tenantIds);
+      } else {
+        events = await storage.getSecurityEvents(tenantId);
+        incidents = await storage.getIncidents(tenantId);
+      }
 
       const cleanLabel = (label: string): string => {
         let cleaned = label.replace(/^\[?'?/, "").replace(/'?\]?$/, "").trim();
@@ -2358,8 +2566,18 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
 
-      const events = await storage.getSecurityEvents(tenantId);
-      const incidents = await storage.getIncidents(tenantId);
+      const tenant = await storage.getTenant(tenantId);
+      let events, incidentsList;
+      if (tenant && tenant.type === "mssp") {
+        const children = await storage.getChildTenants(tenantId);
+        const tenantIds = [tenantId, ...children.map(c => c.id)];
+        events = await storage.getSecurityEventsForTenants(tenantIds);
+        incidentsList = await storage.getIncidentsForTenants(tenantIds);
+      } else {
+        events = await storage.getSecurityEvents(tenantId);
+        incidentsList = await storage.getIncidents(tenantId);
+      }
+      const incidents = incidentsList;
 
       const assetMap: Record<string, {
         name: string; eventCount: number; incidentCount: number;

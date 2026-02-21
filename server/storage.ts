@@ -23,7 +23,7 @@ import {
   type TicketAttachment, type InsertTicketAttachment,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and, count, sql, gte, lte } from "drizzle-orm";
+import { eq, desc, and, count, sql, gte, lte, inArray } from "drizzle-orm";
 
 export interface IStorage {
   getTenants(): Promise<Tenant[]>;
@@ -394,10 +394,43 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async getIncidentsForTenants(tenantIds: number[]): Promise<Incident[]> {
+    if (tenantIds.length === 0) return [];
+    if (tenantIds.length === 1) return this.getIncidents(tenantIds[0]);
+    return db.select().from(incidents)
+      .where(inArray(incidents.tenantId, tenantIds))
+      .orderBy(desc(incidents.createdAt));
+  }
+
+  async getSecurityEventsForTenants(tenantIds: number[]): Promise<SecurityEvent[]> {
+    if (tenantIds.length === 0) return [];
+    if (tenantIds.length === 1) return this.getSecurityEvents(tenantIds[0]);
+    return db.select().from(securityEvents)
+      .where(inArray(securityEvents.tenantId, tenantIds))
+      .orderBy(desc(securityEvents.occurredAt));
+  }
+
+  async getTicketsForTenants(tenantIds: number[]): Promise<Ticket[]> {
+    if (tenantIds.length === 0) return [];
+    if (tenantIds.length === 1) return this.getTickets(tenantIds[0]);
+    return db.select().from(tickets)
+      .where(inArray(tickets.tenantId, tenantIds))
+      .orderBy(desc(tickets.createdAt));
+  }
+
   async getEnhancedDashboardStats(tenantId: number): Promise<any> {
-    const allEvents = await this.getSecurityEvents(tenantId);
-    const allIncidents = await this.getIncidents(tenantId);
-    const allTickets = await this.getTickets(tenantId);
+    const tenant = await this.getTenant(tenantId);
+    let tenantIds = [tenantId];
+    if (tenant && tenant.type === "mssp") {
+      const children = await this.getChildTenants(tenantId);
+      if (children.length > 0) {
+        tenantIds = [tenantId, ...children.map(c => c.id)];
+      }
+    }
+
+    const allEvents = await this.getSecurityEventsForTenants(tenantIds);
+    const allIncidents = await this.getIncidentsForTenants(tenantIds);
+    const allTickets = await this.getTicketsForTenants(tenantIds);
 
     const totalIncidents = allIncidents.length;
     const openIncidents = allIncidents.filter(i => i.status === "open" || i.status === "investigating").length;
@@ -482,11 +515,22 @@ export class DatabaseStorage implements IStorage {
       return { month, ...c, total: Object.values(c).reduce((s, v) => s + v, 0) };
     });
 
-    const incidentTrend = months.map(month => {
-      const total = Math.max(3, Math.floor(totalIncidents / 6) + Math.floor(Math.random() * 6) - 2);
-      const resolved = Math.floor(total * (0.5 + Math.random() * 0.4));
-      return { month, incidents: total, resolved };
+    const incidentTrendMap: Record<string, { incidents: number; resolved: number }> = {};
+    months.forEach(m => { incidentTrendMap[m] = { incidents: 0, resolved: 0 }; });
+    allIncidents.forEach(inc => {
+      const m = monthNames[inc.createdAt.getMonth()];
+      if (incidentTrendMap[m]) {
+        incidentTrendMap[m].incidents++;
+        if (inc.status === "resolved" || inc.status === "closed") {
+          incidentTrendMap[m].resolved++;
+        }
+      }
     });
+    const incidentTrend = months.map(month => ({
+      month,
+      incidents: incidentTrendMap[month].incidents,
+      resolved: incidentTrendMap[month].resolved,
+    }));
 
     const recentIncidents = allIncidents.slice(0, 5).map(inc => ({
       id: inc.id, title: inc.title, severity: inc.severity, status: inc.status, createdAt: inc.createdAt.toISOString(),
@@ -501,8 +545,23 @@ export class DatabaseStorage implements IStorage {
     const criticalEvents = allEvents.filter(e => e.severity === "critical").length;
     const blockedEvents = allEvents.filter(e => e.action === "blocked" || e.action === "dropped").length;
 
-    const mttrHours = resolvedIncidents > 0 ? Math.round(2.4 + Math.random() * 6) : 0;
-    const mttdMinutes = allEvents.length > 0 ? Math.round(8 + Math.random() * 25) : 0;
+    let mttrHours = 0;
+    if (resolvedIncidents > 0) {
+      const resolvedIncs = allIncidents.filter(i => (i.status === "resolved" || i.status === "closed") && i.resolvedAt);
+      if (resolvedIncs.length > 0) {
+        const totalMs = resolvedIncs.reduce((sum, i) => {
+          const created = new Date(i.createdAt).getTime();
+          const resolved = new Date(i.resolvedAt!).getTime();
+          return sum + Math.max(0, resolved - created);
+        }, 0);
+        mttrHours = Math.round(totalMs / resolvedIncs.length / 3600000);
+      }
+    }
+    const mttdMinutes = allEvents.length > 0 ? Math.round(allEvents.reduce((sum, e) => {
+      const occurred = new Date(e.occurredAt).getTime();
+      const created = new Date(e.createdAt!).getTime();
+      return sum + Math.max(0, created - occurred);
+    }, 0) / allEvents.length / 60000) : 0;
 
     const threatVectorMap = countBy(allEvents, "threatVector");
     const incidentsByThreatVector = topN(threatVectorMap, 12);
@@ -590,7 +649,18 @@ export class DatabaseStorage implements IStorage {
     const countryMap = countBy(allEvents.filter(e => e.country), "country");
     const topCountries = topN(countryMap, 10);
 
-    const complianceScore = Math.min(100, Math.max(40, 100 - Math.floor(criticalEvents * 1.5 + openIncidents * 2)));
+    let complianceScore = 0;
+    if (totalIncidents === 0 && totalEvents === 0) {
+      complianceScore = 0;
+    } else {
+      const resolutionRate = totalIncidents > 0 ? (resolvedIncidents / totalIncidents) * 100 : 50;
+      const criticalPenalty = totalIncidents > 0 ? Math.min(30, (criticalIncidents / totalIncidents) * 100) : 0;
+      const openPenalty = totalIncidents > 0 ? Math.min(20, (openIncidents / totalIncidents) * 60) : 0;
+      const eventSeverityPenalty = totalEvents > 0 ? Math.min(15, (criticalEvents / totalEvents) * 50) : 0;
+      complianceScore = Math.round(Math.max(0, Math.min(100,
+        resolutionRate * 0.5 + 50 - criticalPenalty - openPenalty - eventSeverityPenalty
+      )));
+    }
 
     return {
       totalIncidents, openIncidents, resolvedIncidents, criticalIncidents,

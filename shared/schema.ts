@@ -93,6 +93,7 @@ export const incidents = pgTable("incidents", {
   confidenceScore: integer("confidence_score"),
   isTruePositive: boolean("is_true_positive"),
   classification: varchar("classification", { length: 50 }),
+  iocData: jsonb("ioc_data"),
   resolvedAt: timestamp("resolved_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

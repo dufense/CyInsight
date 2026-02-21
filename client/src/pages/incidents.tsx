@@ -24,6 +24,7 @@ import {
   XCircle,
   Activity,
   CalendarClock,
+  Globe,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -163,6 +164,20 @@ export default function IncidentsPage() {
     },
   });
 
+  const enrichMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/ai/enrich-incidents", { tenantId: currentTenant?.id });
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/incidents"] });
+      toast({ title: "AI Enrichment Complete", description: data.message });
+    },
+    onError: () => {
+      toast({ title: "Enrichment failed", variant: "destructive" });
+    },
+  });
+
   const updateMutation = useMutation({
     mutationFn: async ({ id, ...data }: any) => {
       const res = await apiRequest("PATCH", `/api/incidents/${id}`, data);
@@ -242,6 +257,20 @@ export default function IncidentsPage() {
           </p>
         </div>
         {isMSS && (
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => enrichMutation.mutate()}
+              disabled={enrichMutation.isPending}
+              data-testid="button-bulk-enrich"
+            >
+              {enrichMutation.isPending ? (
+                <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Enriching...</>
+              ) : (
+                <><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Enrich All</>
+              )}
+            </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
               <Button size="sm" data-testid="button-create-incident">
@@ -355,6 +384,7 @@ export default function IncidentsPage() {
               </form>
             </DialogContent>
           </Dialog>
+          </div>
         )}
       </div>
 
@@ -499,13 +529,40 @@ export default function IncidentsPage() {
                           </Badge>
                         </TableCell>
                         <TableCell data-testid={`badge-classification-${incident.id}`}>
-                          {incident.isTruePositive === true ? (
-                            <Badge variant="outline" className="text-[10px] bg-green-500/10 text-green-700 dark:text-green-400">TP</Badge>
-                          ) : incident.isTruePositive === false ? (
-                            <Badge variant="outline" className="text-[10px] bg-red-500/10 text-red-700 dark:text-red-400">FP</Badge>
-                          ) : (
-                            <span className="text-[10px] text-muted-foreground">--</span>
-                          )}
+                          <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+                            {isMSS ? (
+                              <>
+                                <Button
+                                  variant={incident.isTruePositive === true ? "default" : "outline"}
+                                  size="sm"
+                                  className={`h-5 px-1.5 text-[10px] ${incident.isTruePositive === true ? "bg-green-600 hover:bg-green-700 text-white" : "text-green-700 dark:text-green-400 hover:bg-green-500/20"}`}
+                                  onClick={() => updateMutation.mutate({ id: incident.id, isTruePositive: incident.isTruePositive === true ? null : true, classification: incident.isTruePositive === true ? null : "true_positive" })}
+                                  data-testid={`btn-tp-quick-${incident.id}`}
+                                >
+                                  TP
+                                </Button>
+                                <Button
+                                  variant={incident.isTruePositive === false ? "default" : "outline"}
+                                  size="sm"
+                                  className={`h-5 px-1.5 text-[10px] ${incident.isTruePositive === false ? "bg-red-600 hover:bg-red-700 text-white" : "text-red-700 dark:text-red-400 hover:bg-red-500/20"}`}
+                                  onClick={() => updateMutation.mutate({ id: incident.id, isTruePositive: incident.isTruePositive === false ? null : false, classification: incident.isTruePositive === false ? null : "false_positive" })}
+                                  data-testid={`btn-fp-quick-${incident.id}`}
+                                >
+                                  FP
+                                </Button>
+                              </>
+                            ) : (
+                              <>
+                                {incident.isTruePositive === true ? (
+                                  <Badge variant="outline" className="text-[10px] bg-green-500/10 text-green-700 dark:text-green-400">TP</Badge>
+                                ) : incident.isTruePositive === false ? (
+                                  <Badge variant="outline" className="text-[10px] bg-red-500/10 text-red-700 dark:text-red-400">FP</Badge>
+                                ) : (
+                                  <span className="text-[10px] text-muted-foreground">--</span>
+                                )}
+                              </>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1 flex-wrap">
@@ -856,6 +913,37 @@ export default function IncidentsPage() {
                                     <Progress value={Math.min((daysOld / 90) * 100, 100)} className="h-1.5" />
                                   </CardContent>
                                 </Card>
+
+                                {incident.iocData && (
+                                  <Card data-testid={`panel-ioc-${incident.id}`}>
+                                    <CardHeader className="p-3 pb-2">
+                                      <CardTitle className="text-xs flex items-center gap-1.5">
+                                        <Globe className="w-3.5 h-3.5 text-orange-600" />
+                                        IOC Reputation
+                                      </CardTitle>
+                                    </CardHeader>
+                                    <CardContent className="p-3 pt-0">
+                                      <div className="space-y-1.5">
+                                        {(typeof incident.iocData === "object" && (incident.iocData as any)?.indicators ? (incident.iocData as any).indicators : []).map((ioc: any, idx: number) => (
+                                          <div key={idx} className="flex items-center gap-2 text-[10px]">
+                                            <Badge
+                                              variant="outline"
+                                              className={`text-[9px] ${ioc.reputation === "malicious" ? "bg-red-500/10 text-red-700 dark:text-red-400" : ioc.reputation === "suspicious" ? "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400" : "bg-green-500/10 text-green-700 dark:text-green-400"}`}
+                                            >
+                                              {ioc.reputation || "unknown"}
+                                            </Badge>
+                                            <span className="font-mono truncate max-w-[180px]">{ioc.value}</span>
+                                            <span className="text-muted-foreground">{ioc.type}</span>
+                                            {ioc.country && <span className="text-muted-foreground">({ioc.country})</span>}
+                                          </div>
+                                        ))}
+                                        {(!incident.iocData || !(incident.iocData as any)?.indicators?.length) && (
+                                          <p className="text-[10px] text-muted-foreground">No indicators found</p>
+                                        )}
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                )}
                               </div>
 
                               <div className="border-t pt-4">

@@ -65,8 +65,28 @@ export async function runMigrations() {
     await migrate(migrationDb, { migrationsFolder: "./migrations" });
     console.log("Database migrations completed successfully.");
   } catch (error: any) {
-    if (error.message?.includes("already exists")) {
+    if (error.message?.includes("already exists") || error.message?.includes("duplicate")) {
       console.log("Database schema is up to date.");
+      const journalPath = path.resolve("./migrations/meta/_journal.json");
+      const journal = JSON.parse(fs.readFileSync(journalPath, "utf-8"));
+      const client2 = await pool.connect();
+      try {
+        for (const entry of journal.entries) {
+          const applied = await client2.query(
+            `SELECT id FROM "__drizzle_migrations" WHERE hash = $1`,
+            [entry.tag]
+          );
+          if (applied.rows.length === 0) {
+            await client2.query(
+              `INSERT INTO "__drizzle_migrations" (hash, created_at) VALUES ($1, $2)`,
+              [entry.tag, Date.now()]
+            );
+            console.log(`Marked migration "${entry.tag}" as applied.`);
+          }
+        }
+      } finally {
+        client2.release();
+      }
     } else {
       console.error("Migration failed:", error.message);
       throw error;
