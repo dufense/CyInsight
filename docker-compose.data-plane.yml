@@ -1,0 +1,467 @@
+version: "3.9"
+
+x-data-plane-env: &data-plane-env
+  NODE_ENV: production
+  KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+  REGION: ${DATA_PLANE_REGION:-in-west-1}
+  REGION_NAME: ${DATA_PLANE_REGION_NAME:-India (Mumbai)}
+  MANAGEMENT_PLANE_URL: ${MANAGEMENT_PLANE_URL:-http://host.docker.internal:80}
+
+services:
+  data-plane-db:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: secureops_events
+      POSTGRES_USER: secureops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secureops_dev_password}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${DP_DB_PORT:-5433}:5432"
+    volumes:
+      - dataplane_pgdata:/var/lib/postgresql/data
+    command: >
+      postgres
+        -c wal_level=replica
+        -c max_wal_senders=5
+        -c max_replication_slots=5
+        -c hot_standby=on
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c work_mem=32MB
+        -c maintenance_work_mem=256MB
+        -c max_connections=300
+        -c shared_preload_libraries=timescaledb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureops -d secureops_events"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  data-plane-db-replica:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: secureops_events
+      POSTGRES_USER: secureops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secureops_dev_password}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - dataplane_pgdata_replica:/var/lib/postgresql/data
+    entrypoint: >
+      bash -c "
+        until pg_isready -h data-plane-db -U secureops; do sleep 2; done;
+        if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+          pg_basebackup -h data-plane-db -U secureops -D /var/lib/postgresql/data -Fp -Xs -R -P;
+        fi;
+        exec postgres -c hot_standby=on -c shared_preload_libraries=timescaledb
+      "
+    depends_on:
+      data-plane-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureops -d secureops_events"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  opensearch-1:
+    image: opensearchproject/opensearch:2.12.0
+    restart: unless-stopped
+    environment:
+      cluster.name: secureops-${DATA_PLANE_REGION:-in-west-1}
+      node.name: opensearch-1
+      discovery.seed_hosts: opensearch-1,opensearch-2
+      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${DP_OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - opensearch_data_1:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  opensearch-2:
+    image: opensearchproject/opensearch:2.12.0
+    restart: unless-stopped
+    environment:
+      cluster.name: secureops-${DATA_PLANE_REGION:-in-west-1}
+      node.name: opensearch-2
+      discovery.seed_hosts: opensearch-1,opensearch-2
+      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data_2:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  kafka-1:
+    image: bitnami/kafka:3.8
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_NUM_PARTITIONS: 12
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: 2
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+      KAFKA_CFG_LOG_RETENTION_BYTES: "10737418240"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_KRAFT_CLUSTER_ID: "secureops-dp-${DATA_PLANE_REGION:-in-west-1}"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data_1:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  kafka-2:
+    image: bitnami/kafka:3.8
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: "2"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_NUM_PARTITIONS: 12
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: 2
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+      KAFKA_CFG_LOG_RETENTION_BYTES: "10737418240"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_KRAFT_CLUSTER_ID: "secureops-dp-${DATA_PLANE_REGION:-in-west-1}"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data_2:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  kafka-3:
+    image: bitnami/kafka:3.8
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: "3"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_NUM_PARTITIONS: 12
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: 2
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+      KAFKA_CFG_LOG_RETENTION_BYTES: "10737418240"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_KRAFT_CLUSTER_ID: "secureops-dp-${DATA_PLANE_REGION:-in-west-1}"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data_3:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "${DP_MINIO_PORT:-9000}:9000"
+      - "${DP_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  collector:
+    build:
+      context: .
+      dockerfile: services/collector/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DP_COLLECTOR_PORT:-5001}:5000"
+      - "514:514/udp"
+      - "1514:1514"
+      - "6514:6514"
+    environment:
+      <<: *data-plane-env
+      PORT: 5000
+      SERVICE_NAME: collector
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-${OPENAI_API_KEY:-}}
+      AI_BASE_URL: ${AI_BASE_URL:-${OPENAI_BASE_URL:-}}
+      POLLING_CONCURRENCY: "5"
+      MAX_EVENTS_PER_CYCLE: "10000"
+      CIRCUIT_BREAKER_THRESHOLD: "5"
+      CIRCUIT_BREAKER_COOLDOWN_MS: "300000"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  normalizer:
+    build:
+      context: .
+      dockerfile: services/normalizer/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DP_NORMALIZER_PORT:-5002}:5000"
+    environment:
+      <<: *data-plane-env
+      PORT: 5000
+      SERVICE_NAME: normalizer
+      CONSUMER_CONCURRENCY: "10"
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-${OPENAI_API_KEY:-}}
+      AI_BASE_URL: ${AI_BASE_URL:-${OPENAI_BASE_URL:-}}
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  detection-engine:
+    build:
+      context: .
+      dockerfile: services/detection-engine/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DP_DETECTION_PORT:-5003}:5000"
+    environment:
+      <<: *data-plane-env
+      PORT: 5000
+      SERVICE_NAME: detection-engine
+      SIGMA_RULES_PATH: /app/sigma-rules
+      BATCH_SIZE: "100"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+  enrichment:
+    build:
+      context: .
+      dockerfile: services/enrichment/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DP_ENRICHMENT_PORT:-5004}:5000"
+    environment:
+      <<: *data-plane-env
+      PORT: 5000
+      SERVICE_NAME: enrichment
+      REDIS_URL: ""
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-${OPENAI_API_KEY:-}}
+      AI_BASE_URL: ${AI_BASE_URL:-${OPENAI_BASE_URL:-}}
+      IOC_CACHE_TTL_MS: "3600000"
+      CORRELATION_WINDOW_MS: "300000"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  storage:
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DP_STORAGE_PORT:-5005}:5000"
+    environment:
+      <<: *data-plane-env
+      PORT: 5000
+      SERVICE_NAME: storage
+      DATABASE_URL: postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@data-plane-db:5432/secureops_events
+      OPENSEARCH_URL: http://opensearch-1:9200
+      BATCH_SIZE: "500"
+      BACKPRESSURE_LATENCY_MS: "5000"
+      HOT_RETENTION_DAYS: "90"
+      WARM_RETENTION_DAYS: "365"
+      COLD_RETENTION_DAYS: "1095"
+      CLOUD_STORAGE_PROVIDER: ${CLOUD_STORAGE_PROVIDER:-minio}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    depends_on:
+      data-plane-db:
+        condition: service_healthy
+      opensearch-1:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+    volumes:
+      - dataplane_storage:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+volumes:
+  dataplane_pgdata:
+    driver: local
+  dataplane_pgdata_replica:
+    driver: local
+  opensearch_data_1:
+    driver: local
+  opensearch_data_2:
+    driver: local
+  kafka_data_1:
+    driver: local
+  kafka_data_2:
+    driver: local
+  kafka_data_3:
+    driver: local
+  minio_data:
+    driver: local
+  dataplane_storage:
+    driver: local

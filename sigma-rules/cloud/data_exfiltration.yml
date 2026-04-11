@@ -1,0 +1,42 @@
+title: Cloud Data Exfiltration
+id: sigma-cloud-003
+status: stable
+level: critical
+description: Detects patterns indicating data exfiltration from cloud services including large data transfers, unusual S3 access, and data staging activities.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: cloud
+  product: any
+detection:
+  selection:
+    eventType:
+      - cloud
+      - sse
+      - dlp
+  keywords:
+    - data exfiltration
+    - large upload
+    - large data transfer
+    - unusual download
+    - s3 public
+    - bucket policy
+    - data staging
+    - large data upload
+    - uploaded mb
+    - uploaded gb
+    - external transfer
+    - shadow it
+    - wetransfer
+    - mega.nz
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate data migration activities
+  - Backup operations
+tags:
+  - attack.exfiltration
+  - attack.t1567
+mitre:
+  tactic: Exfiltration
+  technique: T1567
+  technique_name: Exfiltration Over Web Service

@@ -1,0 +1,32 @@
+#41 - Big4-Grade Reports & Notification Center
+What & Why
+Three presentation layers need a significant quality upgrade to match Big4/MSSP consulting standards:
+
+Daily SOC Summary (in AI Workforce page): Currently shows a plain text executive summary, four flat muted cards for Security Posture, and a simple list for Key Threats. The NaN% for Resolution Rate is a data bug. The layout looks like a basic admin panel.
+
+All reports (in the Reports page full-screen viewer): The FullScreenReportViewer component uses light muted backgrounds, small typography, and plain badge styling — lacks the visual authority expected for board-ready security reports.
+
+Notification Center: The bell popover uses a generic list layout. Alert notifications (critical incidents, report generation, SLA breaches) need severity-appropriate visual hierarchy, actionable context, and a professional MSSP appearance.
+
+Done looks like
+Daily SOC Summary: Dark cinematic header strip with client name, date, and risk level badge. Executive Summary rendered as a rich narrative (markdown-rendered bold). Security Posture section uses a mini-gauge or large numeric KPI tiles with color-coded severity borders. Key Threats listed with MITRE technique tags, severity color strip, and incident count. Recommendations styled as prioritized action cards (P1/P2/P3). Risk Trend Analysis displayed as a timeline-style text block with an icon. Zero NaN values — Resolution Rate calculated only from resolved incidents (guard against divide-by-zero).
+
+All reports viewer: The FullScreenReportViewer in reports.tsx displays a professional TOC sidebar, each section with a numbered heading and a left border color accent matching severity/category. Finding cards use severity color fills. Recommendations use priority color-coding. Executive summary displays in a highlighted call-out block. Section titles use uppercase tracking with a divider.
+
+Notification Center: Critical alerts show a red left border strip and pulsing icon. Incident notifications show the severity badge and incident type. Report-ready notifications show a document icon with the report name. SLA breach notifications show the affected ticket title and time remaining. Each notification has a clear action link. The panel header shows unread count with a color-coded badge.
+
+Out of scope
+Changing the data structure of reports or notification records in the database
+Email notification templates
+PDF export styling (that is handled by pdf-generator.ts)
+Tasks
+Daily SOC Summary redesign — Completely replace the current rendering in ai-workforce.tsx (the ScrollArea section showing executiveSummary, securityPosture, keyThreats, recommendations, riskTrendAnalysis, nextDayFocus) with a Big4-grade layout: cinematic card header with risk level, rendered-markdown executive summary, KPI posture tiles with severity colors, threat cards with MITRE tags and severity strips, priority-coded recommendations, and fix the NaN% resolution rate bug.
+
+Reports full-screen viewer upgrade — Update FullScreenReportViewer in reports.tsx to use a two-column layout: fixed left TOC sidebar with numbered anchors, main content area with section headings using severity-colored left borders, findings as color-coded cards, recommendations as priority-action items, and an executive summary highlighted call-out.
+
+Notification Center Big4 redesign — Update notification-center.tsx with severity-differentiated rows (critical = red left strip + animated dot, warning = amber, info = blue), type-specific icon set (incident shield, report document, SLA clock, ticket tag), improved typography hierarchy, and a grouped view (Today / Earlier) with relative timestamps.
+
+Relevant files
+client/src/pages/ai-workforce.tsx:951-1250
+client/src/pages/reports.tsx:604-800
+client/src/components/notification-center.tsx

@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secureops-management
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: management
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secureops-management
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: management
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: secureops-management
+subjects:
+  - kind: ServiceAccount
+    name: secureops-management
+    namespace: secureops

@@ -1,0 +1,33 @@
+title: Port Scanning Activity
+id: sigma-network-001
+status: stable
+level: medium
+description: Detects network port scanning activity where a host attempts to connect to multiple ports or hosts.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: network
+  product: any
+detection:
+  selection:
+    eventType: network
+  keywords:
+    - port scan
+    - network scan
+    - tried to connect to
+    - connection attempt
+    - syn scan
+    - scanning tool
+    - nmap
+    - masscan
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate vulnerability scanners
+  - Network monitoring tools
+tags:
+  - attack.discovery
+  - attack.t1046
+mitre:
+  tactic: Discovery
+  technique: T1046
+  technique_name: Network Service Discovery

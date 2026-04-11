@@ -1,0 +1,40 @@
+title: Graymail with Social Engineering Subject Keywords
+id: sigma-email-checkpoint-002
+status: stable
+level: medium
+description: Detects graymail events where subject lines contain social engineering patterns such as urgency, celebrity mentions, financial offers, prize notifications, or authority impersonation. Graymail may mask BEC grooming or pre-attack reconnaissance.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - graymail
+    - urgent
+    - confirmed
+    - offer
+    - deal
+    - prize
+    - winner
+    - exclusive
+    - free
+    - congratulations
+    - selected
+    - act now
+    - limited time
+    - expires
+    - click here
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate marketing and promotional emails
+  - Newsletter subscription confirmations
+tags:
+  - attack.reconnaissance
+  - attack.t1598
+mitre:
+  tactic: Reconnaissance
+  technique: T1598.003
+  technique_name: Phishing for Information via Service

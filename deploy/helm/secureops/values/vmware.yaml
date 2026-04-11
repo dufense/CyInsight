@@ -1,0 +1,274 @@
+##############################################################################
+# Cyber Command Center — VMware Deployment
+#
+# Targets:
+#   - VMware Tanzu Kubernetes Grid (TKG) 2.x on vSphere 8
+#   - VMware Tanzu Application Platform (TAP) clusters
+#   - vSphere with Tanzu (Supervisor clusters / Workload clusters)
+#
+# Storage:
+#   - vSphere CNS (Cloud Native Storage) via vsphere-csi-driver
+#   - Default StorageClass: "vsphere-sc" (Block) for RWO PVCs
+#   - ReadWriteMany (RWX) volumes use vSAN File Services or NFS
+#
+# Usage:
+#   helm upgrade --install ccc ./deploy/helm/secureops \
+#     -f deploy/helm/secureops/values.yaml \
+#     -f deploy/helm/secureops/values/vmware.yaml \
+#     --namespace ccc --create-namespace
+##############################################################################
+
+cloudProvider: "vmware"
+
+cloudProviderConfig:
+  name: vmware
+  platform: vsphere
+  version: "8.0"
+  clusterType: "tkg"
+
+global:
+  storageClass: "vsphere-sc"
+  imageRegistry: ""
+  imagePullSecrets: []
+  dataResidency:
+    country: ""
+    label: vmware-onprem
+    complianceFramework: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+highAvailability:
+  enabled: true
+  antiAffinity: "hard"
+  topologyKey: "topology.kubernetes.io/zone"
+
+management:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPU: 65
+    targetMemory: 75
+  pdb:
+    enabled: true
+    minAvailable: 2
+  persistence:
+    enabled: true
+    size: 50Gi
+    accessMode: ReadWriteMany
+    storageClass: "vsphere-nfs-sc"
+  ingress:
+    enabled: true
+    className: nginx
+    host: ccc.internal.corp
+    annotations:
+      nginx.ingress.kubernetes.io/affinity: cookie
+      nginx.ingress.kubernetes.io/session-cookie-name: ccc-sticky
+      nginx.ingress.kubernetes.io/session-cookie-samesite: Strict
+      nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    tls:
+      enabled: true
+      secretName: ccc-management-tls
+
+receiver:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 3000m
+      memory: 3Gi
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPU: 60
+    targetMemory: 70
+  pdb:
+    enabled: true
+    minAvailable: 2
+  ingress:
+    enabled: true
+    className: nginx
+    host: ingest.internal.corp
+    tls:
+      enabled: true
+      secretName: ccc-receiver-tls
+
+dataPlane:
+  enabled: true
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPU: 65
+    targetMemory: 75
+  pdb:
+    enabled: true
+    minAvailable: 1
+  persistence:
+    enabled: true
+    hotStorage:
+      size: 200Gi
+      storageClass: vsphere-sc
+    coldStorage:
+      size: 1Ti
+      storageClass: vsphere-sc
+
+collector:
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 12
+    targetCPU: 65
+    targetMemory: 75
+
+normalizer:
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 12
+    targetCPU: 65
+    targetMemory: 75
+
+detectionEngine:
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPU: 70
+    targetMemory: 80
+
+enrichment:
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPU: 70
+    targetMemory: 80
+
+storage:
+  replicaCount: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPU: 70
+    targetMemory: 80
+
+kafka:
+  enabled: false
+
+kafkaKraft:
+  enabled: true
+  builtIn: true
+  replicaCount: 3
+  clusterId: "ccc-vmware-kafka-001"
+  controllerQuorumVoters: "0@ccc-kafka-0.ccc-kafka-headless:9093,1@ccc-kafka-1.ccc-kafka-headless:9093,2@ccc-kafka-2.ccc-kafka-headless:9093"
+  logRetentionHours: 168
+  logRetentionBytes: "21474836480"
+  numPartitions: 16
+  defaultReplicationFactor: 3
+  minInsyncReplicas: 2
+  persistence:
+    size: 100Gi
+    storageClass: vsphere-sc
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+  pdb:
+    enabled: true
+    minAvailable: 2
+
+kafkaExternal:
+  enabled: false
+
+redis:
+  enabled: true
+  architecture: replicaset
+  sentinel:
+    enabled: true
+    quorum: 2
+  auth:
+    enabled: true
+    existingSecret: ccc-redis-secret
+    existingSecretPasswordKey: redis-password
+  replica:
+    replicaCount: 3
+    persistence:
+      storageClass: vsphere-sc
+      size: 10Gi
+    pdb:
+      enabled: true
+      minAvailable: 2
+
+opensearch:
+  enabled: true
+  singleNode: false
+  replicas: 3
+  resources:
+    requests:
+      memory: 2Gi
+      cpu: 1000m
+    limits:
+      memory: 8Gi
+      cpu: 4000m
+  pdb:
+    enabled: true
+    minAvailable: 2
+  persistence:
+    size: 200Gi
+    storageClass: vsphere-sc
+
+objectStorage:
+  provider: minio
+  bucket: ccc-events
+  region: onprem-1
+  endpoint: ""
+  forcePathStyle: true
+
+ingress:
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+networkPolicies:
+  enabled: true
+
+certManager:
+  enabled: true
+
+secrets:
+  create: true
+  databaseUrl: ""
+  sessionSecret: ""
+  aiApiKey: ""
+  superadminPassword: ""
+  cloudStorage:
+    accessKeyId: ""
+    secretAccessKey: ""

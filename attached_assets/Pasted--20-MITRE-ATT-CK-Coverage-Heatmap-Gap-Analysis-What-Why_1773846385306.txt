@@ -1,0 +1,47 @@
+#20 - MITRE ATT&CK Coverage Heatmap & Gap Analysis
+What & Why
+Every top-tier MSSP and SOC platform ships a MITRE ATT&CK heatmap as a core feature:
+
+Microsoft Sentinel: AI MITRE ATT&CK tagging + coverage visualization per analytics rule
+Palo Alto XSIAM: 13,300+ detections mapped to ATT&CK, continuously updated
+Splunk Enterprise Security: ATT&CK coverage heatmap built into the product
+We already tag incidents with MITRE tactics and technique IDs — but there is no page where a CISO or analyst can see which techniques we detect vs. which are blind spots. This is a core MSSP selling point: showing customers their coverage posture against the ATT&CK framework.
+
+Done looks like
+A new "ATT&CK Coverage" page reachable from the dashboard and/or the main navigation
+The page displays the full MITRE ATT&CK Enterprise matrix (v14): 14 tactic columns, all techniques as cells
+Each cell is color-coded:
+Deep green (bright) = detected in the last 30 days with high confidence
+Muted green = detected but with low confidence or older than 30 days
+Amber/yellow = technique exists in our Sigma rules but no recent incidents
+Dark red = no coverage at all (no incidents, no Sigma rules for this technique)
+Gray = sub-technique (collapsed by default, expandable)
+Hovering a cell shows a tooltip: technique name, ID, # incidents using this technique (last 90 days), date last seen, related rule count
+Clicking a cell opens a right-side panel: full technique description (from ATT&CK), list of matching incidents (linked), relevant Sigma rules, and AI-generated detection gap recommendation ("Consider adding rule for…")
+Coverage Score bar at the top: "You cover X of 196 techniques (Y%)" broken out by tactic
+Tactic summary row below the header: green/amber/red pill per tactic showing % coverage
+Gap Analysis tab alongside the heatmap: a ranked list of uncovered high-risk techniques with suggested detection logic, sortable by "Prevalence in the wild"
+Filter controls: by tenant, time range (last 30/60/90/180 days), and confidence level
+Export: "Download Coverage Report" generates a CSV with technique → coverage status → incident count
+Out of scope
+Mapping custom Sigma rules (only built-in correlations used in this task)
+ATT&CK for ICS or Mobile (Enterprise matrix only)
+Auto-creating new detection rules from the gap analysis (future task)
+Navigator JSON export format
+Tasks
+ATT&CK technique data — Create client/src/lib/mitre-attack-data.ts containing the full MITRE ATT&CK Enterprise v14 tactic/technique taxonomy as a static TypeScript constant (array of { tactic, techniqueId, techniqueName, description, subTechniques[] }). This avoids an external API dependency and loads instantly.
+
+Backend: coverage computation endpoint — Add GET /api/mitre/coverage?tenantId=&days= in server/routes.ts. Query the incidents table grouped by mitre_technique_id to get count and max created_at per technique. Also scan sigma_rules (if the table exists) to flag rules that cover each technique. Return { covered: { [techniqueId]: { count, lastSeen, confidence, ruleCount } } }.
+
+Heatmap grid component — Build client/src/components/mitre-heatmap.tsx that renders the ATT&CK matrix as a responsive CSS grid. 14 tactic columns, each containing technique cells. Cells are <div> boxes (not SVG) for performance. Background color uses CSS variables mapped to coverage state (green/amber/red/dark). Sub-techniques are hidden by default with a "+N" expand button per technique. Hover shows a <Tooltip> from shadcn with the quick stats.
+
+Coverage detail panel — A <Sheet> (shadcn side panel) that slides in when a technique cell is clicked. Renders: technique name, ID, ATT&CK description, incident list (linked rows), rule list, and an AI-generated recommendation block. The AI recommendation is fetched lazily (POST /api/mitre/recommend → OpenAI with technique context) only when the panel opens.
+
+Coverage score header — Top of page: large "Coverage Score" donut chart (using Recharts PieChart) showing covered vs. uncovered technique percentage overall, plus a row of 14 tactic pills (mini horizontal bars) showing per-tactic coverage %. Animates on load with a count-up effect.
+
+Gap Analysis tab — Second tab on the page listing uncovered techniques sorted by "ATT&CK technique prevalence rank" (hardcoded rank from the ATT&CK popularity data in the static file). Each row: technique ID, name, tactic, prevalence rank badge, a "No coverage" red badge, and a "View Details" link. Analysts can bookmark these for future Sigma rule creation.
+
+Page + navigation — Create client/src/pages/mitre-coverage.tsx using the above components + PageHero. Add a "MITRE Coverage" link in the dashboard navigation tabs and/or the app sidebar under the Security Operations section.
+
+Relevant files
+client/src/pages/dashboard.tsx client/src/pages/incidents.tsx client/src/App.tsx client/src/components/page-hero.tsx client/src/components/app-sidebar.tsx server/routes.ts server/storage.ts shared/schema.ts

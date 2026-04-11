@@ -1,0 +1,153 @@
+##############################################################################
+# Helm values — Data Plane: India (ap-south-1)
+#
+# Management Plane is also deployed in ap-south-1 (Mumbai).
+# This data plane handles security events for Indian tenants.
+#
+# Compliance: IT Act 2000 / DPDP Act 2023 (data must remain in India)
+# AZs: ap-south-1a, ap-south-1b, ap-south-1c
+##############################################################################
+
+global:
+  region: ap-south-1
+  checkpointRegion: in
+  storageClass: gp3
+  dataResidency:
+    country: IN
+    label: india
+    complianceFramework: IT-Act-2000
+  # Federation metadata — used by management plane to route tenant traffic
+  dataPlaneId: india
+  managementPlaneUrl: "http://REPLACE_MANAGEMENT_ALB_DNS"
+
+cloudProvider: "aws"
+
+cloudProviderConfig:
+  name: AWS
+  zones:
+    - ap-south-1a
+    - ap-south-1b
+    - ap-south-1c
+
+objectStorage:
+  provider: s3
+  bucket: secureops-events-india
+  region: ap-south-1
+  storageClass: STANDARD
+  archiveStorageClass: GLACIER
+
+# ── SSL / RDS certificate ─────────────────────────────────────────────────────
+# RDS CA bundle is embedded in the Docker image at /etc/ssl/certs/rds-ca-bundle.pem
+# These env vars are injected into every data-plane pod.
+ssl:
+  dbSslCa: /etc/ssl/certs/rds-ca-bundle.pem
+  pgSslMode: verify-ca
+  nodeExtraCaCerts: /etc/ssl/certs/rds-ca-bundle.pem
+
+database:
+  replication:
+    enabled: true
+    mode: streaming
+    replicas: 2
+
+# ── Collector — 2 replicas with AZ spread ────────────────────────────────────
+collector:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1500m
+      memory: 1Gi
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                  - ap-south-1a
+                  - ap-south-1b
+                  - ap-south-1c
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: collector
+            topologyKey: topology.kubernetes.io/zone
+
+# ── Normalizer — 2 replicas with AZ spread ───────────────────────────────────
+normalizer:
+  replicaCount: 2
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: normalizer
+            topologyKey: topology.kubernetes.io/zone
+
+# ── Detection Engine — 2 replicas with AZ spread ─────────────────────────────
+detectionEngine:
+  replicaCount: 2
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: detection-engine
+            topologyKey: topology.kubernetes.io/zone
+
+# ── Enrichment — 2 replicas with AZ spread ───────────────────────────────────
+enrichment:
+  replicaCount: 2
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: enrichment
+            topologyKey: topology.kubernetes.io/zone
+
+# ── Storage — 2 replicas with AZ spread ──────────────────────────────────────
+storage:
+  replicaCount: 2
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: storage
+            topologyKey: topology.kubernetes.io/zone
+
+# ── Kafka KRaft — 3-node quorum across 3 AZs ─────────────────────────────────
+kafkaKraft:
+  enabled: true
+  replicaCount: 3
+  numPartitions: 12
+  defaultReplicationFactor: 3
+  minInsyncReplicas: 2
+  persistence:
+    size: 30Gi
+  pdb:
+    enabled: true
+    minAvailable: 2
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              component: kafka
+          topologyKey: topology.kubernetes.io/zone

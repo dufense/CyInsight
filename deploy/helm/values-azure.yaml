@@ -1,0 +1,116 @@
+# =============================================================================
+# Cyber Command Center — Azure AKS Helm Override Values
+# =============================================================================
+# Usage:
+#   helm upgrade --install secureops ./deploy/helm/secureops \
+#     -f deploy/helm/secureops/values.yaml \
+#     -f deploy/helm/values-azure.yaml \
+#     --set secrets.databaseUrl="$DATABASE_URL" \
+#     --set secrets.sessionSecret="$SESSION_SECRET"
+# =============================================================================
+
+cloudProvider: azure
+
+global:
+  storageClass: managed-premium   # Azure Premium SSD (ReadWriteOnce)
+
+# ── Ingress — Azure Application Gateway Ingress Controller (AGIC) ──────────
+# Requires: https://learn.microsoft.com/en-us/azure/application-gateway/ingress-controller-overview
+# Alternatively replace className with "nginx" for the NGINX ingress controller.
+receiver:
+  ingress:
+    className: azure/application-gateway
+    annotations:
+      kubernetes.io/ingress.class: azure/application-gateway
+      appgw.ingress.kubernetes.io/ssl-redirect: "true"
+      appgw.ingress.kubernetes.io/backend-protocol: http
+      appgw.ingress.kubernetes.io/health-probe-path: /healthz
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+
+management:
+  ingress:
+    className: azure/application-gateway
+    annotations:
+      kubernetes.io/ingress.class: azure/application-gateway
+      appgw.ingress.kubernetes.io/ssl-redirect: "true"
+      appgw.ingress.kubernetes.io/backend-protocol: http
+      appgw.ingress.kubernetes.io/health-probe-path: /healthz
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      # Cookie-based affinity via App Gateway
+      appgw.ingress.kubernetes.io/cookie-based-affinity: "true"
+
+# ── Storage — Azure Managed Disk (Premium SSD) ────────────────────────────
+dataPlane:
+  persistence:
+    storageClassName: managed-premium
+
+# ── Object Storage — Azure Blob Storage ───────────────────────────────────
+objectStorage:
+  provider: azure
+  bucket: secureops-events    # Blob container name
+  region: eastus              # Azure region (informational, not used by SDK)
+
+# ── Service Account — Azure Workload Identity ──────────────────────────────
+# Bind the Kubernetes service account to an Azure Managed Identity so pods
+# automatically get Blob Storage / Key Vault access without embedded credentials.
+# Steps (using Azure CLI):
+#   az identity create -g <RG> -n secureops-identity
+#   az aks update -g <RG> -n <CLUSTER> --enable-oidc-issuer --enable-workload-identity
+#   az identity federated-credential create \
+#     --name secureops-federated \
+#     --identity-name secureops-identity \
+#     --resource-group <RG> \
+#     --issuer $(az aks show -g <RG> -n <CLUSTER> --query oidcIssuerProfile.issuerUrl -o tsv) \
+#     --subject system:serviceaccount:secureops:secureops
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: ""   # set to the Managed Identity client ID
+
+# ── Pod Labels — required for Azure Workload Identity ─────────────────────
+# The "azure.workload.identity/use: 'true'" label must be on every pod that
+# needs Azure identity.  Helm templates should propagate this via podLabels.
+# podLabels:
+#   azure.workload.identity/use: "true"
+
+# ── cert-manager — Let's Encrypt via Azure DNS validation ─────────────────
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+
+# ── Kafka — Azure Event Hubs (Kafka protocol) ─────────────────────────────
+# Azure Event Hubs exposes a Kafka-compatible endpoint.
+# Set kafkaKraft.enabled=false and configure kafkaExternal to point at it.
+kafkaKraft:
+  enabled: false
+
+kafkaExternal:
+  enabled: true
+  brokers: ""                  # set to <namespace>.servicebus.windows.net:9093
+  securityProtocol: SASL_SSL
+  saslMechanism: PLAIN
+  saslJaasConfig: ""           # org.apache.kafka.common.security.plain.PlainLoginModule required username="$ConnectionString" password="<SAS>";
+  sslEnabled: true
+
+# ── Redis — Azure Cache for Redis ─────────────────────────────────────────
+# Disable in-cluster Redis; set REDIS_URL in secrets to point at Azure Cache.
+redis:
+  enabled: false
+
+# ── OpenSearch — Azure (self-hosted or Azure Marketplace offer) ────────────
+# Azure does not provide a managed OpenSearch service; use:
+#   Option A: Keep in-cluster OpenSearch (set enabled: true)
+#   Option B: Azure Cognitive Search with OpenSearch-compatible REST adapter
+#   Option C: Elastic Cloud on Azure Marketplace
+opensearch:
+  enabled: true    # or false if using an external OpenSearch-compatible endpoint
+
+# ── Network Policies ───────────────────────────────────────────────────────
+networkPolicies:
+  enabled: true
+
+# ── Secrets — Azure Key Vault via External Secrets Operator ───────────────
+# See: https://external-secrets.io/latest/provider/azure-key-vault/
+secrets:
+  create: false
+  existingSecret: secureops-secrets

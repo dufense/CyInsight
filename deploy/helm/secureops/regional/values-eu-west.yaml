@@ -1,0 +1,30 @@
+global:
+  region: eu-west-1
+  checkpointRegion: eu
+
+collector:
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+normalizer:
+  replicaCount: 3
+
+detectionEngine:
+  replicaCount: 3
+
+enrichment:
+  replicaCount: 2
+
+storage:
+  replicaCount: 3
+
+kafkaKraft:
+  replicaCount: 3
+  persistence:
+    size: 100Gi

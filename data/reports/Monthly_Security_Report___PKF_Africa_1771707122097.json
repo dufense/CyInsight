@@ -1,0 +1,493 @@
+{
+  "title": "Monthly Security Report - PKF Africa",
+  "type": "executive_summary",
+  "tenant": "PKF Africa",
+  "period": "last_month",
+  "generatedAt": "2026-02-21T20:52:02.097Z",
+  "documentControl": {
+    "version": "1.0",
+    "classification": "Confidential",
+    "preparedBy": "PKF Africa Operations Center",
+    "reviewedBy": "Principal Security Consultant",
+    "approvedBy": "Head of Managed Security Services",
+    "distributionList": [
+      "CISO",
+      "CTO",
+      "IT Security Team",
+      "Risk Committee"
+    ],
+    "documentId": "SO-RPT-MLWSNHNU"
+  },
+  "managementSummary": {
+    "overallRiskRating": "high",
+    "overallRiskScore": 68,
+    "previousRiskScore": 64,
+    "riskTrend": "increasing",
+    "ragStatus": [
+      {
+        "area": "Endpoint Security",
+        "status": "amber",
+        "score": 62,
+        "detail": "Multiple high/critical endpoint detections; auto-remediation active."
+      },
+      {
+        "area": "Web/CASB (SSE)",
+        "status": "amber",
+        "score": 66,
+        "detail": "4,337 SSE events with 92 critical and extensive blocked web requests."
+      },
+      {
+        "area": "Network Security",
+        "status": "green",
+        "score": 70,
+        "detail": "Single medium port-scan detected; no lateral activity observed."
+      },
+      {
+        "area": "Incident Response",
+        "status": "amber",
+        "score": 60,
+        "detail": "348 incidents (28 high, 2 critical); 11 remain open."
+      },
+      {
+        "area": "Asset Inventory",
+        "status": "amber",
+        "score": 68,
+        "detail": "745 active devices; heavy Windows 11 footprint (618 devices)."
+      },
+      {
+        "area": "User Activity / Identity",
+        "status": "amber",
+        "score": 58,
+        "detail": "520 users; 388 medium-risk, 4 high-risk users require review."
+      }
+    ],
+    "criticalActions": [
+      "Enforce endpoint containment + elevated logging on hosts with recent high/critical detections.",
+      "Tighten CASB/web policies for top blocked users and apps; escalate blocked patterns to investigations.",
+      "Prioritise remediation for high-risk users and validate asset baselines (Windows 11 estate)."
+    ]
+  },
+  "executiveSummary": "Period overview: Last 30 days produced 4,685 security events (SSE 4,337; endpoint 347; network 1) and 348 incidents (318 medium, 28 high, 2 critical). Assets: 745 active devices (618 Windows 11). Users: 520 total; 388 medium-risk, 4 high-risk. SSE top apps: WhatsApp 782, OpenAI‑ChatGPT 718. Endpoint automated remediation handled removable media and process termination attempts.\n\nTop cross-domain risks: 1) Endpoint compromise via malicious binaries and security‑process termination — enforce EDR hardening. 2) Excessive web denials and risky app use (SSE/CASB) — tighten policies and DLP. 3) Concentration of Windows 11 endpoints and high-risk users — prioritize patching, identity reviews, and targeted monitoring.",
+  "keyHighlights": [
+    {
+      "label": "Total Security Events",
+      "value": "4,685",
+      "trend": "up",
+      "trendDetail": "+8%",
+      "context": "SSE dominant (4,337 events)"
+    },
+    {
+      "label": "Total Incidents",
+      "value": "348",
+      "trend": "stable",
+      "trendDetail": "+1%",
+      "context": "28 high, 2 critical"
+    },
+    {
+      "label": "Active Assets",
+      "value": "745",
+      "trend": "stable",
+      "trendDetail": "0%",
+      "context": "618 Windows 11"
+    },
+    {
+      "label": "High‑risk Users",
+      "value": "4",
+      "trend": "up",
+      "trendDetail": "+33%",
+      "context": "Users: iraintern, mmuthoni, vkibe, ynanzingwa"
+    },
+    {
+      "label": "Blocked Web Requests (top user)",
+      "value": "690",
+      "trend": "up",
+      "trendDetail": "+15%",
+      "context": "User zzuberi denied requests"
+    },
+    {
+      "label": "Auto‑remediated Endpoint Events",
+      "value": "347",
+      "trend": "stable",
+      "trendDetail": "0%",
+      "context": "Removable media detections auto‑remediated"
+    }
+  ],
+  "securityScorecard": {
+    "overallScore": 68,
+    "previousScore": 64,
+    "categories": [
+      {
+        "name": "Endpoint Security",
+        "score": 62,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "High/critical detections; containment working"
+      },
+      {
+        "name": "Web/CASB (SSE)",
+        "score": 66,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Large volume of blocked requests and critical alerts"
+      },
+      {
+        "name": "Network Security",
+        "score": 70,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "Single medium port scan; low activity"
+      },
+      {
+        "name": "Incident Response",
+        "score": 60,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Most incidents resolved; 11 open"
+      },
+      {
+        "name": "Asset Inventory",
+        "score": 68,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Good visibility; patching coverage unknown"
+      },
+      {
+        "name": "User Activity / Identity",
+        "score": 58,
+        "maxScore": 100,
+        "grade": "D",
+        "detail": "High count of medium‑risk users"
+      }
+    ]
+  },
+  "maturityAssessment": {
+    "overallMaturity": "Developing",
+    "domains": [
+      {
+        "domain": "Identify",
+        "score": 3,
+        "target": 4,
+        "detail": "Asset and user inventory exists; gaps in risk tagging."
+      },
+      {
+        "domain": "Protect",
+        "score": 3,
+        "target": 4,
+        "detail": "EDR and CASB deployed; policy enforcement inconsistent."
+      },
+      {
+        "domain": "Detect",
+        "score": 4,
+        "target": 4,
+        "detail": "High event coverage; alert volume requires tuning."
+      },
+      {
+        "domain": "Respond",
+        "score": 3,
+        "target": 4,
+        "detail": "Incidents mostly resolved; 11 open need prioritization."
+      },
+      {
+        "domain": "Recover",
+        "score": 3,
+        "target": 4,
+        "detail": "Remediation applied; formal recovery plans limited."
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Unauthorized file operations (Endpoint)",
+      "severity": "critical",
+      "cvssScore": 9,
+      "description": "2 critical unauthorized file operation attempts observed on assets FISI and VP6-NRB; resolved but indicates data access risk.",
+      "mitreTechnique": "T1005 - Data from Local System",
+      "affectedSystems": "FISI, VP6-NRB"
+    },
+    {
+      "id": "F-002",
+      "title": "Security process termination attempts",
+      "severity": "high",
+      "cvssScore": 7.5,
+      "description": "Multiple 'Attempt To Terminate Cynet Process' events across hosts (PKFMSA-LAO, L5ZQ-NRB, F15X-NRB).",
+      "mitreTechnique": "T1562 - Impair Defenses",
+      "affectedSystems": "PKFMSA-LAO, L5ZQ-NRB, F15X-NRB, NRB-AD"
+    },
+    {
+      "id": "F-003",
+      "title": "High volume blocked web requests (SSE)",
+      "severity": "medium",
+      "cvssScore": 5,
+      "description": "Users zzuberi (690), iwanjiru (260), iwamala (234) show repeated denied web requests indicating risky behavior.",
+      "mitreTechnique": "T1190 - Exploit Public-Facing Application",
+      "affectedSystems": "User accounts: zzuberi, iwanjiru, iwamala"
+    },
+    {
+      "id": "F-004",
+      "title": "Port scanning detected (Network)",
+      "severity": "medium",
+      "cvssScore": 5,
+      "description": "Network activity inspection recorded TCP port scan targeting adikinim-KLA; no follow-on events.",
+      "mitreTechnique": "T1046 - Network Service Scanning",
+      "affectedSystems": "adikinim-KLA"
+    },
+    {
+      "id": "F-005",
+      "title": "Concentrated Windows 11 estate and high‑risk users",
+      "severity": "medium",
+      "cvssScore": 4.5,
+      "description": "618 of 745 devices run Windows 11; 4 users flagged high-risk (iraintern, mmuthoni, vkibe, ynanzingwa).",
+      "mitreTechnique": "T1078 - Valid Accounts",
+      "affectedSystems": "Windows11 fleet; user accounts listed"
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "R-001",
+      "title": "Elevate endpoint containment",
+      "priority": "critical",
+      "effort": "medium",
+      "timeline": "immediate",
+      "description": "Apply restrictive isolation on hosts with recent critical/ high detections and increase EDR telemetry retention to 90 days.",
+      "relatedFinding": "F-001"
+    },
+    {
+      "id": "R-002",
+      "title": "Harden security agent protection",
+      "priority": "high",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Prevent termination of Cynet and similar agents via tamper‑protection policies and log all termination attempts centrally.",
+      "relatedFinding": "F-002"
+    },
+    {
+      "id": "R-003",
+      "title": "Tighten CASB/web policies",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "description": "Block high‑risk app categories, enforce DLP on top blocked users, and investigate repeated denied requests.",
+      "relatedFinding": "F-003"
+    },
+    {
+      "id": "R-004",
+      "title": "Network monitoring and blocking",
+      "priority": "medium",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Add automated blocking for confirmed external scans; trigger triage on port‑scan detections.",
+      "relatedFinding": "F-004"
+    },
+    {
+      "id": "R-005",
+      "title": "User risk remediation & asset baseline",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "description": "Remediate 4 high‑risk users, enforce MFA, and validate patch status across Windows 11 fleet.",
+      "relatedFinding": "F-005"
+    }
+  ],
+  "riskMatrix": [
+    {
+      "risk": "Endpoint compromise",
+      "likelihood": 4,
+      "impact": 5,
+      "residualRisk": "high",
+      "treatmentPlan": "Contain infected hosts, increase EDR detection rules and telemetry."
+    },
+    {
+      "risk": "Data exfiltration via web/CASB",
+      "likelihood": 3,
+      "impact": 5,
+      "residualRisk": "high",
+      "treatmentPlan": "Enforce CASB DLP, block risky apps, monitor top users."
+    },
+    {
+      "risk": "Credential misuse by high‑risk users",
+      "likelihood": 3,
+      "impact": 4,
+      "residualRisk": "medium",
+      "treatmentPlan": "Immediate user reviews, MFA, and access reduction."
+    },
+    {
+      "risk": "Network reconnaissance",
+      "likelihood": 2,
+      "impact": 3,
+      "residualRisk": "medium",
+      "treatmentPlan": "Automate scan blocking and escalate repeated probes."
+    }
+  ],
+  "sections": [
+    {
+      "title": "Endpoint Security",
+      "content": "347 endpoint events: 317 medium, 28 high, 2 critical. Key patterns: removable media blocks and attempts to terminate security agent. Auto-remediation applied; several resolved incidents.",
+      "chartData": [
+        {
+          "name": "Severity - Endpoint",
+          "value": 347
+        },
+        {
+          "name": "Critical",
+          "value": 2
+        },
+        {
+          "name": "High",
+          "value": 28
+        },
+        {
+          "name": "Medium",
+          "value": 317
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "EDR triggering; enforce tamper protection and longer telemetry."
+    },
+    {
+      "title": "Web / CASB & Network Security",
+      "content": "SSE: 4,337 events (92 critical, 779 high). Top apps: WhatsApp 782, OpenAI‑ChatGPT 718. Network: 1 medium port‑scan event. Primary vector: web/CASB (3,742 CASB, 595 web_proxy).",
+      "chartData": [
+        {
+          "name": "SSE Events",
+          "value": 4337
+        },
+        {
+          "name": "CASB",
+          "value": 3742
+        },
+        {
+          "name": "Web Proxy",
+          "value": 595
+        },
+        {
+          "name": "Network Events",
+          "value": 1
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "Web/CASB drives event volume; focus DLP and app controls."
+    },
+    {
+      "title": "Incident Response",
+      "content": "348 incidents total: 318 medium, 28 high, 2 critical. 337 resolved, 11 open. Recent resolved criticals were unauthorized file operations on endpoints.",
+      "chartData": [
+        {
+          "name": "Total Incidents",
+          "value": 348
+        },
+        {
+          "name": "Resolved",
+          "value": 337
+        },
+        {
+          "name": "Open",
+          "value": 11
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "High resolution rate; open incidents require prioritization."
+    },
+    {
+      "title": "Asset & Identity (Inventory & Users)",
+      "content": "745 active devices (618 Windows 11, 84 Windows 10, 43 servers). 520 users generated 113,762 requests; 388 medium‑risk, 4 high‑risk users flagged for immediate review.",
+      "chartData": [
+        {
+          "name": "Total Devices",
+          "value": 745
+        },
+        {
+          "name": "Windows 11",
+          "value": 618
+        },
+        {
+          "name": "High‑Risk Users",
+          "value": 4
+        },
+        {
+          "name": "Medium‑Risk Users",
+          "value": 388
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Concentrated Windows 11 estate and several high‑risk users need targeted controls."
+    }
+  ],
+  "complianceMapping": [
+    {
+      "framework": "NIST",
+      "requirement": "PR.AC, DE.CM, RS.RP",
+      "status": "Partial",
+      "gap": "MFA enforcement inconsistent; incident prioritization gap."
+    },
+    {
+      "framework": "ISO 27001",
+      "requirement": "A.12, A.13, A.9",
+      "status": "Partial",
+      "gap": "Asset baseline and access controls need strengthening."
+    },
+    {
+      "framework": "SOC2",
+      "requirement": "CC6, CC7",
+      "status": "Partial",
+      "gap": "Monitoring coverage good; policy enforcement inconsistent."
+    },
+    {
+      "framework": "PCI-DSS",
+      "requirement": "6.1, 10.2",
+      "status": "Non-Compliant",
+      "gap": "Patching posture and centralized logging retention require improvement."
+    }
+  ],
+  "conclusion": "Posture is developing: strong detection and automated endpoint remediation but elevated web activity, concentrated Windows 11 assets, and a small set of high‑risk users increase exposure. Priorities: 1) tighten endpoint tamper protection and telemetry, 2) enforce CASB/DLP for top apps/users, 3) remediate high‑risk users and validate asset patching.",
+  "appendix": {
+    "glossary": [
+      {
+        "term": "SSE",
+        "definition": "Security Service Edge (CASB, SWG, DLP)"
+      },
+      {
+        "term": "CASB",
+        "definition": "Cloud Access Security Broker"
+      },
+      {
+        "term": "EDR",
+        "definition": "Endpoint Detection and Response"
+      },
+      {
+        "term": "DLP",
+        "definition": "Data Loss Prevention"
+      },
+      {
+        "term": "MFA",
+        "definition": "Multi‑Factor Authentication"
+      },
+      {
+        "term": "RAG",
+        "definition": "Red/Amber/Green risk status"
+      }
+    ],
+    "severityDefinitions": [
+      {
+        "level": "Critical",
+        "description": "Immediate threat",
+        "responseTime": "< 1 hour"
+      },
+      {
+        "level": "High",
+        "description": "Urgent attention needed",
+        "responseTime": "< 4 hours"
+      },
+      {
+        "level": "Medium",
+        "description": "Planned remediation",
+        "responseTime": "< 24 hours"
+      },
+      {
+        "level": "Low",
+        "description": "Next maintenance window",
+        "responseTime": "< 72 hours"
+      }
+    ]
+  }
+}

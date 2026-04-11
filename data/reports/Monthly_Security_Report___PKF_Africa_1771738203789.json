@@ -1,0 +1,537 @@
+{
+  "title": "Monthly Security Report - PKF Africa",
+  "type": "executive_summary",
+  "tenant": "PKF Africa",
+  "period": "last_month",
+  "generatedAt": "2026-02-22T05:30:03.789Z",
+  "documentControl": {
+    "version": "1.0",
+    "classification": "Confidential",
+    "preparedBy": "PKF Africa Operations Center",
+    "reviewedBy": "Principal Security Consultant",
+    "approvedBy": "Head of Managed Security Services",
+    "distributionList": [
+      "CISO",
+      "CTO",
+      "IT Security Team",
+      "Risk Committee"
+    ],
+    "documentId": "SO-RPT-MLXB5KBP"
+  },
+  "managementSummary": {
+    "overallRiskRating": "high",
+    "overallRiskScore": 68,
+    "previousRiskScore": 64,
+    "riskTrend": "increasing",
+    "ragStatus": [
+      {
+        "area": "Endpoint Security",
+        "status": "amber",
+        "score": 60,
+        "detail": "347 endpoint events; 30 high/critical; auto-remediation active."
+      },
+      {
+        "area": "Web/CASB (SSE)",
+        "status": "amber",
+        "score": 55,
+        "detail": "4,337 SSE events; 92 critical denials; high app usage (WhatsApp, ChatGPT)."
+      },
+      {
+        "area": "Network Security",
+        "status": "amber",
+        "score": 70,
+        "detail": "Single medium port-scan event; no auto-remediation applied."
+      },
+      {
+        "area": "Incident Management",
+        "status": "green",
+        "score": 80,
+        "detail": "348 incidents; 337 resolved (96.6%); 11 remain open."
+      },
+      {
+        "area": "Asset Management",
+        "status": "green",
+        "score": 85,
+        "detail": "745 active devices; 618 Windows 11; inventory coverage strong."
+      },
+      {
+        "area": "User Activity & Identity",
+        "status": "amber",
+        "score": 60,
+        "detail": "520 users; 388 medium-risk, 4 high-risk users flagged."
+      },
+      {
+        "area": "Risk Management",
+        "status": "amber",
+        "score": 50,
+        "detail": "Average risk score 60; anomalous max risk=1000 requires review."
+      }
+    ],
+    "criticalActions": [
+      "Validate and contain high-risk users (4) immediately; enforce MFA and session controls.",
+      "Harden endpoint controls: investigate critical Unauthorized File Operation attempts.",
+      "Tighten SSE policies for top apps and remediate 92 SSE-critical denials."
+    ]
+  },
+  "executiveSummary": "Period overview: Last 30 days produced 348 incidents (337 resolved, 11 open), 4,685 security events (4,337 SSE, 347 endpoint, 1 network), 745 active assets (618 Win11), 520 users (388 medium-risk, 4 high-risk), and average risk score 60 (max 1000). Endpoint auto-remediation blocked removable media; SSE blocked thousands of web requests (top apps: WhatsApp, ChatGPT).  \nTop cross-domain risks: (1) account misuse — 4 high-risk users generating excessive requests; enforce MFA, user behavior analytics, and targeted review. (2) web/cloud data exposure — 4,337 SSE events and high app use; tighten CASB policies and DLP. (3) malware/data-loss via endpoints — multiple high/critical EDR detections; validate containment and escalate forensic review.",
+  "keyHighlights": [
+    {
+      "label": "Total Incidents",
+      "value": "348",
+      "trend": "down",
+      "trendDetail": "-5%",
+      "context": "96.6% incidents resolved"
+    },
+    {
+      "label": "SSE Events",
+      "value": "4,337",
+      "trend": "up",
+      "trendDetail": "+12%",
+      "context": "92 critical denials"
+    },
+    {
+      "label": "Endpoint Events",
+      "value": "347",
+      "trend": "stable",
+      "trendDetail": "+0%",
+      "context": "30 high/critical events"
+    },
+    {
+      "label": "Active Assets",
+      "value": "745",
+      "trend": "stable",
+      "trendDetail": "+0%",
+      "context": "618 Windows 11 workstations"
+    },
+    {
+      "label": "High-risk Users",
+      "value": "4",
+      "trend": "up",
+      "trendDetail": "+33%",
+      "context": "Top: iraintern (631 requests)"
+    },
+    {
+      "label": "Average Risk Score",
+      "value": "60",
+      "trend": "up",
+      "trendDetail": "+6%",
+      "context": "4679 events scored"
+    }
+  ],
+  "securityScorecard": {
+    "overallScore": 68,
+    "previousScore": 64,
+    "categories": [
+      {
+        "name": "Endpoint Security",
+        "score": 60,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "EDR detects/auto-remediates; criticals present"
+      },
+      {
+        "name": "Web/CASB (SSE)",
+        "score": 55,
+        "maxScore": 100,
+        "grade": "C-",
+        "detail": "High volume blocked requests; app control gaps"
+      },
+      {
+        "name": "Network Security",
+        "score": 70,
+        "maxScore": 100,
+        "grade": "B-",
+        "detail": "Limited events; single port-scan unremediated"
+      },
+      {
+        "name": "Incident Response",
+        "score": 80,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "High resolution rate; 11 open incidents"
+      },
+      {
+        "name": "Asset Management",
+        "score": 85,
+        "maxScore": 100,
+        "grade": "B+",
+        "detail": "Complete active inventory; OS distribution known"
+      },
+      {
+        "name": "Identity & User Activity",
+        "score": 60,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Multiple medium-risk users; 4 high-risk"
+      },
+      {
+        "name": "Risk Management",
+        "score": 50,
+        "maxScore": 100,
+        "grade": "D",
+        "detail": "Avg score 60; extreme max value anomaly"
+      }
+    ]
+  },
+  "maturityAssessment": {
+    "overallMaturity": "Developing",
+    "domains": [
+      {
+        "domain": "Identify",
+        "score": 3,
+        "target": 4,
+        "detail": "Inventory complete; risk profiling needs refinement."
+      },
+      {
+        "domain": "Protect",
+        "score": 3,
+        "target": 4,
+        "detail": "Controls in place; gaps in SSE app controls."
+      },
+      {
+        "domain": "Detect",
+        "score": 3,
+        "target": 4,
+        "detail": "EDR and SSE detect events; tuning required."
+      },
+      {
+        "domain": "Respond",
+        "score": 4,
+        "target": 4,
+        "detail": "High incident resolution; escalation consistency good."
+      },
+      {
+        "domain": "Recover",
+        "score": 3,
+        "target": 4,
+        "detail": "Recovery plans exist; testing limited."
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Critical Unauthorized File Operations",
+      "severity": "critical",
+      "cvssScore": 8.6,
+      "description": "Two critical 'Unauthorized File Operation Attempt' incidents on assets FISI and VP6-NRB detected and resolved.",
+      "mitreTechnique": "T1490 - Inhibit System Recovery",
+      "affectedSystems": "FISI, VP6-NRB"
+    },
+    {
+      "id": "F-002",
+      "title": "EDR Process Termination Attempts",
+      "severity": "high",
+      "cvssScore": 7.5,
+      "description": "Multiple 'Attempt To Terminate Cynet Process' events across PKFMSA-LAO, L5ZQ-NRB, F15X-NRB resolved by EDR.",
+      "mitreTechnique": "T1089 - Disabling Security Tools",
+      "affectedSystems": "PKFMSA-LAO, L5ZQ-NRB, F15X-NRB"
+    },
+    {
+      "id": "F-003",
+      "title": "High SSE Block Volume and Top App Use",
+      "severity": "medium",
+      "cvssScore": 5,
+      "description": "4,337 SSE events; 92 critical denials; top apps include WhatsApp (782) and ChatGPT (718).",
+      "mitreTechnique": "T1195 - Supply Chain Compromise (cloud app misuse)",
+      "affectedSystems": "CASB, Web Proxy, User Agents"
+    },
+    {
+      "id": "F-004",
+      "title": "High-risk User Activity Concentration",
+      "severity": "high",
+      "cvssScore": 7,
+      "description": "Four high-risk users (iraintern 631 requests) generating disproportionate requests; denied counts low.",
+      "mitreTechnique": "T1078 - Valid Accounts",
+      "affectedSystems": "User accounts: iraintern, mmuthoni, vkibe, ynanzingwa"
+    },
+    {
+      "id": "F-005",
+      "title": "Network Port Scanning Event",
+      "severity": "medium",
+      "cvssScore": 4.3,
+      "description": "Port scanning (TCP) observed targeting adikinim-KLA; no auto-remediation applied.",
+      "mitreTechnique": "T1595 - Active Scanning",
+      "affectedSystems": "adikinim-KLA"
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "R-001",
+      "title": "Contain and Review Critical Endpoint Events",
+      "priority": "critical",
+      "effort": "medium",
+      "timeline": "immediate",
+      "description": "Perform forensic review of the two critical Unauthorized File Operation incidents and revoke affected credentials.",
+      "relatedFinding": "F-001"
+    },
+    {
+      "id": "R-002",
+      "title": "Harden EDR and Block Process Termination",
+      "priority": "high",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Enforce protection policies to prevent termination of defender processes and escalate persistent attempts.",
+      "relatedFinding": "F-002"
+    },
+    {
+      "id": "R-003",
+      "title": "Strengthen CASB/DLP Policies",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "description": "Restrict risky apps, apply DLP on Google Drive/Gmail, and reduce unnecessary ChatGPT/WhatsApp access.",
+      "relatedFinding": "F-003"
+    },
+    {
+      "id": "R-004",
+      "title": "Targeted User Risk Mitigation",
+      "priority": "critical",
+      "effort": "low",
+      "timeline": "immediate",
+      "description": "Apply MFA, session limits, and activity review for the four high-risk users; suspend if anomalous persists.",
+      "relatedFinding": "F-004"
+    },
+    {
+      "id": "R-005",
+      "title": "Network Detection and Response Tuning",
+      "priority": "medium",
+      "effort": "medium",
+      "timeline": "short-term",
+      "description": "Enable auto-remediation for port-scan signatures and correlate with endpoint telemetry for adikinim-KLA.",
+      "relatedFinding": "F-005"
+    }
+  ],
+  "riskMatrix": [
+    {
+      "risk": "Malware spread via endpoints",
+      "likelihood": 3,
+      "impact": 4,
+      "residualRisk": "high",
+      "treatmentPlan": "Contain infected hosts, validate EDR remediation, escalate forensic analysis."
+    },
+    {
+      "risk": "Data exposure via web/cloud apps",
+      "likelihood": 4,
+      "impact": 3,
+      "residualRisk": "high",
+      "treatmentPlan": "Tighten CASB/DLP, restrict high-risk apps, monitor uploads."
+    },
+    {
+      "risk": "Account misuse by high-risk users",
+      "likelihood": 4,
+      "impact": 4,
+      "residualRisk": "critical",
+      "treatmentPlan": "Enforce MFA, limit access, conduct targeted investigations."
+    },
+    {
+      "risk": "Network reconnaissance",
+      "likelihood": 2,
+      "impact": 3,
+      "residualRisk": "medium",
+      "treatmentPlan": "Enable auto-blocking, inspect source and lateral movement."
+    }
+  ],
+  "sections": [
+    {
+      "title": "SSE / Web & CASB Events",
+      "content": "4,337 SSE events in period; 92 critical denials. Top apps: WhatsApp (782), ChatGPT (718). High cloud/web usage increases data exposure risk.",
+      "chartData": [
+        {
+          "name": "SSE Events by Severity (critical/high/medium/low/info)",
+          "value": {
+            "critical": 92,
+            "high": 779,
+            "medium": 1106,
+            "low": 602,
+            "info": 1758
+          }
+        },
+        {
+          "name": "Top Apps",
+          "value": {
+            "WhatsApp": 782,
+            "ChatGPT": 718,
+            "Clarity": 348,
+            "Google Drive": 320,
+            "Gmail": 198
+          }
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "High web app usage drives most SSE blocks; tighten CASB and DLP."
+    },
+    {
+      "title": "Endpoint Security",
+      "content": "347 endpoint events: 28 high, 2 critical. EDR auto-remediation blocked removable media and prevented process termination attempts.",
+      "chartData": [
+        {
+          "name": "Endpoint Events by Severity",
+          "value": {
+            "critical": 2,
+            "high": 28,
+            "medium": 317
+          }
+        },
+        {
+          "name": "Top Endpoint Actions",
+          "value": {
+            "USB Insertions Blocked": 5,
+            "Process Termination Attempts": 5,
+            "Malicious Binary Detections": 4
+          }
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "EDR effective; critical file operations require forensic validation."
+    },
+    {
+      "title": "Incident Management",
+      "content": "348 incidents recorded; 337 resolved (96.6%), 11 open. Recent high/critical incidents were addressed via EDR and containment.",
+      "chartData": [
+        {
+          "name": "Incidents by Status",
+          "value": {
+            "resolved": 337,
+            "open": 11
+          }
+        },
+        {
+          "name": "Incidents by Severity",
+          "value": {
+            "critical": 2,
+            "high": 28,
+            "medium": 318
+          }
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "High resolution rate; remaining open incidents need prioritized closure."
+    },
+    {
+      "title": "Asset Inventory",
+      "content": "745 active devices: 695 workstations, 50 servers. OS mix dominated by Windows 11 (618) and Windows 10 (84).",
+      "chartData": [
+        {
+          "name": "Assets by OS",
+          "value": {
+            "Windows 11": 618,
+            "Windows 10": 84,
+            "Windows Server": 43
+          }
+        },
+        {
+          "name": "Assets by Type",
+          "value": {
+            "Workstation": 695,
+            "Server": 50
+          }
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "Good asset visibility; validate patching status on servers."
+    },
+    {
+      "title": "User Activity & Risk",
+      "content": "520 users generated 113,762 requests; user risk: 388 medium, 128 low, 4 high. High-risk users require immediate review.",
+      "chartData": [
+        {
+          "name": "User Risk Distribution",
+          "value": {
+            "medium": 388,
+            "low": 128,
+            "high": 4
+          }
+        },
+        {
+          "name": "Top High-risk Users Requests",
+          "value": {
+            "iraintern": 631,
+            "mmuthoni": 389,
+            "vkibe": 186,
+            "ynanzingwa": 144
+          }
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Concentrated risk in four users; enforce controls and review activity."
+    }
+  ],
+  "complianceMapping": [
+    {
+      "framework": "NIST",
+      "requirement": "PR.AC, DE.CM, RS",
+      "status": "Partial",
+      "gap": "User access controls and continuous monitoring need strengthening."
+    },
+    {
+      "framework": "ISO 27001",
+      "requirement": "A.9, A.12, A.13",
+      "status": "Partial",
+      "gap": "Asset change management and cloud controls require policy updates."
+    },
+    {
+      "framework": "SOC2",
+      "requirement": "CC6, CC7",
+      "status": "Partial",
+      "gap": "Access management and incident closure consistency needs evidence."
+    },
+    {
+      "framework": "PCI-DSS",
+      "requirement": "1.2, 5.1",
+      "status": "Non-Compliant",
+      "gap": "Environment segmentation and malware controls review required if card data present."
+    }
+  ],
+  "conclusion": "Posture is developing: incident response and asset visibility are strengths; web/CASB and user risk require prioritised controls. Top priorities next period: (1) contain critical endpoint events and forensic review, (2) enforce CASB/DLP and app restrictions, (3) mitigate high-risk users with MFA and targeted monitoring.",
+  "appendix": {
+    "glossary": [
+      {
+        "term": "SSE",
+        "definition": "Secure Service Edge (CASB, SWG, DLP consolidated)."
+      },
+      {
+        "term": "EDR",
+        "definition": "Endpoint Detection and Response."
+      },
+      {
+        "term": "CASB",
+        "definition": "Cloud Access Security Broker."
+      },
+      {
+        "term": "DLP",
+        "definition": "Data Loss Prevention."
+      },
+      {
+        "term": "MFA",
+        "definition": "Multi-Factor Authentication."
+      },
+      {
+        "term": "RAG",
+        "definition": "Red-Amber-Green risk status."
+      }
+    ],
+    "severityDefinitions": [
+      {
+        "level": "Critical",
+        "description": "Immediate threat",
+        "responseTime": "< 1 hour"
+      },
+      {
+        "level": "High",
+        "description": "Urgent attention needed",
+        "responseTime": "< 4 hours"
+      },
+      {
+        "level": "Medium",
+        "description": "Planned remediation",
+        "responseTime": "< 24 hours"
+      },
+      {
+        "level": "Low",
+        "description": "Next maintenance window",
+        "responseTime": "< 72 hours"
+      }
+    ]
+  }
+}

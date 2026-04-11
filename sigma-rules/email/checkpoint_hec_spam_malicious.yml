@@ -1,0 +1,29 @@
+title: Checkpoint HEC Spam with Malicious Confidence Indicator
+id: sigma-email-checkpoint-001
+status: stable
+level: high
+description: Detects spam emails classified with malicious confidence by Check Point Harmony Email & Collaboration. Despite being labeled spam, malicious confidence indicates potential attack vector delivery.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - spam
+    - malicious
+    - confidenceIndicator
+    - checkpoint hec
+    - harmony email
+  condition: selection AND keywords
+falsepositives:
+  - Aggressive spam filters flagging marketing email
+tags:
+  - attack.initial_access
+  - attack.t1566
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

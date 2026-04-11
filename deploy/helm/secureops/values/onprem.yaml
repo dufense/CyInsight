@@ -1,0 +1,168 @@
+cloudProvider: "onprem"
+
+cloudProviderConfig:
+  name: onprem
+  zones: []
+
+global:
+  storageClass: "local-path"
+  imageRegistry: "registry.internal.example.com"
+  imagePullSecrets:
+    - name: registry-credentials
+  dataResidency:
+    country: ""
+    label: onprem
+    complianceFramework: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+objectStorage:
+  provider: minio
+  bucket: secureops-events
+  region: us-east-1
+  endpoint: "http://minio.secureops.svc.cluster.local:9000"
+  accessKeyId: ""
+  secretAccessKey: ""
+  forcePathStyle: true
+  storageClass: STANDARD
+  archiveStorageClass: STANDARD
+
+ingress:
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+
+receiver:
+  replicaCount: 2
+  ingress:
+    enabled: true
+    className: nginx
+    host: ingest.secureops.local
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    tls:
+      enabled: true
+      secretName: secureops-receiver-tls
+  service:
+    type: ClusterIP
+
+management:
+  enabled: true
+  ingress:
+    enabled: true
+    className: nginx
+    host: app.secureops.local
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/affinity: cookie
+      nginx.ingress.kubernetes.io/session-cookie-name: secureops-sticky
+    tls:
+      enabled: true
+      secretName: secureops-management-tls
+  database:
+    host: "postgresql.secureops.svc.cluster.local"
+    port: 5432
+    name: secureops_management
+    existingSecret: secureops-secrets
+    secretKey: database-url
+    ssl: false
+    sslMode: disable
+
+dataPlane:
+  persistence:
+    enabled: true
+    hotStorage:
+      size: 100Gi
+      storageClass: local-path
+    coldStorage:
+      size: 500Gi
+      storageClass: local-path
+
+kafka:
+  enabled: false
+
+kafkaKraft:
+  enabled: true
+  replicaCount: 3
+  image:
+    repository: bitnami/kafka
+    tag: "3.8"
+    pullPolicy: IfNotPresent
+  clusterId: "secureops-kafka-cluster-001"
+  controllerQuorumVoters: "0@secureops-kafka-0.secureops-kafka-headless:9093,1@secureops-kafka-1.secureops-kafka-headless:9093,2@secureops-kafka-2.secureops-kafka-headless:9093"
+  logRetentionHours: 168
+  logRetentionBytes: "10737418240"
+  numPartitions: 12
+  defaultReplicationFactor: 3
+  minInsyncReplicas: 2
+  persistence:
+    size: 50Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  pdb:
+    enabled: true
+    minAvailable: 2
+
+kafkaExternal:
+  enabled: false
+
+redis:
+  enabled: true
+  architecture: replicaset
+  sentinel:
+    enabled: true
+    quorum: 2
+  auth:
+    enabled: false
+  replica:
+    replicaCount: 3
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+opensearch:
+  enabled: true
+  singleNode: false
+  replicas: 2
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: 2000m
+  pdb:
+    enabled: true
+    minAvailable: 1
+  persistence:
+    size: 50Gi
+    storageClass: local-path
+
+secrets:
+  create: true
+  databaseUrl: ""
+  sessionSecret: ""
+  aiApiKey: ""
+  superadminPassword: ""
+  cloudStorage:
+    accessKeyId: ""
+    secretAccessKey: ""
+
+certManager:
+  enabled: false
+
+networkPolicies:
+  enabled: false

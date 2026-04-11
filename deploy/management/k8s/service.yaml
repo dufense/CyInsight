@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-management
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: management
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: secureops
+    plane: management

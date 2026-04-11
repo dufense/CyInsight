@@ -1,0 +1,554 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GRC Shield — ECS Fargate Layer
+  Creates ECR repository, ECS Cluster, Application Load Balancer (HTTPS),
+  CloudWatch log group, IAM roles, ECS Service, and Auto Scaling.
+  Depends on: 01-vpc.yaml, 02-rds.yaml
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: grc-shield
+
+  # ─── Image ────────────────────────────────────────────────────────────────
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Docker image tag to deploy (use git SHA for production)
+
+  # ─── Compute ──────────────────────────────────────────────────────────────
+  TaskCpu:
+    Type: Number
+    Default: 1024
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+    Description: vCPU units (1024 = 1 vCPU)
+
+  TaskMemory:
+    Type: Number
+    Default: 2048
+    Description: Memory in MB. Must match valid Fargate CPU/memory combos.
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Number of ECS tasks. Min 2 for HA across AZs.
+
+  MinCapacity:
+    Type: Number
+    Default: 2
+
+  MaxCapacity:
+    Type: Number
+    Default: 10
+
+  # ─── ALB / HTTPS ──────────────────────────────────────────────────────────
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ACM certificate ARN for HTTPS. Leave blank to use HTTP only (not recommended).
+      Create with: aws acm request-certificate --domain-name yourdomain.com
+
+  # ─── Secrets ──────────────────────────────────────────────────────────────
+  SessionSecretArn:
+    Type: String
+    Description: >
+      Secrets Manager ARN for SESSION_SECRET.
+      Create with: aws/scripts/create-secrets.sh
+
+  OpenAIKeyArn:
+    Type: String
+    Default: ""
+    Description: >
+      Secrets Manager ARN for OPENAI_API_KEY (leave blank if not using AI features)
+
+  GithubTokenArn:
+    Type: String
+    Default: ""
+    Description: Secrets Manager ARN for GITHUB_TOKEN (optional)
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  HasOpenAIKey: !Not [!Equals [!Ref OpenAIKeyArn, ""]]
+  HasGithubToken: !Not [!Equals [!Ref GithubTokenArn, ""]]
+
+Resources:
+  # ─── ECR Repository ───────────────────────────────────────────────────────
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${EnvironmentName}/app"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 release images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Remove untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # ─── CloudWatch Log Group ─────────────────────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${EnvironmentName}/app"
+      RetentionInDays: 30
+
+  # ─── ECS Cluster ──────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${EnvironmentName}-cluster"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # ─── IAM — Task Execution Role (pull image, write logs, read secrets) ─────
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-task-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub
+                    - "${DBSecretArn}"
+                    - DBSecretArn:
+                        Fn::ImportValue: !Sub "${EnvironmentName}-DBSecretArn"
+                  - !Ref SessionSecretArn
+                  - !If [HasOpenAIKey, !Ref OpenAIKeyArn, !Ref AWS::NoValue]
+                  - !If [HasGithubToken, !Ref GithubTokenArn, !Ref AWS::NoValue]
+
+  # ─── IAM — Task Role (runtime permissions for the app) ────────────────────
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudWatch metrics for app-level monitoring
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              # Read own secrets at runtime (if app fetches them directly)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub
+                    - "${DBSecretArn}"
+                    - DBSecretArn:
+                        Fn::ImportValue: !Sub "${EnvironmentName}-DBSecretArn"
+                  - !Ref SessionSecretArn
+              # SSM Parameter Store (optional — for config)
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*"
+
+  # ─── ECS Task Definition ──────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-app"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}:${ImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: SECURE_COOKIES
+              Value: "true"
+            - Name: UPLOAD_DIR
+              Value: /app/uploads
+            - Name: NODE_OPTIONS
+              Value: "--max-old-space-size=1536"
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub
+                - "${DBSecretArn}:DATABASE_URL::"
+                - DBSecretArn:
+                    Fn::ImportValue: !Sub "${EnvironmentName}-DBSecretArn"
+            - Name: SESSION_SECRET
+              ValueFrom: !Ref SessionSecretArn
+            - !If
+              - HasOpenAIKey
+              - Name: OPENAI_API_KEY
+                ValueFrom: !Ref OpenAIKeyArn
+              - !Ref AWS::NoValue
+            - !If
+              - HasGithubToken
+              - Name: GITHUB_TOKEN
+                ValueFrom: !Ref GithubTokenArn
+              - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - |
+                node -e "const h=require('http');const r=h.get('http://localhost:5000/api/health',(res)=>{process.exit(res.statusCode===200?0:1)});r.on('error',()=>process.exit(1));r.setTimeout(5000,()=>{r.destroy();process.exit(1)})"
+            Interval: 30
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 60
+          ReadonlyRootFilesystem: false
+          LinuxParameters:
+            InitProcessEnabled: true
+          MountPoints:
+            - SourceVolume: tmp-storage
+              ContainerPath: /tmp
+            - SourceVolume: uploads-storage
+              ContainerPath: /app/uploads
+      Volumes:
+        - Name: tmp-storage
+        - Name: uploads-storage
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # ─── Application Load Balancer ────────────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet2Id"
+      SecurityGroups:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-ALBSecurityGroupId"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "120"
+        - Key: access_logs.s3.enabled
+          Value: "false"
+        - Key: deletion_protection.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # Target group — sticky sessions for pg-boss/session continuity
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-tg"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VpcId"
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "86400"
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # HTTP listener — redirect to HTTPS if cert present, otherwise forward
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasCertificate
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref ALBTargetGroup
+
+  # HTTPS listener (only created when certificate is provided)
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ─── ECS Service ──────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ALBListenerHTTP
+    Properties:
+      ServiceName: !Sub "${EnvironmentName}-app"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
+            - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${EnvironmentName}-AppSecurityGroupId"
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+      HealthCheckGracePeriodSeconds: 90
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      DeploymentController:
+        Type: ECS
+      EnableExecuteCommand: true  # Allows `aws ecs execute-command` for debugging
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # ─── Auto Scaling ─────────────────────────────────────────────────────────
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  # Scale on CPU
+  ScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # Scale on Memory
+  ScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-memory-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 80.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # ─── CloudWatch Alarms ────────────────────────────────────────────────────
+  ECSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-ecs-high-cpu"
+      AlarmDescription: ECS service CPU > 85%
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+
+  ALBUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-alb-unhealthy-hosts"
+      AlarmDescription: ALB has unhealthy targets
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+
+  ALBHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-alb-high-latency"
+      AlarmDescription: ALB p99 response time > 3s
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+
+Outputs:
+  ALBDNSName:
+    Value: !GetAtt ALB.DNSName
+    Description: ALB DNS name — point your domain CNAME here
+    Export:
+      Name: !Sub "${EnvironmentName}-ALBDNSName"
+
+  ALBHostedZoneId:
+    Value: !GetAtt ALB.CanonicalHostedZoneID
+    Description: ALB hosted zone ID — use for Route 53 alias records
+    Export:
+      Name: !Sub "${EnvironmentName}-ALBHostedZoneId"
+
+  ECRRepositoryUri:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}"
+    Description: Full ECR repository URI for docker push/pull
+    Export:
+      Name: !Sub "${EnvironmentName}-ECRUri"
+
+  ECSClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${EnvironmentName}-ECSCluster"
+
+  ECSServiceName:
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${EnvironmentName}-ECSService"
+
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Sub "${EnvironmentName}-TaskDefinitionArn"

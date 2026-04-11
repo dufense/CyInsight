@@ -1,0 +1,39 @@
+#19 - Incident Investigation Canvas — Attack Story & Entity Graph
+What & Why
+Leading AI SOC platforms provide a visual "attack story" that shows the full incident as an interactive canvas rather than a flat table of events:
+
+Palo Alto XSIAM: Full attack story with root cause analysis and kill-chain progression
+Microsoft Sentinel: Security Graph — graph-powered investigation for rapid threat analysis
+CrowdStrike: Investigation Canvas with real-time guided analysis
+Currently, our incident detail page shows a dialog with tabs for AI enrichment, IOCs, and events — but has no visual representation of the attack timeline or entity relationships. Analysts cannot see how an attack unfolded or which assets/users are connected. This is the most visually impactful gap in the platform.
+
+Done looks like
+Incidents table gains an "Investigate" button that opens a full-screen Investigation Canvas page at /incidents/:id/canvas
+Top section — Attack Timeline: Horizontal scrollable swimlane timeline showing each related security event plotted at its exact timestamp, color-coded by MITRE Kill Chain phase (Initial Access=red, Execution=orange, Persistence=yellow, Lateral Movement=purple, Exfiltration=pink, etc.). Events are clickable to expand a detail card.
+Center section — Entity Relationship Graph: Force-directed graph using D3/Recharts-compatible SVG rendering. Nodes represent: threat actors (attacker IPs), victim assets (hostnames), users (accounts), and malware/IOC nodes. Edges show relationships (e.g., "attacked", "logged in as", "downloaded", "communicated with"). Node size = severity/frequency. Nodes pulse/glow with their threat color. Hovering shows a tooltip with entity details.
+Right sidebar — Incident Intelligence Panel: Shows MITRE tactic/technique cards, kill chain phase badge, confidence score gauge, classification badge (TP/FP), IOC reputation rows, AI-generated attack narrative (prose), and recommended response actions.
+Bottom section — Evidence Locker: Compact table of all related raw events with timestamp, source, event type, and a "Copy" icon. Filter by kill chain phase.
+A "Generate Report" button that creates a PDF-ready investigation summary using the existing AI reports system
+Dark glass-morphism styling, smooth animations on node appearance, and animated attack flow arrows
+Out of scope
+Real-time graph updates (static snapshot of incident state at page load)
+Graph editing / annotation by analysts (future task)
+3D graph rendering
+Integration with external graph databases (Neo4j, etc.)
+Tasks
+Route + page scaffold — Add /incidents/:id/canvas route in client/src/App.tsx pointing to new client/src/pages/incident-canvas.tsx. Add "Investigate →" button to each incident row in client/src/pages/incidents.tsx that navigates to this route.
+
+Backend: entity graph data endpoint — Add GET /api/incidents/:id/graph in server/routes.ts that returns { nodes: [], edges: [], events: [], timeline: [] }. Nodes are derived from the incident's related security events: extract unique source IPs (attacker nodes), destination IPs/hostnames (target nodes), usernames (user nodes), and IOC values (indicator nodes). Edges connect them based on event fields. Timeline entries are all related events sorted by timestamp with their kill-chain phase assigned.
+
+Attack Timeline component — Build AttackTimeline using a horizontally scrollable SVG or div-based layout. Kill-chain phases are color-coded swimlanes. Events are dot markers on a horizontal time axis. Clicking a dot shows an expanded card with event details (source, destination, raw log snippet).
+
+Entity Graph component — Build EntityGraph using SVG with manual force-simulation (simple spring physics in useEffect/requestAnimationFrame) or a lightweight graph library compatible with the existing stack. Nodes are circles (color by type: red=attacker, blue=asset, green=user, yellow=IOC). Edges are lines with directional arrows. Support zoom+pan via SVG viewBox manipulation. Node hover shows a tooltip. Clicking a node filters the evidence locker to events involving that entity.
+
+Incident Intelligence sidebar — Right-side sticky panel rendering: MITRE tactic/technique badges (from incident enrichment), kill chain phase progress bar, confidence score ring gauge, TP/FP badge, IOC reputation rows (color-coded malicious/suspicious/clean), AI attack narrative text, and 3-5 response recommendations pulled from the AI enrichment data already stored on the incident.
+
+Evidence Locker table — Compact table at the bottom of the page listing all events related to the incident. Columns: Time, Kill Chain Phase (badge), Source IP, Destination, Event Type, Raw details (expandable). Filterable by phase. Paginated at 25 rows.
+
+Full-screen styling + navigation — Canvas page uses full viewport height with no sidebar/navbar overlap. Top bar shows incident ID, title, severity badge, back button, and "Generate Report" action. Dark gradient background consistent with platform PageHero style.
+
+Relevant files
+client/src/pages/incidents.tsx client/src/App.tsx server/routes.ts server/storage.ts client/src/components/page-hero.tsx client/src/lib/tenant-context.tsx

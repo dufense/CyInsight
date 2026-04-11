@@ -1,0 +1,72 @@
+{
+  "_meta": {
+    "spf": null,
+    "dkim": null,
+    "saas": "office365_emails",
+    "dmarc": null,
+    "state": "remediated",
+    "actions": [
+      {
+        "actionType": "add_spam_header",
+        "createTime": "2026-03-20T15:01:16.443397Z",
+        "relatedEntityId": "ac002ceb5e1e47d3b7f35a175635d3e6"
+      }
+    ],
+    "eventId": "ac002ceb5e1e47d3b7f35a175635d3e6",
+    "subject": "",
+    "entityId": "c31582a8ecad57c7bd06eb874c903519",
+    "platform": "Check Point Harmony Email",
+    "eventType": "spam",
+    "customerId": "pkfgroup1",
+    "senderDomain": "hotelfootball.com",
+    "recipientDomain": "",
+    "confidenceIndicator": "malicious"
+  },
+  "asset": "",
+  "action": "add_spam_header",
+  "sender": "info@hotelfootball.com",
+  "target": null,
+  "threat": "Spam email from hotelfootball.com",
+  "attacker": "info@hotelfootball.com",
+  "severity": "medium",
+  "eventType": "email",
+  "logSource": "Checkpoint HEC",
+  "occurredAt": "2026-03-20T15:01:11.147085+00:00",
+  "rawPayload": {
+    "data": "#{\"label\": \"Spam\", \"entity_id\": \"c31582a8ecad57c7bd06eb874c903519\", \"entity_type\": \"avanan_ap_scan\"} attempt detected in an email from #{\"label\": \"info@hotelfootball.com\", \"entity_id\": \"ext:info@hotelfootball.com\", \"entity_type\": \"office365_emails_user\", \"disable_link\": true} - '#{\"label\": \"Ryan Giggs Confirmed for Leeds! 👀\", \"entity_id\": \"c31582a8ecad57c7bd06eb874c903519\", \"entity_type\": \"office365_emails_email\"}' (#{\"label\": \"avadher@ke.pkfea.com\", \"entity_id\": \"03954a02-260b-4228-851a-00cb1135381f\", \"entity_type\": \"office365_emails_user\"}'s mailbox)",
+    "saas": "office365_emails",
+    "type": "spam",
+    "state": "remediated",
+    "actions": [
+      {
+        "actionType": "add_spam_header",
+        "createTime": "2026-03-20T15:01:16.443397Z",
+        "relatedEntityId": "ac002ceb5e1e47d3b7f35a175635d3e6"
+      }
+    ],
+    "eventId": "ac002ceb5e1e47d3b7f35a175635d3e6",
+    "entityId": "c31582a8ecad57c7bd06eb874c903519",
+    "severity": "2",
+    "customerId": "pkfgroup1",
+    "entityLink": "https://portal.checkpoint.com/dashboard/email&collaboration/CGS1?route=cHJvZmlsZS9vZmZpY2UzNjVfZW1haWxzX2VtYWlsL2MzMTU4MmE4ZWNhZDU3YzdiZDA2ZWI4NzRjOTAzNTE5",
+    "description": "Spam attempt detected in an email from info@hotelfootball.com - 'Ryan Giggs Confirmed for Leeds! 👀' (avadher@ke.pkfea.com's mailbox)",
+    "eventCreated": "2026-03-20T15:01:11.147085+00:00",
+    "senderAddress": "info@hotelfootball.com",
+    "additionalData": null,
+    "confidenceIndicator": "malicious",
+    "availableEventActions": null
+  },
+  "sourceType": "Check Point Harmony Email",
+  "description": "Spam attempt detected in an email from info@hotelfootball.com - 'Ryan Giggs Confirmed for Leeds! 👀' (avadher@ke.pkfea.com's mailbox)",
+  "mitreTactic": null,
+  "sigmaMatches": [
+    {
+      "ruleId": "2aa1440c-9ae9-4d92-84a7-a9e5f5e31695",
+      "severity": "high",
+      "ruleTitle": "Suspicious Activity in Shell Commands",
+      "mitreTactic": "Execution",
+      "mitreTechnique": "T1059.004"
+    }
+  ],
+  "mitreTechnique": null
+}

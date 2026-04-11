@@ -1,0 +1,326 @@
+##############################################################################
+# Cyber Command Center — RDS PostgreSQL (Management Plane DB)
+#
+# Creates an Amazon RDS PostgreSQL instance for the management plane.
+# This is a standalone stack that should be deployed before the
+# management-plane.yml stack.
+#
+# For the data plane, repeat with different parameter values
+# (or use a separate Timescale Cloud / EC2-hosted TimescaleDB instance).
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/rds.yml \
+#     --stack-name ccc-rds-management \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcId=vpc-xxxx \
+#       PrivateSubnetIds="subnet-ccc,subnet-ddd" \
+#       AppSecurityGroupId=sg-ecs-tasks \
+#       DBPassword=<strong-password> \
+#       Plane=management
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — RDS PostgreSQL instance"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  Plane:
+    Type: String
+    Description: Which plane this DB serves (management or data)
+    Default: management
+    AllowedValues: [management, data]
+
+  DataPlaneRegion:
+    Type: String
+    Description: Data plane logical region (only used when Plane=data)
+    Default: ""
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for the RDS subnet group (minimum 2)
+
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the ECS tasks that will connect to this RDS instance
+
+  DBName:
+    Type: String
+    Default: secureops_management
+
+  DBUsername:
+    Type: String
+    Default: secureops
+    NoEcho: false
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Master password for the RDS instance (min 16 chars)
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t3.large
+      - db.m5.large
+      - db.m5.xlarge
+      - db.m5.2xlarge
+      - db.r5.large
+      - db.r5.xlarge
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 100
+    MinValue: 20
+    MaxValue: 65536
+    Description: Allocated storage in GB
+
+  DBMaxAllocatedStorage:
+    Type: Number
+    Default: 500
+    Description: Maximum storage for auto-scaling (GB)
+
+  DBPostgresVersion:
+    Type: String
+    Default: "16.3"
+    AllowedValues:
+      - "16.3"
+      - "16.2"
+      - "15.7"
+      - "15.6"
+      - "14.12"
+
+  MultiAZ:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable Multi-AZ for high availability (recommended for production)
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+  PerformanceInsightsEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Resources:
+
+  # ── Security Group ─────────────────────────────────────────────────────────
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-rds-${Plane}-sg-${EnvironmentName}"
+      GroupDescription: !Sub "RDS PostgreSQL security group for CCC ${Plane} plane"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroupId
+          Description: PostgreSQL from ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-rds-${Plane}-sg-${EnvironmentName}"
+
+  # ── DB Subnet Group ────────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "CCC ${Plane} plane RDS subnet group"
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: !Ref Plane
+
+  # ── RDS Parameter Group ────────────────────────────────────────────────────
+  # Tuned for OLTP workloads with connection pooling (PgBouncer / app-level)
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: !Sub "postgres${DBPostgresVersion}"
+      Description: !Sub "CCC ${Plane} plane — PostgreSQL parameter group"
+      Parameters:
+        # Connection & timeout settings
+        idle_in_transaction_session_timeout: "60000"   # 60s — kill idle transactions
+        statement_timeout: "30000"                      # 30s — matches app pool config
+        lock_timeout: "10000"                           # 10s — avoid lock storms
+        tcp_keepalives_idle: "60"
+        tcp_keepalives_interval: "10"
+        tcp_keepalives_count: "6"
+
+        # Logging (for RDS Performance Insights & CloudWatch)
+        log_min_duration_statement: "2000"             # Log queries > 2s
+        log_connections: "0"
+        log_disconnections: "0"
+        log_lock_waits: "1"
+        log_temp_files: "0"
+
+        # Memory — adjust based on instance class
+        work_mem: "16384"                              # 16 MB per sort/hash
+        maintenance_work_mem: "262144"                 # 256 MB for VACUUM/index
+
+        # Checkpoint / WAL
+        checkpoint_completion_target: "0.9"
+        wal_buffers: "16384"                          # 16 MB
+
+        # pg_stat_statements (available on all RDS PostgreSQL versions)
+        shared_preload_libraries: "pg_stat_statements"
+        pg_stat_statements.track: "all"
+        pg_stat_statements.max: "10000"
+
+        # Autovacuum tuning for high-write MSSP workloads
+        autovacuum_vacuum_scale_factor: "0.05"
+        autovacuum_analyze_scale_factor: "0.02"
+        autovacuum_vacuum_cost_delay: "2"
+
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── RDS Instance ───────────────────────────────────────────────────────────
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-${Plane}-${EnvironmentName}"
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: !Ref DBPostgresVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      MaxAllocatedStorage: !Ref DBMaxAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBParameterGroupName: !Ref DBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      MultiAZ: !Ref MultiAZ
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      CopyTagsToSnapshot: true
+      DeletionProtection: !Ref DeletionProtection
+      EnablePerformanceInsights: !Ref PerformanceInsightsEnabled
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: !Ref Plane
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── CloudWatch Alarms ──────────────────────────────────────────────────────
+  AlarmHighCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-rds-${Plane}-${EnvironmentName}-high-cpu"
+      AlarmDescription: RDS CPU above 80% for 5 minutes
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmLowStorage:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-rds-${Plane}-${EnvironmentName}-low-storage"
+      AlarmDescription: RDS free storage below 10 GB
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10737418240  # 10 GB in bytes
+      ComparisonOperator: LessThanThreshold
+
+  AlarmHighConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-rds-${Plane}-${EnvironmentName}-high-connections"
+      AlarmDescription: RDS connections above 80% of max_connections
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 270   # ~80% of db.t3.medium limit (~340)
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+
+  RDSEndpoint:
+    Description: RDS instance endpoint hostname
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSEndpoint"
+
+  RDSPort:
+    Description: RDS instance port
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSPort"
+
+  ConnectionString:
+    Description: "PostgreSQL connection string (without password — add to Secrets Manager)"
+    Value: !Sub "postgresql://${DBUsername}:PASSWORD@${RDSInstance.Endpoint.Address}:${RDSInstance.Endpoint.Port}/${DBName}?sslmode=require"
+    Export:
+      Name: !Sub "${AWS::StackName}-ConnectionString"
+
+  RDSSecurityGroupId:
+    Description: Security group ID of the RDS instance
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSSecurityGroupId"
+
+  RDSInstanceId:
+    Description: RDS Instance Identifier
+    Value: !Ref RDSInstance
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSInstanceId"

@@ -1,0 +1,94 @@
+{{- if .Values.management.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secureops.fullname" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: management
+spec:
+  replicas: {{ .Values.management.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      plane: management
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "secureops.selectorLabels" . | nindent 8 }}
+        plane: management
+    spec:
+      {{- include "secureops.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "secureops.fullname" . }}-management
+      {{- end }}
+      containers:
+        - name: management
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.management.image.repository }}:{{ .Values.management.image.tag }}"
+          imagePullPolicy: {{ .Values.management.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: PLANE
+              value: "management"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: database-url
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: session-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: openai-api-key
+            - name: SUPERADMIN_DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: superadmin-password
+            {{- include "secureops.kafkaEnv" . | nindent 12 }}
+            {{- include "secureops.objectStorageEnv" . | nindent 12 }}
+            {{- include "secureops.federationEnv" . | nindent 12 }}
+            {{- include "secureops.sslEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.management.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if .Values.management.persistence.enabled }}
+          volumeMounts:
+            - name: app-data
+              mountPath: /app/data
+          {{- end }}
+      {{- if .Values.management.persistence.enabled }}
+      volumes:
+        - name: app-data
+          persistentVolumeClaim:
+            claimName: {{ include "secureops.fullname" . }}-management-data
+      {{- end }}
+{{- end }}

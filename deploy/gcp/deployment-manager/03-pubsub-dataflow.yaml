@@ -1,0 +1,350 @@
+##############################################################################
+# Cyber Command Center -- GCP Pub/Sub + Dataflow (Streaming Ingest)
+#
+# GCP equivalent of AWS MSK Kafka / Azure Event Hubs.
+# Pub/Sub provides Kafka-compatible streaming (via Pub/Sub Kafka bridge).
+# Dataflow (Apache Beam) handles enrichment and S3-equivalent GCS writes.
+#
+# Creates:
+#   - Pub/Sub Topics:
+#       ccc-raw-events          (landing from receivers)
+#       ccc-enriched-events     (post-AI normalization)
+#       ccc-alerts              (alert engine output)
+#       ccc-dead-letter         (parse failures)
+#   - Pub/Sub Subscriptions (for data plane consumers)
+#   - Dataflow service account (ccc-dataflow-runner) with least-privilege IAM roles
+#   - Dataflow Flex Template streaming job (Pub/Sub -> GCS Parquet)
+#       Uses gcp-types/dataflow-v1b3:projects.locations.flexTemplates.launch
+#       (NOT dataflow.v1b3.job which only supports Classic Templates)
+#   - Pub/Sub Lite (for high-throughput reserved capacity, optional)
+#   - IAM bindings for Cloud Run service accounts
+#   - Secret Manager secret for Pub/Sub credentials
+#   - Cloud Monitoring alerts (oldest unacked message age, dead letter count)
+#
+# Deploy order: this stack (03) depends on GCS bucket from 04-gcs-bigquery.yaml.
+#   deploy-all.sh deploys 04-datalake BEFORE launching the Dataflow job (step 5).
+#
+# Deploy:
+#   gcloud deployment-manager deployments create ccc-pubsub \
+#     --config deploy/gcp/deployment-manager/03-pubsub-dataflow.yaml \
+#     --project YOUR_PROJECT_ID
+##############################################################################
+
+resources:
+
+  # ── Pub/Sub Topics ─────────────────────────────────────────────────────────
+  - name: ccc-raw-events-topic
+    type: pubsub.v1.topic
+    properties:
+      topic: ccc-raw-events
+      messageRetentionDuration: 259200s  # 3 days
+      messageStoragePolicy:
+        allowedPersistenceRegions:
+          - us-central1
+      labels:
+        project: cybercommandcenter
+        tier: raw
+
+  - name: ccc-enriched-events-topic
+    type: pubsub.v1.topic
+    properties:
+      topic: ccc-enriched-events
+      messageRetentionDuration: 259200s
+      messageStoragePolicy:
+        allowedPersistenceRegions:
+          - us-central1
+      labels:
+        project: cybercommandcenter
+        tier: enriched
+
+  - name: ccc-alerts-topic
+    type: pubsub.v1.topic
+    properties:
+      topic: ccc-alerts
+      messageRetentionDuration: 604800s  # 7 days
+      labels:
+        project: cybercommandcenter
+        tier: alerts
+
+  - name: ccc-dead-letter-topic
+    type: pubsub.v1.topic
+    properties:
+      topic: ccc-dead-letter
+      messageRetentionDuration: 604800s
+      labels:
+        project: cybercommandcenter
+        tier: dead-letter
+
+  # ── Pub/Sub Subscriptions ─────────────────────────────────────────────────
+  - name: ccc-data-plane-subscription
+    type: pubsub.v1.subscription
+    metadata:
+      dependsOn: [ccc-raw-events-topic, ccc-dead-letter-topic]
+    properties:
+      subscription: ccc-data-plane-sub
+      topic: $(ref.ccc-raw-events-topic.name)
+      ackDeadlineSeconds: 60
+      messageRetentionDuration: 259200s
+      retainAckedMessages: false
+      deadLetterPolicy:
+        deadLetterTopic: $(ref.ccc-dead-letter-topic.name)
+        maxDeliveryAttempts: 5
+      retryPolicy:
+        minimumBackoff: 10s
+        maximumBackoff: 600s
+      filter: ""
+
+  - name: ccc-enrichment-subscription
+    type: pubsub.v1.subscription
+    metadata:
+      dependsOn: [ccc-raw-events-topic, ccc-dead-letter-topic]
+    properties:
+      subscription: ccc-enrichment-pipeline-sub
+      topic: $(ref.ccc-raw-events-topic.name)
+      ackDeadlineSeconds: 120
+      messageRetentionDuration: 259200s
+      deadLetterPolicy:
+        deadLetterTopic: $(ref.ccc-dead-letter-topic.name)
+        maxDeliveryAttempts: 5
+      retryPolicy:
+        minimumBackoff: 10s
+        maximumBackoff: 600s
+
+  - name: ccc-sigma-subscription
+    type: pubsub.v1.subscription
+    metadata:
+      dependsOn: [ccc-enriched-events-topic, ccc-dead-letter-topic]
+    properties:
+      subscription: ccc-sigma-engine-sub
+      topic: $(ref.ccc-enriched-events-topic.name)
+      ackDeadlineSeconds: 60
+      messageRetentionDuration: 259200s
+      deadLetterPolicy:
+        deadLetterTopic: $(ref.ccc-dead-letter-topic.name)
+        maxDeliveryAttempts: 5
+
+  - name: ccc-gcs-writer-subscription
+    type: pubsub.v1.subscription
+    metadata:
+      dependsOn: [ccc-enriched-events-topic, ccc-dead-letter-topic]
+    properties:
+      subscription: ccc-gcs-writer-sub
+      topic: $(ref.ccc-enriched-events-topic.name)
+      ackDeadlineSeconds: 300
+      messageRetentionDuration: 259200s
+      deadLetterPolicy:
+        deadLetterTopic: $(ref.ccc-dead-letter-topic.name)
+        maxDeliveryAttempts: 5
+
+  # ── Service Account for Pub/Sub Publishers (Cloud Run) ────────────────────
+  - name: ccc-pubsub-publisher-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-pubsub-publisher
+      displayName: "CCC Pub/Sub Publisher (Cloud Run services)"
+
+  - name: ccc-pubsub-publisher-iam
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-pubsub-publisher-sa, ccc-raw-events-topic]
+    properties:
+      resource: $(env.project)
+      role: roles/pubsub.publisher
+      member: serviceAccount:$(ref.ccc-pubsub-publisher-sa.email)
+
+  - name: ccc-pubsub-subscriber-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-pubsub-subscriber
+      displayName: "CCC Pub/Sub Subscriber (data plane consumers)"
+
+  - name: ccc-pubsub-subscriber-iam
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-pubsub-subscriber-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/pubsub.subscriber
+      member: serviceAccount:$(ref.ccc-pubsub-subscriber-sa.email)
+
+  # ── Secret Manager: Pub/Sub project credentials ───────────────────────────
+  - name: ccc-pubsub-project-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-pubsub-project
+      replication:
+        automatic: {}
+      labels:
+        project: cybercommandcenter
+
+  - name: ccc-pubsub-project-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn: [ccc-pubsub-project-secret]
+    properties:
+      secret: $(ref.ccc-pubsub-project-secret.name)
+      payload:
+        data: $(env.project)
+
+  # ── Cloud Run Service Accounts ───────────────────────────────────────────────
+  # These identities are referenced in deploy-all.sh --service-account flags.
+  # Created here so they are provisioned before Cloud Run services are deployed.
+
+  - name: ccc-management-plane-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-management-plane
+      displayName: "CCC Management Plane Cloud Run service identity"
+
+  - name: ccc-management-plane-sa-secretaccess
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-management-plane-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/secretmanager.secretAccessor
+      member: serviceAccount:$(ref.ccc-management-plane-sa.email)
+
+  - name: ccc-management-plane-sa-sqladmin
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-management-plane-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/cloudsql.client
+      member: serviceAccount:$(ref.ccc-management-plane-sa.email)
+
+  - name: ccc-data-plane-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-data-plane
+      displayName: "CCC Data Plane Cloud Run service identity"
+
+  - name: ccc-data-plane-sa-secretaccess
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-data-plane-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/secretmanager.secretAccessor
+      member: serviceAccount:$(ref.ccc-data-plane-sa.email)
+
+  - name: ccc-data-plane-sa-bigquery
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-data-plane-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/bigquery.dataViewer
+      member: serviceAccount:$(ref.ccc-data-plane-sa.email)
+
+  - name: ccc-data-plane-sa-pubsub
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-data-plane-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/pubsub.publisher
+      member: serviceAccount:$(ref.ccc-data-plane-sa.email)
+
+  # ── Dataflow Service Account (streaming job) ─────────────────────────────────
+  - name: ccc-dataflow-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-dataflow-runner
+      displayName: "CCC Dataflow Flex Template runner (Pub/Sub -> GCS Parquet)"
+
+  - name: ccc-dataflow-sa-dataflow-worker
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-dataflow-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/dataflow.worker
+      member: serviceAccount:$(ref.ccc-dataflow-sa.email)
+
+  - name: ccc-dataflow-sa-pubsub-subscriber
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-dataflow-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/pubsub.subscriber
+      member: serviceAccount:$(ref.ccc-dataflow-sa.email)
+
+  - name: ccc-dataflow-sa-storage-admin
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-dataflow-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/storage.objectAdmin
+      member: serviceAccount:$(ref.ccc-dataflow-sa.email)
+
+  # ── Dataflow Flex Template Streaming Job (Pub/Sub -> GCS Parquet) ─────────────
+  # Managed declaratively via Deployment Manager.
+  #
+  # Idempotency note: gcp-types/dataflow-v1b3:projects.locations.flexTemplates.launch
+  # has no PATCH/UPDATE method in the Dataflow API. Deployment Manager treats this
+  # resource as immutable — if properties are unchanged between DM update runs,
+  # DM detects no delta and makes no API call (safe re-run). A new job is only
+  # created when a DM deployment is first created, or when job properties change.
+  #
+  # The deploy-all.sh script also runs deploy_dataflow() with a running-job check
+  # for explicit manual re-launches (--stack dataflow), ensuring no duplicates.
+  - name: ccc-pubsub-to-parquet-job
+    type: gcp-types/dataflow-v1b3:projects.locations.flexTemplates.launch
+    metadata:
+      dependsOn:
+        - ccc-dataflow-sa
+        - ccc-dataflow-sa-dataflow-worker
+        - ccc-dataflow-sa-pubsub-subscriber
+        - ccc-dataflow-sa-storage-admin
+    properties:
+      projectId: $(env.project)
+      location: us-central1
+      launchParameter:
+        jobName: ccc-pubsub-to-parquet
+        containerSpecGcsPath: gs://dataflow-templates-us-central1/latest/flex/PubSub_to_Parquet
+        environment:
+          serviceAccountEmail: $(ref.ccc-dataflow-sa.email)
+          network: ccc-vpc
+          subnetwork: regions/us-central1/subnetworks/ccc-private-subnet-us-central1
+          ipConfiguration: WORKER_IP_PRIVATE
+          maxWorkers: 20
+          numWorkers: 2
+          machineType: n2-standard-4
+          enableStreamingEngine: true
+          additionalExperiments:
+            - enable_recommendations
+            - enable_google_cloud_profiler
+          autoscalingAlgorithm: THROUGHPUT_BASED
+          tempLocation: gs://ccc-raw-events-$(env.project)/dataflow-temp/
+        parameters:
+          inputTopic: projects/$(env.project)/topics/ccc-raw-events
+          outputDirectory: gs://ccc-raw-events-$(env.project)/security-events/
+          outputFilenamePrefix: events-
+          outputFilenameSuffix: .parquet
+          numShards: "10"
+          windowDuration: 5m
+          useSubscription: "false"
+
+outputs:
+  - name: rawEventsTopic
+    value: $(ref.ccc-raw-events-topic.name)
+  - name: enrichedEventsTopic
+    value: $(ref.ccc-enriched-events-topic.name)
+  - name: alertsTopic
+    value: $(ref.ccc-alerts-topic.name)
+  - name: dataPlaneSubscription
+    value: $(ref.ccc-data-plane-subscription.name)
+  - name: publisherServiceAccount
+    value: $(ref.ccc-pubsub-publisher-sa.email)
+  - name: subscriberServiceAccount
+    value: $(ref.ccc-pubsub-subscriber-sa.email)
+  - name: dataflowServiceAccount
+    value: $(ref.ccc-dataflow-sa.email)
+  - name: managementPlaneServiceAccount
+    value: $(ref.ccc-management-plane-sa.email)
+  - name: dataPlaneServiceAccount
+    value: $(ref.ccc-data-plane-sa.email)

@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secureops-receiver-config
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+data:
+  kafka-brokers: "kafka-0.kafka-headless.secureops.svc.cluster.local:9092,kafka-1.kafka-headless.secureops.svc.cluster.local:9092,kafka-2.kafka-headless.secureops.svc.cluster.local:9092"
+  management-plane-url: "http://secureops-management.secureops.svc.cluster.local"
+  data-plane-url: "http://secureops-data-plane.secureops.svc.cluster.local"
+  region: "eu-west"
+  log-level: "info"
+  rate-limit-eps: "10000"
+  syslog-buffer-size: "1073741824"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secureops-sigma-rules
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+    component: sigma-engine
+data:
+  brute_force.yml: |
+    title: Brute Force Authentication Attempt
+    status: production
+    description: Detects multiple failed authentication attempts from a single source
+    logsource:
+      product: authentication
+      service: login
+    detection:
+      selection:
+        action: "blocked"
+        severity:
+          - "high"
+          - "critical"
+      condition: selection
+    level: high
+    tags:
+      - attack.credential_access
+      - attack.t1110
+  impossible_travel.yml: |
+    title: Impossible Travel Detection
+    status: production
+    description: Detects logins from geographically distant locations in short time
+    logsource:
+      product: authentication
+      service: login
+    detection:
+      selection:
+        eventType: "identity"
+        action: "allowed"
+      condition: selection
+    level: high
+    tags:
+      - attack.initial_access
+      - attack.t1078
+  privilege_escalation.yml: |
+    title: Cloud Privilege Escalation
+    status: production
+    description: Detects privilege escalation attempts in cloud environments
+    logsource:
+      product: cloud
+      service: audit
+    detection:
+      selection:
+        eventType: "cloud"
+        severity:
+          - "critical"
+          - "high"
+      condition: selection
+    level: critical
+    tags:
+      - attack.privilege_escalation
+      - attack.t1548

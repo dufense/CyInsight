@@ -1,0 +1,19 @@
+{{- if .Values.dataPlane.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-data-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: data
+spec:
+  type: {{ .Values.dataPlane.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.dataPlane.service.port }}
+      targetPort: http
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    plane: data
+{{- end }}

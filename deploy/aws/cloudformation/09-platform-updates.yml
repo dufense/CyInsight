@@ -1,0 +1,763 @@
+##############################################################################
+# Cyber Command Center — Platform Updates (v2 Feature Pack)
+#
+# This stack adds all infrastructure required by the feature set delivered
+# in Tasks #119-#127:
+#
+#   #119  AI Malware Analysis & Adaptive Analyst Learning Loop
+#   #120  Entity Intelligence Graph (War Room)
+#   #121  Zero Trust Posture Center
+#   #122  CAASM CIS Benchmark Assessment & EDR Remediation
+#   #123  Autonomous Response Engine (DB tables + executor)
+#   #124  War Room crash guards / Incident War Room hardening
+#   #125  Horizontal tab scrolling & UX polish
+#   #126  ARIA panel collapsible toggle
+#   #127  War Room Auto-Response & Malware Analysis tab crash fix
+#
+# New AWS resources created:
+#   1. ElastiCache Redis (Serverless) — quota engine rate-limiting + cache
+#   2. Aurora PostgreSQL Read Replica — heavy analytics query routing
+#   3. Secrets Manager secrets for new AI model config (model ID, max tokens)
+#   4. Lambda-backed Custom Resource — ensures the 3 response-engine DB
+#      tables (incident_response_plans / actions / tenant_response_allowlist)
+#      exist before the ECS service starts receiving traffic
+#   5. Updated ECS Task Definition — new environment variables injected into
+#      the running management-plane service (REDIS_URL, READ_REPLICA_URL,
+#      AI_MODEL, AI_MAX_TOKENS, MALWARE_ANALYSIS_ENABLED, RESPONSE_ENGINE_ENABLED)
+#   6. ECS Service in-place update — rolls the new task definition using
+#      the existing cluster; circuit-breaker rollback enabled
+#
+# Depends on (must be deployed first):
+#   - 01-vpc.yml              (VPC, subnets, security groups)
+#   - 02-aurora-management.yml (Aurora cluster + DB secret)
+#   - 06-management-ecs.yml   (ECS cluster, task role, ALB)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/09-platform-updates.yml \
+#     --stack-name ccc-platform-updates \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-vpc \
+#       AuroraStackName=ccc-aurora-management \
+#       ManagementECSStackName=ccc-management-ecs \
+#       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-management-plane:v2 \
+#       EnvironmentName=production
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — Platform Feature Pack v2 (Tasks #119-#127)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+    Description: Deployment environment tag applied to all resources.
+
+  VpcStackName:
+    Type: String
+    Default: ccc-vpc
+    Description: Name of the VPC CloudFormation stack (provides VpcId, subnets, SGs).
+
+  AuroraStackName:
+    Type: String
+    Default: ccc-aurora-management
+    Description: Name of the Aurora stack (provides DB secret ARN + cluster endpoint).
+
+  ManagementECSStackName:
+    Type: String
+    Default: ccc-management-ecs
+    Description: Name of the management-plane ECS stack (provides cluster + task role).
+
+  ImageUri:
+    Type: String
+    Description: >
+      Full ECR image URI for the updated management-plane container.
+      Example: 123456789.dkr.ecr.ap-south-1.amazonaws.com/ccc-management-plane:v2
+
+  TaskCpu:
+    Type: Number
+    Default: 1024
+    AllowedValues: [512, 1024, 2048, 4096]
+    Description: ECS task CPU units for the updated task definition.
+
+  TaskMemory:
+    Type: Number
+    Default: 2048
+    AllowedValues: [1024, 2048, 4096, 8192]
+    Description: ECS task memory (MiB) for the updated task definition.
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+    Description: Number of ECS tasks to run.
+
+  # ── Redis (Quota Engine + Cache) ──────────────────────────────────────────
+  RedisMaxCapacityECPU:
+    Type: Number
+    Default: 5000
+    MinValue: 1000
+    MaxValue: 15000000
+    Description: >
+      ElastiCache Serverless maximum capacity in ECPU/second.
+      1 000 = ~1 req/s sustained; default 5 000 supports ~300 tenant QPS peak.
+
+  RedisMaxDataStorageGB:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 5000
+    Description: Maximum data storage (GB) for the Redis serverless cache.
+
+  # ── Read Replica ──────────────────────────────────────────────────────────
+  CreateReadReplica:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to create an Aurora read replica instance for heavy
+      analytics queries (SOC metrics, MTTR/MTTD). The replica endpoint
+      is injected as READ_REPLICA_URL into the ECS task. Set "false" (default)
+      to skip — the app falls back transparently to the primary pool.
+
+  AuroraReplicaClass:
+    Type: String
+    Default: db.r6g.large
+    Description: >
+      Instance class for the Aurora read replica. Only used when
+      CreateReadReplica=true.
+
+  # ── AI Configuration ──────────────────────────────────────────────────────
+  AIModel:
+    Type: String
+    Default: gpt-4o
+    Description: >
+      AI model ID used by the management plane (malware analysis, response
+      engine, learning digest). Stored in Secrets Manager and injected via
+      AI_MODEL env var. Examples: gpt-4o, claude-3-5-sonnet-20241022.
+
+  AIMaxTokens:
+    Type: Number
+    Default: 4096
+    MinValue: 256
+    MaxValue: 128000
+    Description: >
+      Maximum tokens for AI completion requests. Stored in Secrets Manager
+      and injected via AI_MAX_TOKENS env var.
+
+  # ── Feature Flags ─────────────────────────────────────────────────────────
+  MalwareAnalysisEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable the AI Malware Analysis endpoint (/api/malware/analyze).
+
+  ResponseEngineEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable the Autonomous Response Engine endpoints.
+
+  LearningEngineEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable the Adaptive Analyst Learning Loop.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ─────────────────────────────────────────────────────────────────────────────
+Conditions:
+  CreateReadReplicaInstance: !Equals [!Ref CreateReadReplica, "true"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── 1. CloudWatch Log Group ───────────────────────────────────────────────
+  UpdateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-management-${EnvironmentName}-v2"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── 2. Redis Security Group ───────────────────────────────────────────────
+  RedisSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-redis-sg-${EnvironmentName}"
+      GroupDescription: "Allow inbound Redis (6379) from ECS tasks only"
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+          Description: Redis from ECS management-plane tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-redis-sg-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── 3. ElastiCache Serverless (Quota Engine + Session Cache) ─────────────
+  # Provides the REDIS_URL environment variable consumed by:
+  #   - server/quota-engine.ts   (token-bucket rate limiting per tenant)
+  #   - server/cache.ts          (incident / event query cache)
+  #   - server/routes.ts         (rate limiters: auth, write, bulk, ingest)
+  # Falls back gracefully to in-memory if REDIS_URL is absent; this resource
+  # removes that fallback for production deployments.
+  RedisServerlessCache:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName: !Sub "ccc-redis-${EnvironmentName}"
+      Engine: redis
+      Description: "Cyber Command Center quota engine + query cache"
+      CacheUsageLimits:
+        ECPUPerSecond:
+          Maximum: !Ref RedisMaxCapacityECPU
+        DataStorage:
+          Maximum: !Ref RedisMaxDataStorageGB
+          Unit: GB
+      SecurityGroupIds:
+        - !Ref RedisSG
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── 4. Redis URL Secret ───────────────────────────────────────────────────
+  # Stores the Redis connection URL (rediss://...) derived from the serverless
+  # endpoint. This secret is injected into the ECS task via the Secrets block.
+  RedisUrlSecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn: RedisServerlessCache
+    Properties:
+      Name: !Sub "ccc/${EnvironmentName}/redis-url"
+      Description: "ElastiCache Serverless Redis URL for CCC management plane"
+      SecretString: !Sub
+        - '{"REDIS_URL":"rediss://${Endpoint}:6379"}'
+        - Endpoint: !GetAtt RedisServerlessCache.Endpoint.Address
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── 5. AI Model Config Secrets ────────────────────────────────────────────
+  # Separate secret for AI model selection + token budget used by the
+  # malware analyzer, response engine, and learning digest.
+  AIModelSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "ccc/${EnvironmentName}/ai-model-config"
+      Description: "AI model configuration (model ID + max tokens) for CCC v2 features"
+      SecretString: !Sub
+        - '{"AI_MODEL":"${Model}","AI_MAX_TOKENS":"${MaxTokens}"}'
+        - Model: !Ref AIModel
+          MaxTokens: !Ref AIMaxTokens
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── 6. IAM Policy — grant existing task role access to new v2 secrets ────
+  # Attaches an inline policy to the task role created in 06-management-ecs.yml
+  # so the ECS task can call secretsmanager:GetSecretValue on the two new
+  # secrets introduced in this stack (Redis URL + AI model config).
+  V2SecretsPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - RedisUrlSecret
+      - AIModelSecret
+    Properties:
+      PolicyName: !Sub "ccc-management-v2-secrets-${EnvironmentName}"
+      Roles:
+        - Fn::ImportValue: !Sub "${ManagementECSStackName}-ECSTaskRoleName"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: V2SecretsAccess
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Ref RedisUrlSecret
+              - !Ref AIModelSecret
+
+  # ── 7. Aurora Read Replica (optional) ────────────────────────────────────
+  # When CreateReadReplica=true, a read-only Aurora instance is created in the
+  # existing cluster. Its endpoint is stored in Secrets Manager and injected as
+  # READ_REPLICA_URL. The app routes heavy analytics queries (SOC metrics,
+  # MTTR/MTTD) to this pool via server/db.ts poolRead/dbRead exports.
+  AuroraReadReplica:
+    Type: AWS::RDS::DBInstance
+    Condition: CreateReadReplicaInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-aurora-read-replica-${EnvironmentName}"
+      DBInstanceClass: !Ref AuroraReplicaClass
+      Engine: aurora-postgresql
+      DBClusterIdentifier:
+        Fn::ImportValue: !Sub "${AuroraStackName}-ClusterIdentifier"
+      PromotionTier: 1
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Role
+          Value: ReadReplica
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ReadReplicaUrlSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: CreateReadReplicaInstance
+    DependsOn: AuroraReadReplica
+    Properties:
+      Name: !Sub "ccc/${EnvironmentName}/read-replica-url"
+      Description: "Aurora read replica DATABASE_URL for analytics-only queries"
+      SecretString: !Sub
+        - '{"READ_REPLICA_URL":"postgresql://${Endpoint}:5432/cccdb?sslmode=verify-ca&sslrootcert=/etc/ssl/certs/rds-ca-bundle.pem"}'
+        - Endpoint: !GetAtt AuroraReadReplica.Endpoint.Address
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── 7. Lambda Execution Role (DB Schema Init) ─────────────────────────────
+  SchemaInitLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-schema-init-lambda-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ccc-schema-init-${EnvironmentName}:*"
+
+  # ── 8. DB Schema Initializer Lambda ──────────────────────────────────────
+  # Runs once at deploy time (CloudFormation Custom Resource) to ensure the
+  # three response-engine tables exist in the Aurora management DB.
+  # Idempotent — uses CREATE TABLE IF NOT EXISTS; safe to re-run.
+  #
+  # Tables created:
+  #   incident_response_plans    — AI-generated response plans per incident
+  #   incident_response_actions  — Individual action steps with status tracking
+  #   tenant_response_allowlist  — Per-tenant action type permissions + approval
+  SchemaInitLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "ccc-schema-init-${EnvironmentName}"
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt SchemaInitLambdaRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+        SubnetIds:
+          - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+          - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      Environment:
+        Variables:
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+          AWS_REGION_NAME: !Ref AWS::Region
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+          const { Client } = require('pg');
+
+          const sm = new SecretsManagerClient({ region: process.env.AWS_REGION_NAME });
+
+          async function getDbUrl() {
+            const { SecretString } = await sm.send(new GetSecretValueCommand({
+              SecretId: process.env.DB_SECRET_ARN
+            }));
+            return JSON.parse(SecretString).DATABASE_URL;
+          }
+
+          const SCHEMA_SQL = `
+            CREATE TABLE IF NOT EXISTS incident_response_plans (
+              id SERIAL PRIMARY KEY,
+              incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+              tenant_id   INTEGER NOT NULL REFERENCES tenants(id)  ON DELETE CASCADE,
+              mode        VARCHAR(20)  NOT NULL DEFAULT 'manual',
+              status      VARCHAR(30)  NOT NULL DEFAULT 'ready',
+              generated_by VARCHAR(255) NOT NULL DEFAULT 'ai',
+              actions     JSONB        NOT NULL DEFAULT '[]',
+              execution_summary TEXT,
+              created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+              updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS incident_response_actions (
+              id           SERIAL PRIMARY KEY,
+              plan_id      INTEGER NOT NULL REFERENCES incident_response_plans(id) ON DELETE CASCADE,
+              incident_id  INTEGER NOT NULL REFERENCES incidents(id)  ON DELETE CASCADE,
+              tenant_id    INTEGER NOT NULL REFERENCES tenants(id)    ON DELETE CASCADE,
+              action_type  VARCHAR(50)  NOT NULL,
+              target       VARCHAR(500) NOT NULL,
+              target_type  VARCHAR(50),
+              risk_level   VARCHAR(20)  NOT NULL DEFAULT 'medium',
+              rationale    TEXT,
+              expected_impact TEXT,
+              estimated_seconds INTEGER DEFAULT 30,
+              status       VARCHAR(30)  NOT NULL DEFAULT 'pending',
+              approved_by  VARCHAR(255),
+              approved_at  TIMESTAMPTZ,
+              executed_at  TIMESTAMPTZ,
+              executed_by  VARCHAR(255),
+              is_reversible BOOLEAN DEFAULT true,
+              undone_at    TIMESTAMPTZ,
+              undone_by    VARCHAR(255),
+              execution_result JSONB,
+              step_order   INTEGER NOT NULL DEFAULT 0,
+              created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS tenant_response_allowlist (
+              id               SERIAL PRIMARY KEY,
+              tenant_id        INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+              action_type      VARCHAR(50) NOT NULL,
+              risk_levels      TEXT[]  NOT NULL DEFAULT '{}',
+              requires_approval BOOLEAN NOT NULL DEFAULT false,
+              created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              UNIQUE(tenant_id, action_type)
+            );
+          `;
+
+          function sendResponse(event, context, status, data) {
+            const body = JSON.stringify({ Status: status, Reason: data.reason || '', PhysicalResourceId: 'ccc-schema-init', StackId: event.StackId, RequestId: event.RequestId, LogicalResourceId: event.LogicalResourceId, Data: data });
+            const url = new URL(event.ResponseURL);
+            return new Promise((resolve, reject) => {
+              const req = https.request({ hostname: url.hostname, path: url.pathname + url.search, method: 'PUT', headers: { 'Content-Type': '', 'Content-Length': Buffer.byteLength(body) } }, resolve);
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          exports.handler = async (event, context) => {
+            console.log('Event:', JSON.stringify(event));
+            if (event.RequestType === 'Delete') {
+              await sendResponse(event, context, 'SUCCESS', { reason: 'Delete — no action' });
+              return;
+            }
+            let client;
+            try {
+              const dbUrl = await getDbUrl();
+              client = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+              await client.connect();
+              await client.query(SCHEMA_SQL);
+              console.log('[SchemaInit] All response-engine tables ensured successfully');
+              await sendResponse(event, context, 'SUCCESS', { TablesEnsured: 'incident_response_plans, incident_response_actions, tenant_response_allowlist' });
+            } catch (err) {
+              console.error('[SchemaInit] Error:', err.message);
+              await sendResponse(event, context, 'FAILED', { reason: err.message });
+            } finally {
+              if (client) await client.end().catch(() => {});
+            }
+          };
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── 9. Schema Init Custom Resource ────────────────────────────────────────
+  # Triggers the Lambda above at CloudFormation deploy time.
+  # On stack Update, Lambda runs again (idempotent — IF NOT EXISTS).
+  # On stack Delete, Lambda is a no-op.
+  SchemaInitCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: SchemaInitLambda
+    Properties:
+      ServiceToken: !GetAtt SchemaInitLambda.Arn
+      EnvironmentName: !Ref EnvironmentName
+      # Changing SchemaVersion forces the Lambda to re-run on next stack update.
+      SchemaVersion: "2"
+
+  # ── 10. Updated ECS Task Definition ──────────────────────────────────────
+  # Introduces all new environment variables and secrets for v2 features.
+  # This replaces / supplements the task definition from 06-management-ecs.yml;
+  # the ECS Service resource below uses this new revision.
+  UpdatedTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: SchemaInitCustomResource
+    Properties:
+      Family: !Sub "ccc-management-plane-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub "${ManagementECSStackName}-ECSExecutionRoleArn"
+      TaskRoleArn:
+        Fn::ImportValue: !Sub "${ManagementECSStackName}-ECSTaskRoleArn"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      Volumes:
+        - Name: reports-efs
+          EFSVolumeConfiguration:
+            FileSystemId:
+              Fn::ImportValue: !Sub "${ManagementECSStackName}-ReportsEFSId"
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId:
+                Fn::ImportValue: !Sub "${ManagementECSStackName}-ReportsAccessPointId"
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: management-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+
+          # ── Static Environment Variables ─────────────────────────────────
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: management
+            - Name: SECURE_COOKIES
+              Value: "true"
+            - Name: REPORTS_DIR
+              Value: /mnt/reports
+            - Name: AI_REGION
+              Value: !Ref AWS::Region
+            - Name: DB_SSL_CA
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: PGSSLMODE
+              Value: verify-ca
+            - Name: NODE_EXTRA_CA_CERTS
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            # ── v2 Feature Flags ─────────────────────────────────────────
+            - Name: MALWARE_ANALYSIS_ENABLED
+              Value: !Ref MalwareAnalysisEnabled
+            - Name: RESPONSE_ENGINE_ENABLED
+              Value: !Ref ResponseEngineEnabled
+            - Name: LEARNING_ENGINE_ENABLED
+              Value: !Ref LearningEngineEnabled
+            # ── Data Plane Federation ─────────────────────────────────────
+            - Name: DATA_PLANE_ENDPOINTS
+              Value: '{"india":"http://REPLACE_INDIA_ALB_DNS","bahrain":"http://REPLACE_BAHRAIN_ALB_DNS","kenya":"http://REPLACE_KENYA_ALB_DNS"}'
+            - Name: MANAGEMENT_PLANE_REGION
+              Value: ap-south-1
+
+          # ── Secrets (from AWS Secrets Manager) ───────────────────────────
+          Secrets:
+            # Core secrets (unchanged from 06-management-ecs.yml)
+            - Name: DATABASE_URL
+              ValueFrom: !Sub
+                - "${SecretArn}:DATABASE_URL::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+            - Name: SESSION_SECRET
+              ValueFrom:
+                Fn::ImportValue: !Sub "${ManagementECSStackName}-SessionSecretArn"
+            - Name: KAFKA_BROKERS
+              ValueFrom:
+                Fn::ImportValue: !Sub "${ManagementECSStackName}-KafkaBrokersSecretArn"
+            - Name: OPENSEARCH_URL
+              ValueFrom:
+                Fn::ImportValue: !Sub "${ManagementECSStackName}-OpenSearchSecretArn"
+            - Name: AI_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/provider-${EnvironmentName}"
+            - Name: AI_API_KEY
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/api-key-${EnvironmentName}"
+            # ── v2 Secrets ────────────────────────────────────────────────
+            # AI model selection + token budget (malware analysis, response engine)
+            - Name: AI_MODEL
+              ValueFrom: !Sub "${AIModelSecret}:AI_MODEL::"
+            - Name: AI_MAX_TOKENS
+              ValueFrom: !Sub "${AIModelSecret}:AI_MAX_TOKENS::"
+            # Redis URL for quota engine + cache
+            - Name: REDIS_URL
+              ValueFrom: !Sub "${RedisUrlSecret}:REDIS_URL::"
+            # Read replica URL for analytics (conditional — secret only exists if replica created)
+
+          MountPoints:
+            - ContainerPath: /mnt/reports
+              SourceVolume: reports-efs
+              ReadOnly: false
+
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UpdateLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+
+          StopTimeout: 30
+
+  # ── 11. ECS Service In-Place Update ──────────────────────────────────────
+  # Updates the existing management-plane service to use the new task
+  # definition revision. Uses the same cluster + load-balancer target group
+  # exported from the management ECS stack so no traffic interruption occurs.
+  UpdatedECSService:
+    Type: AWS::ECS::Service
+    DependsOn: UpdatedTaskDefinition
+    Properties:
+      ServiceName: !Sub "ccc-management-plane-${EnvironmentName}"
+      Cluster:
+        Fn::ImportValue: !Sub "${ManagementECSStackName}-ECSClusterArn"
+      TaskDefinition: !Ref UpdatedTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+          Subnets:
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      LoadBalancers:
+        - ContainerName: management-plane
+          ContainerPort: 5000
+          TargetGroupArn:
+            Fn::ImportValue: !Sub "${ManagementECSStackName}-ALBTargetGroupArn"
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 0
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 1
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: FeaturePack
+          Value: v2-tasks-119-127
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  RedisEndpoint:
+    Description: ElastiCache Serverless Redis endpoint (TLS, port 6379)
+    Value: !GetAtt RedisServerlessCache.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-RedisEndpoint"
+
+  RedisUrlSecretArn:
+    Description: ARN of the Secrets Manager secret holding REDIS_URL
+    Value: !Ref RedisUrlSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-RedisUrlSecretArn"
+
+  AIModelSecretArn:
+    Description: ARN of the Secrets Manager secret holding AI_MODEL + AI_MAX_TOKENS
+    Value: !Ref AIModelSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-AIModelSecretArn"
+
+  SchemaInitLambdaArn:
+    Description: ARN of the DB schema initializer Lambda function
+    Value: !GetAtt SchemaInitLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SchemaInitLambdaArn"
+
+  UpdatedTaskDefinitionArn:
+    Description: Full ARN (including revision) of the updated ECS task definition
+    Value: !Ref UpdatedTaskDefinition
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskDefinitionArn"
+
+  ReadReplicaEndpoint:
+    Condition: CreateReadReplicaInstance
+    Description: Aurora read replica endpoint (inject as READ_REPLICA_URL)
+    Value: !GetAtt AuroraReadReplica.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-ReadReplicaEndpoint"
+
+  ReadReplicaSecretArn:
+    Condition: CreateReadReplicaInstance
+    Description: ARN of the Secrets Manager secret holding READ_REPLICA_URL
+    Value: !Ref ReadReplicaUrlSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-ReadReplicaSecretArn"

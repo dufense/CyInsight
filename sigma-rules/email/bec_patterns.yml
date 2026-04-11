@@ -1,0 +1,37 @@
+title: Business Email Compromise Detection
+id: sigma-email-002
+status: stable
+level: critical
+description: Detects Business Email Compromise (BEC) patterns including CEO fraud, invoice manipulation, and impersonation attacks.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: email
+  product: any
+detection:
+  selection:
+    eventType: email
+    severity:
+      - critical
+      - high
+  keywords:
+    - business email compromise
+    - bec
+    - ceo fraud
+    - wire transfer
+    - invoice fraud
+    - impersonation
+    - executive impersonation
+    - payment redirect
+    - vendor compromise
+    - whaling
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate executive communications about financial matters
+tags:
+  - attack.initial_access
+  - attack.t1534
+mitre:
+  tactic: Initial Access
+  technique: T1534
+  technique_name: Internal Spearphishing

@@ -1,0 +1,662 @@
+##############################################################################
+# Cyber Command Center -- S3 Data Lake (PB-Scale Security Events)
+#
+# Petabyte-scale event storage using Apache Iceberg table format on S3.
+# Replaces TimescaleDB/PostgreSQL for security event data at scale.
+#
+# Creates:
+#   - S3 Raw Events bucket     (landing zone, Intelligent-Tiering)
+#   - S3 Processed bucket      (Iceberg tables, versioned)
+#   - S3 Query Results bucket  (Athena output, 7-day TTL)
+#   - AWS Glue Data Catalog database + Iceberg table definitions
+#   - AWS Lake Formation registration + column-level permissions
+#   - Athena Workgroup (10 GB per-query limit, results encrypted)
+#   - Lambda trigger (auto-runs Glue crawler on new raw events)
+#   - Glue Crawler IAM Role
+#   - Lake Formation Service Role
+#   - CloudWatch alarms (S3 5xx errors, Lambda failures)
+#
+# Storage tiers (matched to 90-day alert retention in UI):
+#   Day 0-30:   S3 Standard              (hot, OpenSearch also queries)
+#   Day 31-90:  S3 Intelligent-Tiering   (warm, Athena queries only)
+#   Day 91-365: S3 Glacier Instant       (cold, Athena queries)
+#   Day 365+:   S3 Glacier Deep Archive  (frozen, compliance only)
+#
+# Depends on: 01-vpc.yml (for VPC ID used in Glue connections)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/05-data-lake.yml \
+#     --stack-name ccc-data-lake \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides EnvironmentName=production
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- S3 + Iceberg + Glue + Athena Data Lake"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  GlueVersion:
+    Type: String
+    Default: "4.0"
+    AllowedValues: ["4.0", "3.0"]
+    Description: Glue ETL version (4.0 = native Iceberg support)
+
+  AthenaQueryResultsTTLDays:
+    Type: Number
+    Default: 7
+    Description: Days to keep Athena query results in S3
+
+  QueryEngineVersion:
+    Type: String
+    Default: "3"
+    AllowedValues: ["3"]
+    Description: Athena query engine version (3 = Trino-based, Iceberg support)
+
+Resources:
+
+  # ── S3 Raw Events Bucket (Landing Zone) ──────────────────────────────────────
+  # DependsOn CrawlerTriggerPermission ensures the Lambda invoke permission
+  # exists before CloudFormation tries to configure the S3 event notification.
+  # Without this, S3 cannot confirm it can call Lambda when adding the notification.
+  S3RawEventsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: CrawlerTriggerPermission
+    Properties:
+      BucketName: !Sub "ccc-raw-events-${EnvironmentName}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+              # Upgrade to KMS if CMEK needed: SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      IntelligentTieringConfigurations:
+        - Id: SecurityEventsTiering
+          Status: Enabled
+          Tierings:
+            - AccessTier: ARCHIVE_ACCESS
+              Days: 90
+            - AccessTier: DEEP_ARCHIVE_ACCESS
+              Days: 365
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionSecurityEvents
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: INTELLIGENT_TIERING
+              - TransitionInDays: 91
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 366
+                StorageClass: DEEP_ARCHIVE
+          - Id: DeleteIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: "events/"
+                  - Name: suffix
+                    Value: ".parquet"
+            Function: !GetAtt CrawlerTriggerLambda.Arn
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataTier
+          Value: raw
+        - Key: Format
+          Value: Parquet
+
+  S3RawEventsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3RawEventsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${S3RawEventsBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+          - Sid: DenyNonTLSRequests
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt S3RawEventsBucket.Arn
+              - !Sub "${S3RawEventsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ── S3 Processed Iceberg Bucket ───────────────────────────────────────────────
+  S3ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-iceberg-${EnvironmentName}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionIcebergData
+            Status: Enabled
+            Transitions:
+              # hot  (0-30 days):   S3 Standard (bucket default)
+              # warm (31-90 days):  INTELLIGENT_TIERING (auto-optimizes access patterns)
+              # cold (91-365 days): GLACIER_IR (Glacier Instant Retrieval, ms latency)
+              # frozen (365+ days): DEEP_ARCHIVE (compliance, 12-48 hr retrieval)
+              - TransitionInDays: 30
+                StorageClass: INTELLIGENT_TIERING
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+          - Id: CleanIcebergSnapshots
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataTier
+          Value: processed
+        - Key: Format
+          Value: Iceberg
+
+  S3ProcessedBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3ProcessedBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonTLSRequests
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt S3ProcessedBucket.Arn
+              - !Sub "${S3ProcessedBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ── S3 Athena Query Results Bucket ────────────────────────────────────────────
+  S3QueryResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-athena-results-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireQueryResults
+            Status: Enabled
+            ExpirationInDays: !Ref AthenaQueryResultsTTLDays
+
+  # ── Glue Data Catalog ────────────────────────────────────────────────────────
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "ccc_security_events_${EnvironmentName}"
+        Description: "CCC security events data lake - Apache Iceberg tables"
+        Parameters:
+          classification: iceberg
+
+  # Iceberg table for security events (partitioned by tenant + date)
+  GlueSecurityEventsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: security_events
+        Description: "CCC security events - Apache Iceberg format"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          table_type: ICEBERG
+          metadata_location: !Sub "s3://${S3ProcessedBucket}/iceberg/security_events/metadata/"
+          EXTERNAL: "TRUE"
+        StorageDescriptor:
+          Location: !Sub "s3://${S3ProcessedBucket}/iceberg/security_events/data/"
+          InputFormat: "org.apache.iceberg.mr.hive.HiveIcebergInputFormat"
+          OutputFormat: "org.apache.iceberg.mr.hive.HiveIcebergOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.apache.iceberg.mr.hive.HiveIcebergSerDe"
+          Columns:
+            - Name: event_id
+              Type: string
+              Comment: "Unique event identifier (UUID)"
+            - Name: source_type
+              Type: string
+              Comment: "Event source: cynet|checkpoint|syslog|push_api|sigma"
+            - Name: severity
+              Type: string
+              Comment: "critical|high|medium|low|info"
+            - Name: event_type
+              Type: string
+              Comment: "Security event classification"
+            - Name: raw_event
+              Type: string
+              Comment: "Original raw event JSON"
+            - Name: normalized_event
+              Type: string
+              Comment: "AI-normalized event JSON"
+            - Name: host
+              Type: string
+            - Name: src_ip
+              Type: string
+            - Name: dst_ip
+              Type: string
+            - Name: user_name
+              Type: string
+            - Name: process_name
+              Type: string
+            - Name: mitre_tactic
+              Type: string
+            - Name: mitre_technique_id
+              Type: string
+            - Name: kill_chain_phase
+              Type: string
+            - Name: iocs
+              Type: "array<struct<type:string,value:string,reputation:string>>"
+              Comment: "Extracted Indicators of Compromise"
+            - Name: confidence_score
+              Type: int
+              Comment: "AI confidence 0-100"
+            - Name: data_region
+              Type: string
+              Comment: "Data plane region: in-west-1|us-east-1|ke-east-1|sa-central-1|bh-east-1"
+            - Name: ingested_at
+              Type: timestamp
+              Comment: "Ingestion timestamp (UTC)"
+        PartitionKeys:
+          - Name: event_date
+            Type: date
+          - Name: tenant_id
+            Type: int
+
+  # ── Glue Crawler IAM Role ────────────────────────────────────────────────────
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-glue-crawler-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3DataLakeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt S3RawEventsBucket.Arn
+                  - !Sub "${S3RawEventsBucket.Arn}/*"
+                  - !GetAtt S3ProcessedBucket.Arn
+                  - !Sub "${S3ProcessedBucket.Arn}/*"
+
+  # ── Glue Crawler (auto-discovers Iceberg schema changes) ─────────────────────
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "ccc-iceberg-crawler-${EnvironmentName}"
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Description: "CCC data lake crawler - discovers Iceberg table schema changes"
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${S3ProcessedBucket}/iceberg/security_events/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_CHANGED_FOLDERS
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": { "AddOrUpdateBehavior": "InheritFromTable" },
+            "Tables": { "AddOrUpdateBehavior": "MergeNewColumns" }
+          },
+          "Grouping": { "TableGroupingPolicy": "CombineCompatibleSchemas" }
+        }
+      Tags:
+        Project: CyberCommandCenter
+
+  # ── Lake Formation ───────────────────────────────────────────────────────────
+  LakeFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-lake-formation-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lakeformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3DataLakeFullAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt S3ProcessedBucket.Arn
+                  - !Sub "${S3ProcessedBucket.Arn}/*"
+
+  LakeFormationResource:
+    Type: AWS::LakeFormation::Resource
+    Properties:
+      ResourceArn: !GetAtt S3ProcessedBucket.Arn
+      RoleArn: !GetAtt LakeFormationRole.Arn
+      UseServiceLinkedRole: false
+
+  # ── Athena Workgroup ─────────────────────────────────────────────────────────
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "ccc-security-analytics-${EnvironmentName}"
+      Description: "CCC security event analytics - Athena v3 + Iceberg"
+      State: ENABLED
+      RecursiveDeleteOption: false
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${S3QueryResultsBucket}/athena-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240  # 10 GB per query limit
+        RequesterPaysEnabled: false
+        EngineVersion:
+          SelectedEngineVersion: !Sub "Athena engine version ${QueryEngineVersion}"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── Lambda Glue Crawler Trigger ──────────────────────────────────────────────
+  CrawlerTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-crawler-trigger-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartGlueCrawler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                  - glue:GetCrawler
+                Resource: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/ccc-iceberg-crawler-${EnvironmentName}"
+
+  CrawlerTriggerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "ccc-crawler-trigger-${EnvironmentName}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CrawlerTriggerRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          CRAWLER_NAME: !Sub "ccc-iceberg-crawler-${EnvironmentName}"
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          glue = boto3.client("glue")
+
+          def handler(event, context):
+              crawler_name = os.environ["CRAWLER_NAME"]
+              try:
+                  status = glue.get_crawler(Name=crawler_name)["Crawler"]["State"]
+                  if status == "READY":
+                      glue.start_crawler(Name=crawler_name)
+                      logger.info(f"Started crawler: {crawler_name}")
+                  else:
+                      logger.info(f"Crawler {crawler_name} already running (state={status})")
+              except Exception as e:
+                  logger.error(f"Failed to start crawler: {e}")
+                  raise
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  CrawlerTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CrawlerTriggerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::ccc-raw-events-${EnvironmentName}-${AWS::AccountId}"
+
+  CrawlerTriggerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/ccc-crawler-trigger-${EnvironmentName}"
+      RetentionInDays: 30
+
+  # ── Lake Formation Permissions (explicit grants, uses LakeFormationRole above) ─
+  LakeFormationDatabasePermissions:
+    Type: AWS::LakeFormation::Permissions
+    DependsOn:
+      - GlueDatabase
+      - LakeFormationResource
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      Resource:
+        DatabaseResource:
+          Name: !Ref GlueDatabase
+      Permissions:
+        - ALL
+      PermissionsWithGrantOption:
+        - ALL
+
+  LakeFormationTablePermissions:
+    Type: AWS::LakeFormation::Permissions
+    DependsOn:
+      - GlueSecurityEventsTable
+      - LakeFormationDatabasePermissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      Resource:
+        TableResource:
+          DatabaseName: !Ref GlueDatabase
+          Name: security_events
+      Permissions:
+        - SELECT
+        - INSERT
+        - DELETE
+        - DESCRIBE
+      PermissionsWithGrantOption:
+        - SELECT
+        - DESCRIBE
+
+  # ── CloudWatch Alarms ────────────────────────────────────────────────────────
+  AlarmLambdaErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-data-lake-${EnvironmentName}-crawler-trigger-errors"
+      AlarmDescription: S3 crawler trigger Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CrawlerTriggerLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmS3RawBucket5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-data-lake-${EnvironmentName}-s3-raw-5xx"
+      AlarmDescription: S3 raw events bucket returning 5xx errors (storage tier issue)
+      Namespace: AWS/S3
+      MetricName: 5xxErrors
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref S3RawEventsBucket
+        - Name: FilterId
+          Value: EntireBucket
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmS3ProcessedBucket5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-data-lake-${EnvironmentName}-s3-processed-5xx"
+      AlarmDescription: S3 Iceberg processed bucket returning 5xx errors
+      Namespace: AWS/S3
+      MetricName: 5xxErrors
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref S3ProcessedBucket
+        - Name: FilterId
+          Value: EntireBucket
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmGlueCrawlerFailed:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-data-lake-${EnvironmentName}-glue-crawler-failed"
+      AlarmDescription: Glue Iceberg crawler run failed
+      Namespace: Glue
+      MetricName: glue.driver.aggregate.numFailedTask
+      Statistic: Sum
+      Period: 600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+
+  RawEventsBucketName:
+    Description: S3 raw events bucket (landing zone)
+    Value: !Ref S3RawEventsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-RawEventsBucketName"
+
+  RawEventsBucketArn:
+    Value: !GetAtt S3RawEventsBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RawEventsBucketArn"
+
+  ProcessedBucketName:
+    Description: S3 processed Iceberg bucket
+    Value: !Ref S3ProcessedBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ProcessedBucketName"
+
+  ProcessedBucketArn:
+    Value: !GetAtt S3ProcessedBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ProcessedBucketArn"
+
+  QueryResultsBucketName:
+    Value: !Ref S3QueryResultsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-QueryResultsBucketName"
+
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueDatabaseName"
+
+  AthenaWorkgroupName:
+    Value: !Ref AthenaWorkgroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AthenaWorkgroupName"
+
+  GlueCrawlerArn:
+    Value: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/ccc-iceberg-crawler-${EnvironmentName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueCrawlerArn"
+
+  GlueCrawlerRoleArn:
+    Value: !GetAtt GlueCrawlerRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueCrawlerRoleArn"

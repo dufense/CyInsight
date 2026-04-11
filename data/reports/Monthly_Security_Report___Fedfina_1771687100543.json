@@ -1,0 +1,257 @@
+{
+  "title": "Monthly Security Report - Fedfina",
+  "type": "executive_summary",
+  "tenant": "Fedfina",
+  "period": "last_month",
+  "generatedAt": "2026-02-21T15:18:20.543Z",
+  "executiveSummary": "This report covers the most recent monitoring and detection period for Fedfina and summarizes activity observed across Endpoint Detection & Response (EDR), Network Detection, Cloud Security, Vulnerability Scanning and XDR analytics. During the period we processed 153 security events (Email: 3, Endpoint: 47, Vulnerability: 17; remaining 86 events attributed to Network/Cloud/other XDR categories). The dataset provided for detailed review contains 20 representative incident records (15 resolved, 5 under investigation) that illustrate recurring patterns and prioritized risks. No tickets have been opened in the ticketing system (0 total / 0 open), signaling a potential operational gap in formal incident tracking and SLA enforcement.\n\nQuantitative highlights include two large-scale 'WildFire Malware' clusters: one detection grouping that affected 323 hosts and 269 users, and a second higher-severity cluster observed across 566 hosts. Multiple high-severity detections tied to persistence and privilege escalation techniques were observed — examples include a vulnerable driver drop ('loldrivers'), suspicious PsExec usage from C:\\Program Files\\Iraje\\AccessControlManager\\PsExec.exe, and indicators of scheduled-task-based persistence tied to UiPath.UpdateService.Launcher.exe. We also observed lateral movement and reconnaissance activity (VNC scanning and remote WMI execution) with direct references to hosts such as keplerdb and several EC2 instances (e.g., EC2AMAZ-VC67IAA / ec2amaz-vc67iaa) and on-prem-like hostnames (mumcorlt946, ip-10-1-7-211.ap-south-1.compute.internal).\n\nOperational response resolved the majority of sampled incidents (75% of the sampled 20 incidents were marked resolved), but five items remain actively investigated, including a high-severity 'Anti Webshell Protection - 3044816323' alert on ec2amaz-vc67iaa and a high-severity 'SYNC - Accessibility Feature Escalation' analytics hit on mumcorlt946. Notable adversary techniques mapped to MITRE ATT&CK include TA0003 (Persistence), TA0005 (Defense Evasion), TA0004 (Privilege Escalation), TA0008 (Lateral Movement) and TA0011 (Command and Control).\n\nOverall risk posture: Moderate-High. While containment and remediation actions in many cases appear timely (multiple resolved high-severity items), the volume and recurrence of high-risk behaviors (malware clusters, driver drops, privilege escalation attempts, and potential scheduled-task persistence) across both cloud-hosted EC2 instances and on-prem-like hosts indicate an elevated residual risk. Immediate focus is recommended on formalizing incident ticketing, accelerating patch and driver protections, and hardening privileged execution controls to reduce attack surface and prevent repeat incidents.",
+  "keyHighlights": [
+    {
+      "label": "Total Incidents",
+      "value": 153,
+      "trend": "stable",
+      "trendDetail": "153 events in this period; comparable to previous reporting cadence (no prior baseline provided)."
+    },
+    {
+      "label": "High-Severity Incidents (sample)",
+      "value": "15 (sample of 20)",
+      "trend": "up",
+      "trendDetail": "High-severity incidents are prominent in the sample (75% resolved of sample), indicating increased high-risk activity."
+    },
+    {
+      "label": "Hosts Impacted — largest clusters",
+      "value": "566 hosts (WildFire cluster)",
+      "trend": "up",
+      "trendDetail": "Large WildFire Malware cluster affected 566 hosts; a separate cluster affected 323 hosts."
+    },
+    {
+      "label": "Tickets Open",
+      "value": 0,
+      "trend": "down",
+      "trendDetail": "No formal tickets (0 open) — operational gap for incident management and SLA tracking."
+    }
+  ],
+  "findings": [
+    {
+      "title": "Large-scale malware clusters (WildFire Malware)",
+      "description": "Two correlated WildFire Malware campaigns were observed: one affecting 323 hosts and 269 users, and a higher-severity cluster detected on 566 hosts (Network Detection). These detections include correlated XDR Agent and XDR Analytics hits and are indicative of automated propagation or mass compromise of misconfigured endpoints.",
+      "severity": "high",
+      "impact": "Widespread malware presence can disrupt operations, expose PII, and create persistent footholds that enable further lateral movement and data exfiltration.",
+      "affectedSystems": "323 hosts (cluster 1), 566 hosts (cluster 2); impacted user counts up to 269 in an event."
+    },
+    {
+      "title": "Unauthorized or suspicious privileged execution (PsExec execution)",
+      "description": "PsExec.exe executed from C:\\Program Files\\Iraje\\AccessControlManager\\PsExec.exe with a suspicious command line on EC2AMAZ-VC67IAA. Execution originated from IrajeAutoChangePassword.exe and attempted NT/System privilege tasks using an unsigned actor (Cloud Security alert).",
+      "severity": "high",
+      "impact": "Abuse of PsExec enables remote code execution at SYSTEM level, facilitating lateral movement, credential theft, and persistence across the estate.",
+      "affectedSystems": "Host: EC2AMAZ-VC67IAA (Causality process: C:\\Program Files\\Iraje\\AccessControlManager\\IrajeAutoChangePassword.exe)"
+    },
+    {
+      "title": "Vulnerable kernel driver dropped ('loldrivers')",
+      "description": "A vulnerable driver identified as 'loldrivers' was dropped (Vulnerability Scanner) and categorized under Execution, Privilege Escalation and Defense Evasion. Kernel drivers present high-risk escalation opportunities if exploited.",
+      "severity": "high",
+      "impact": "A vulnerable driver can be used for local privilege escalation and persistence with kernel-level control, significantly increasing attack consequences.",
+      "affectedSystems": "Hosts where driver was observed (specific asset names tied to scanner findings); recommend prioritizing those hosts for remediation."
+    },
+    {
+      "title": "Indicators of scheduled-task persistence (UiPath service)",
+      "description": "UiPath.UpdateService.Launcher.exe executed within 62 seconds of boot, with causality chain pointing to svchost.exe -k netsvcs -s Schedule, indicating a likely scheduled task created for persistence. Observed on 1 host over 1 day in the sample (EDR).",
+      "severity": "medium",
+      "impact": "Scheduled tasks leveraged by attackers enable persistence across reboots and can allow recurring malicious activity without new exploitation.",
+      "affectedSystems": "1 host in sample where UiPath.UpdateService.Launcher.exe executed shortly after boot."
+    },
+    {
+      "title": "Lateral movement and remote reconnaissance (VNC scanning, WMI execution)",
+      "description": "Uncommon VNC scanning activity and suspicious remote WMI process execution were detected (Network Detection/XDR). VNC scanning events involved user nt authority\\system and remote WMI execution was observed on host keplerdb.",
+      "severity": "medium",
+      "impact": "Reconnaissance and lateral movement increase the blast radius and may be pre-cursors to credential theft and C2 establishment.",
+      "affectedSystems": "Hosts: keplerdb, 2 hosts flagged for VNC scanning; user involved: nt authority\\system"
+    },
+    {
+      "title": "Active defenses triggered for webshells",
+      "description": "Anti Webshell Protection alert '3044816323' triggered on ec2amaz-vc67iaa (Cloud Security) and remains under investigation. This indicates possible webshell delivery or web-based persistence attempts.",
+      "severity": "high",
+      "impact": "Webshells can provide remote code execution, file manipulation, and long-term persistence in internet-facing applications — substantial risk to confidentiality and availability.",
+      "affectedSystems": "Host: ec2amaz-vc67iaa (Cloud Security detection)"
+    },
+    {
+      "title": "Operational gap: Zero incident tickets created",
+      "description": "Despite 153 security events and multiple high-severity resolved and investigating incidents, there are 0 tickets recorded. This suggests inconsistent use of the ticketing system and limited traceability for remediation workflows and SLA adherence.",
+      "severity": "medium",
+      "impact": "Lack of formal ticketing impairs auditability, response coordination, and executive reporting; increases risk of duplicated or missed actions and regulatory non-compliance.",
+      "affectedSystems": "Organization-wide incident response and ITSM processes"
+    }
+  ],
+  "recommendations": [
+    {
+      "title": "Create and enforce incident ticketing for every confirmed detection",
+      "description": "Integrate EDR/XDR alerts into the ITSM system so each confirmed security incident generates a ticket with an owner, priority and SLA. This will improve traceability, handoffs between teams (SOC, IT Ops, Cloud), and auditability for compliance.",
+      "priority": "critical",
+      "effort": "low",
+      "timeline": "immediate",
+      "category": "Process"
+    },
+    {
+      "title": "Urgent remediation of vulnerable drivers and high-risk binaries",
+      "description": "Identify all hosts with 'loldrivers' or similar unsigned/kernel drivers and apply vendor-supplied patches or remove the drivers. Quarantine affected hosts pending validation to prevent privilege escalation.",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "category": "Technology"
+    },
+    {
+      "title": "Harden privileged remote execution controls",
+      "description": "Restrict PsExec, WMI, and similar remote execution tools via EDR blocking policies and firewall rules; enforce just-in-time (JIT) privileged access and monitor for unsigned executables launched with SYSTEM privileges.",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "category": "Technology"
+    },
+    {
+      "title": "Conduct targeted malware remediation and campaign hunting",
+      "description": "Perform a coordinated hunt and remediation for the WildFire clusters across the 323 and 566 host sets: isolate, snapshot, perform forensic triage, clean and reimage where necessary, and validate with threat intelligence enrichment.",
+      "priority": "critical",
+      "effort": "high",
+      "timeline": "immediate",
+      "category": "Process"
+    },
+    {
+      "title": "Implement scheduled task auditing and boot-time execution controls",
+      "description": "Audit scheduled tasks and boot-time autoruns across Windows estate, remove unauthorized tasks, and enforce application whitelisting for services that auto-launch. Use GPO/Intune profiles to deny unauthorized scheduled task creation.",
+      "priority": "medium",
+      "effort": "medium",
+      "timeline": "short-term",
+      "category": "Governance"
+    },
+    {
+      "title": "Strengthen network segmentation and monitor lateral movement",
+      "description": "Enforce micro-segmentation between workload tiers (web, app, DB) and between cloud instances. Instrument network detection to trigger automated host isolation on confirmed lateral-movement indicators such as VNC scanning and anomalous WMI calls.",
+      "priority": "high",
+      "effort": "high",
+      "timeline": "short-term",
+      "category": "Technology"
+    },
+    {
+      "title": "User and admin awareness for privileged accounts",
+      "description": "Train administrators on risks of unsigned tools and the need for code signing enforcement. Roll out MFA and privileged access reviews for accounts observed in incidents (nt authority\\system, root, system equivalents for cloud).",
+      "priority": "medium",
+      "effort": "low",
+      "timeline": "short-term",
+      "category": "People"
+    },
+    {
+      "title": "Implement continuous compliance checks and reporting",
+      "description": "Automate checks for known attack techniques aligned to MITRE ATT&CK (Persistence, Privilege Escalation, Lateral Movement) and embed these into weekly executive dashboards for the CISO and board.",
+      "priority": "medium",
+      "effort": "medium",
+      "timeline": "long-term",
+      "category": "Governance"
+    }
+  ],
+  "riskMatrix": [
+    {
+      "risk": "Mass malware compromise (WildFire clusters)",
+      "likelihood": 4,
+      "impact": 5,
+      "currentMitigation": "EDR detections and containment applied; several clusters resolved in-situ",
+      "residualRisk": "high"
+    },
+    {
+      "risk": "Local privilege escalation via vulnerable drivers",
+      "likelihood": 3,
+      "impact": 5,
+      "currentMitigation": "Vulnerability Scanner flagged driver drop; remediation pending",
+      "residualRisk": "high"
+    },
+    {
+      "risk": "Lateral movement across internal network",
+      "likelihood": 3,
+      "impact": 4,
+      "currentMitigation": "Network detection flagged VNC scanning and WMI activity; some hosts isolated",
+      "residualRisk": "medium"
+    },
+    {
+      "risk": "Persistent webshell presence",
+      "likelihood": 2,
+      "impact": 4,
+      "currentMitigation": "Anti Webshell Protection triggered; investigation ongoing on ec2amaz-vc67iaa",
+      "residualRisk": "medium"
+    },
+    {
+      "risk": "Operational failure in incident tracking",
+      "likelihood": 4,
+      "impact": 3,
+      "currentMitigation": "Ad-hoc resolution recorded in detection consoles but no tickets in ITSM",
+      "residualRisk": "high"
+    }
+  ],
+  "metrics": {
+    "totalIncidents": 153,
+    "securityEventsTotal": 153,
+    "eventsEndpoint": 47,
+    "eventsEmail": 3,
+    "eventsVulnerability": 17,
+    "hostsAffected_largestEvent": 566,
+    "maxUsersImpacted_singleEvent": 269,
+    "sampleIncidentsReviewed": 20,
+    "sampleResolved": 15,
+    "sampleInvestigating": 5,
+    "ticketsOpen": 0,
+    "ticketsTotal": 0
+  },
+  "trendAnalysis": "The dominant trend in this period is high-volume automated detections tied to commodity malware and mass scanning campaigns — specifically the WildFire Malware clusters affecting hundreds of hosts. These clusters, combined with EDR analytics showing many 'Local Threat Detected' alerts across multiple hosts, indicate either widespread exposure vectors (e.g., unpatched endpoints, weak configurations) or a coordinated campaign leveraging a common foothold. Another emerging pattern is the frequent use of legitimate administrative tooling and driver components (PsExec, WMI, vulnerable drivers) as attack vectors, which indicates adversaries are attempting to blend into normal administrative activity to evade detection.\n\nThere is also a shift in the telemetry showing cloud-hosted assets (EC2 instances like EC2AMAZ-VC67IAA / ec2amaz-vc67iaa) being implicated in high-risk activity, including webshell protections and unsigned privileged executions. This highlights hybrid-architecture exposure: attacks originating or persisting in cloud workloads and moving laterally. Operationally, the lack of ticketing despite multiple high-severity incidents suggests a process trend that may reduce effectiveness of recurring remediation and post-incident lessons learned, increasing the likelihood of repeat incidents over time.",
+  "complianceNotes": "Several detections have direct compliance implications. Persistent malware, kernel-level vulnerable drivers and unauthorized privileged actions affect controls mapped to NIST SP 800-53 and ISO 27001 (A.12 operations and A.11 access control), and breach detection/response requirements under SOC 2. If payment-card data or PII is hosted on affected systems, PCI-DSS and data protection obligations (e.g., timely patching and incident logging) could be at risk. Immediate remediation of high-severity findings and documentation of incident handling in the ITSM system are recommended to satisfy evidence requirements for audits.",
+  "sections": [
+    {
+      "title": "Incident Overview and Triage",
+      "content": "This section provides a detailed snapshot of detections, triage outcomes and current investigative posture. Across the dataset there were 153 events with a representative sample of 20 incidents reviewed; 15 of those were resolved following containment or remediation steps, and 5 remain under active investigation. High-severity patterns include mass WildFire detections and kernel driver drops which required elevated response procedures.\n\nTriage procedures identified recurring indicators: use of PsExec and WMI for remote execution, scheduled tasks created for persistence, and webshell-related activity on cloud instances. For each high-severity item we recommend immediate containment followed by forensics imaging, IOC harvesting and eradication actions (reimage where necessary). We also recommend recording all actions in the ITSM platform to provide chain-of-custody and audit evidence.",
+      "chartData": [
+        {
+          "name": "Events by source (selected)",
+          "value": 153
+        },
+        {
+          "name": "Endpoint events",
+          "value": 47
+        },
+        {
+          "name": "Vulnerability events",
+          "value": 17
+        },
+        {
+          "name": "Email events",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "title": "Technical Findings: Malware, Privilege Escalation and Persistence",
+      "content": "Technical analysis highlights that malware clusters (WildFire) are the most prevalent phenomenon and often co-occur with defense evasion and persistence techniques: dropped vulnerable drivers ('loldrivers'), scheduled task abuse (UiPath.UpdateService.Launcher.exe), and unsigned PsExec usage. These behaviors map to MITRE ATT&CK techniques TA0002/TA0003/TA0004/TA0005 and indicate adversaries attempting to achieve long-term footholds and escalate privileges.\n\nHosts implicated span both cloud and corporate naming conventions: EC2AMAZ-VC67IAA/ec2amaz-vc67iaa, keplerdb, mumcorlt946 and the ip-10-1-*.ap-south-1.compute.internal series. The presence of root/system-level user contexts on multiple hosts highlights the need for stricter privilege controls and kernel-level protections to reduce exploitation surfaces.",
+      "chartData": [
+        {
+          "name": "Sample incidents - resolved",
+          "value": 15
+        },
+        {
+          "name": "Sample incidents - investigating",
+          "value": 5
+        }
+      ]
+    },
+    {
+      "title": "Operational and Governance Gaps",
+      "content": "A critical operational deficiency is the absence of incident tickets (0 total). While EDR consoles retain resolution markers, the lack of ITSM entries undermines SLA governance, audit readiness and cross-team coordination. This gap increases the probability that remediation steps may not be consistently executed or tracked.\n\nGovernance recommendations include mandatory ticket creation on confirmed incidents, weekly executive summaries of high-severity remediation status, and quarterly tabletop exercises to validate playbooks — particularly for incidents involving mass malware and privilege escalation vectors.",
+      "chartData": [
+        {
+          "name": "Tickets opened",
+          "value": 0
+        },
+        {
+          "name": "Critical/High sample incidents",
+          "value": 15
+        }
+      ]
+    }
+  ],
+  "conclusion": "Fedfina is facing a period of elevated technical risk driven by large-scale malware clusters, abuse of legitimate administrative tooling (PsExec, WMI), and kernel-level vulnerable components. The security controls in place (EDR/XDR, Network Detection, Vulnerability Scanning) are generating meaningful detections and many incidents have been resolved, demonstrating technical capability. However, the scale of some events (hundreds of hosts) and the persistence of high-severity indicators require prioritized remediation, targeted hunting and host-level hardening.\n\nRecommended next steps: (1) immediately create/assign incident tickets for all unresolved high-severity incidents and enforce ITSM adoption; (2) perform an accelerated remediation program for vulnerable drivers and mass malware-impacted hosts (isolate, image, reimage, validate); (3) tighten controls on remote execution and scheduled-task creation, and deploy network segmentation to limit lateral movement. Executing these actions in the next 30–90 days will materially reduce the largest residual risks and improve Fedfina's security posture ahead of upcoming audits or threat campaigns."
+}

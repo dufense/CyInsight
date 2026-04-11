@@ -1,0 +1,38 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: secureops-receiver-ingress
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "200m"
+    nginx.ingress.kubernetes.io/rate-limit: "10000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1s"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ingest.secureops.io
+      secretName: secureops-receiver-tls
+  rules:
+    - host: ingest.secureops.io
+      http:
+        paths:
+          - path: /ingest
+            pathType: Prefix
+            backend:
+              service:
+                name: secureops-receiver
+                port:
+                  number: 80
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: secureops-receiver
+                port:
+                  number: 80

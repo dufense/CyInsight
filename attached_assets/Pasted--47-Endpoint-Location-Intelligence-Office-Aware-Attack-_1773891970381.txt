@@ -1,0 +1,85 @@
+#47 - Endpoint Location Intelligence: Office-Aware Attack Map
+Problem
+The world map currently draws all attack arcs to a hardcoded to: "US" target, regardless of which tenant office was actually attacked. For PKF Africa — with offices in Nairobi, Mombasa, Kampala, Kigali, Dar es Salaam, Nakuru, Malindi — every attack arc goes to the wrong place. We need geo-intelligence to route arcs to the correct physical office location.
+
+What & Why
+Two intelligence signals to exploit
+Signal 1 — Hostname prefix (immediate intelligence) The platform already has mappings for PKF hostnames in routes.ts:
+
+NRB, NBI → Nairobi, Kenya   (lat: -1.286, lon: 36.817)  *note: Nairobi is just south of equator
+KLA       → Kampala, Uganda  (lat: 0.347,  lon: 32.582)
+MSA       → Mombasa, Kenya   (lat: -4.043, lon: 39.668)
+KGL       → Kigali, Rwanda   (lat: -1.943, lon: 30.062)
+DAR, TZ   → Dar es Salaam, Tanzania (lat: -6.792, lon: 39.208)
+NKR       → Nakuru, Kenya    (lat: -0.303, lon: 36.080)
+MLD       → Malindi, Kenya   (lat: -3.214, lon: 40.117)
+PKF hostnames: PKFMSA-JOO2 → MSA → Mombasa; mwesigwad-kla → kla → Kampala; C37R-NRB → NRB → Nairobi. Extract the prefix from asset or target field, map to office location.
+
+Signal 2 — IP range matching (deeper intelligence)
+infrastructure_locations table has privateIpRanges (JSONB, array of CIDR strings). When an endpoint event carries a private IP in its asset/target field, match it against stored CIDRs to identify which office subnet it belongs to.
+
+Schema change
+Add city (varchar 100), countryCode (varchar 5), latitude (real), longitude (real), hostnameKeywords (text[]) to infrastructure_locations. These fields are nullable so no existing rows break.
+
+Seeding office locations
+For PKF Africa (tenant_id 37), seed 7 infrastructure_location rows with:
+
+Full lat/lon coordinates
+City + countryCode
+hostnameKeywords arrays (e.g. ["NRB","NBI","PKFNRB"] for Nairobi)
+Approximate private IP ranges per office
+For other tenants, seed their primary HQ location (for the arc target point):
+
+SecureOps MSSP (id 30): Bangalore, India lat 12.971, lon 77.594
+Vinca Cyber (id 32): Delhi, India lat 28.613, lon 77.209
+MACM (id 33): Mumbai, India lat 19.076, lon 72.877
+Fedfina (id 34): Chennai, India lat 13.082, lon 80.270
+Aspire Systems (id 35): Chennai, India
+Cibervest (id 36): Johannesburg, SA lat -26.204, lon 28.047
+Ralph Lauren (id 42): New York, US lat 40.748, lon -73.985
+API changes
+Enhance /api/threat-map/arcs: For each event row, apply location intelligence:
+
+Extract hostname-style prefix from asset field using regex (/(?:^|[-_])([A-Z]{2,5})(?:[-_\d]|$)/i)
+Look up matching office from tenant's infrastructure_locations via hostnameKeywords
+If no hostname match, check if asset/target field is a private IP — match against privateIpRanges CIDRs using subnet math
+If still no match, use tenant's primary office (first seeded location, or HQ)
+Set toLat, toLon, toCity, toCountry on each arc group
+New endpoint GET /api/threat-map/offices?tenantId=X: Returns all infrastructure_locations for the tenant that have lat/lon set: { id, name, city, countryCode, lat, lon, hostnameKeywords }[] Used by the frontend to render persistent office markers on the map.
+
+Frontend changes
+ArcData type — add optional fields:
+
+interface ArcData {
+  from: string;    // ISO2 attacker country
+  to: string;      // ISO2 defender country (for country fill color)
+  severity: string;
+  count: number;
+  toLat?: number;  // precise target lat when known
+  toLon?: number;  // precise target lon when known
+  toCity?: string; // city label
+}
+WorldMap.tsx:
+
+Add offices: OfficeLocation[] prop (array of { lat, lon, city, name })
+In ArcOverlay, when arc.toLat/arc.toLon is present, use projection([arc.toLon, arc.toLat]) as the arc endpoint instead of the targetCountry centroid
+Add OfficeMarkers inner component: renders a distinct marker for each office (blue pulsing ring + inner dot + city label on hover), separate from the generic "Protected Network" US dot
+When no office data: fall back gracefully to existing US-centroid behavior
+threat-map.tsx:
+
+Add second query: useQuery for /api/threat-map/offices?tenantId=X with refetchInterval: 60000
+Pass offices array to <WorldMap offices={officeData} />
+Update the "Protected Network" overlay label to show count of protected offices
+Done looks like
+PKF Africa attacks on hostnames containing NRB, KLA, MSA, KGL, DAR draw arcs to Nairobi, Kampala, Mombasa, Kigali, Dar es Salaam respectively — not to "US"
+Persistent office markers visible as blue pulsing dots at each city lat/lon
+Hovering an office marker shows city name and office name
+Other tenants' attacks converge on their HQ coordinates
+For IP-based endpoint events, subnet matching resolves to the correct office
+Zero regression: arcs without any intelligence signal still work (fall back to primary office lat/lon)
+Relevant files
+shared/schema.ts — add columns to infrastructureLocations table
+server/routes.ts — /api/threat-map/arcs and new /api/threat-map/offices
+server/seed-pkf-events.ts or new server/seed-office-locations.ts — PKF + other tenant offices
+client/src/components/threat-map/WorldMap.tsx — ArcData type, ArcOverlay, new OfficeMarkers
+client/src/pages/threat-map.tsx — new offices query, pass to WorldMap

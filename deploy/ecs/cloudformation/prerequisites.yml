@@ -1,0 +1,392 @@
+##############################################################################
+# Cyber Command Center — ECS Fargate Prerequisites
+#
+# Deploy this FIRST, before any plane stacks.
+#
+# Creates:
+#   - ECR repositories (management-plane, data-plane, receiver-plane)
+#   - Shared ECS Execution IAM Role (used by all plane stacks)
+#   - S3 buckets (reports, events per data-plane region)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/prerequisites.yml \
+#     --stack-name ccc-prerequisites \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides EnvironmentName=production SecretsPrefix=ccc
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — Shared Prerequisites (ECR, IAM, S3)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  SecretsPrefix:
+    Type: String
+    Default: "ccc"
+    Description: Prefix for Secrets Manager paths
+
+  ImageRetentionCount:
+    Type: Number
+    Default: 10
+    Description: Number of ECR image versions to retain per repo
+
+Resources:
+
+  # ── ECR Repositories ─────────────────────────────────────────────────────────
+  ECRManagementPlane:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ccc-management-plane
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+
+  ECRDataPlane:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ccc-data-plane
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+
+  ECRReceiverPlane:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ccc-receiver-plane
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: receiver
+
+  ECRMigrate:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ccc-migrate
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: migrate
+
+  # ── Shared ECS Execution Role (referenced by all plane stacks) ────────────────
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-ecs-execution-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/*"
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+
+  # ── S3 Buckets ────────────────────────────────────────────────────────────────
+  S3ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-reports-${EnvironmentName}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldReports
+            Status: Enabled
+            ExpirationInDays: 365
+
+  S3EventsBucketInWest1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-events-in-west-1-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+
+  S3EventsBucketUsEast1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-events-us-east-1-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+
+  S3EventsBucketKeEast1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-events-ke-east-1-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+
+  S3EventsBucketSaCentral1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-events-sa-central-1-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+
+  S3EventsBucketBhEast1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-events-bh-east-1-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER_IR
+
+Outputs:
+
+  ManagementPlaneECRUri:
+    Description: ECR URI for management-plane image
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ccc-management-plane"
+    Export:
+      Name: !Sub "${AWS::StackName}-ManagementPlaneECRUri"
+
+  DataPlaneECRUri:
+    Description: ECR URI for data-plane image
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ccc-data-plane"
+    Export:
+      Name: !Sub "${AWS::StackName}-DataPlaneECRUri"
+
+  ReceiverPlaneECRUri:
+    Description: ECR URI for receiver-plane image
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ccc-receiver-plane"
+    Export:
+      Name: !Sub "${AWS::StackName}-ReceiverPlaneECRUri"
+
+  MigrateECRUri:
+    Description: ECR URI for migrate image (retains devDeps for one-off migration tasks)
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ccc-migrate"
+    Export:
+      Name: !Sub "${AWS::StackName}-MigrateECRUri"
+
+  ECSExecutionRoleArn:
+    Description: Shared ECS execution role ARN (used by all plane task definitions)
+    Value: !GetAtt ECSExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSExecutionRoleArn"
+
+  S3ReportsBucketName:
+    Value: !Ref S3ReportsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3ReportsBucketName"
+
+  S3EventsBucketKeEast1Name:
+    Value: !Ref S3EventsBucketKeEast1
+    Export:
+      Name: !Sub "${AWS::StackName}-S3EventsBucketKeEast1Name"
+
+  S3EventsBucketSaCentral1Name:
+    Value: !Ref S3EventsBucketSaCentral1
+    Export:
+      Name: !Sub "${AWS::StackName}-S3EventsBucketSaCentral1Name"
+
+  S3EventsBucketBhEast1Name:
+    Value: !Ref S3EventsBucketBhEast1
+    Export:
+      Name: !Sub "${AWS::StackName}-S3EventsBucketBhEast1Name"

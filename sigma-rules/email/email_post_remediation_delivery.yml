@@ -1,0 +1,31 @@
+title: Email Delivered Despite Remediation Action
+id: sigma-email-checkpoint-003
+status: stable
+level: high
+description: Detects emails where Check Point Harmony Email applied a remediation header (spam header, graymail header) but the message was still delivered to the inbox. This indicates partial protection — the email was tagged but not blocked, leaving the recipient exposed.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - header added
+    - add_spam_header
+    - add_graymail_header
+    - delivered
+    - header added (delivered)
+    - remediated
+    - dismiss
+  condition: selection AND keywords
+falsepositives:
+  - Graymail/spam flagged but intentionally allowed by policy
+tags:
+  - attack.initial_access
+  - attack.t1566
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

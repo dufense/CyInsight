@@ -1,0 +1,19 @@
+{{- if .Values.normalizer.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-normalizer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: normalizer
+spec:
+  type: {{ .Values.normalizer.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.normalizer.service.port }}
+      targetPort: http
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: normalizer
+{{- end }}

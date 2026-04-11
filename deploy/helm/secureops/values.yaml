@@ -1,0 +1,544 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: "standard"
+  clusterDomain: cluster.local
+
+cloudProvider: ""
+
+createNamespace: false
+
+highAvailability:
+  enabled: true
+  antiAffinity: "soft"
+  topologyKey: "topology.kubernetes.io/zone"
+
+receiver:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/receiver
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: receiver
+            topologyKey: topology.kubernetes.io/zone
+  ingress:
+    enabled: true
+    className: nginx
+    host: ingest.secureops.io
+    tls:
+      enabled: true
+      secretName: secureops-receiver-tls
+  syslog:
+    enabled: true
+    udpPort: 514
+    tcpPort: 1514
+    tlsPort: 6514
+  config:
+    logLevel: info
+    rateLimitEps: "10000"
+    syslogBufferSize: "1073741824"
+
+management:
+  enabled: true
+  replicaCount: 3
+  image:
+    repository: secureops/management
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 2
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                plane: management
+            topologyKey: topology.kubernetes.io/zone
+  ingress:
+    enabled: true
+    className: nginx
+    host: app.secureops.io
+    tls:
+      enabled: true
+      secretName: secureops-management-tls
+    annotations:
+      nginx.ingress.kubernetes.io/affinity: cookie
+      nginx.ingress.kubernetes.io/session-cookie-name: secureops-sticky
+  persistence:
+    enabled: true
+    size: 20Gi
+    accessMode: ReadWriteMany
+  database:
+    host: ""
+    port: 5432
+    name: secureops_management
+    existingSecret: secureops-secrets
+    secretKey: database-url
+    replication:
+      enabled: true
+      mode: streaming
+      replicas: 2
+
+dataPlane:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/data-plane
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: data-plane
+            topologyKey: topology.kubernetes.io/zone
+  persistence:
+    enabled: true
+    hotStorage:
+      size: 100Gi
+    coldStorage:
+      size: 500Gi
+  config:
+    region: eu-west
+    hotRetentionDays: "90"
+    warmRetentionDays: "365"
+    coldRetentionDays: "1095"
+    compressionAfterDays: "7"
+  # ── Multi-region federation ─────────────────────────────────────────────────
+  # These URLs are the internal ALB DNS names of each data-plane deployment.
+  # Populated AFTER each regional data-plane stack is deployed.
+  # The management plane reads DATA_PLANE_ENDPOINTS (JSON map) to route
+  # tenant event queries to the nearest data plane.
+  #
+  # How to populate post-deployment (ECS/CloudFormation):
+  #   india_url=$(aws cloudformation describe-stacks \
+  #     --stack-name ccc-data-plane-in-west-1 --region ap-south-1 \
+  #     --query "Stacks[0].Outputs[?OutputKey=='InternalALBDNSName'].OutputValue" --output text)
+  #   bahrain_url=$(aws cloudformation describe-stacks \
+  #     --stack-name ccc-data-plane-bh-east-1 --region me-south-1 \
+  #     --query "Stacks[0].Outputs[?OutputKey=='InternalALBDNSName'].OutputValue" --output text)
+  #   kenya_url=$(aws cloudformation describe-stacks \
+  #     --stack-name ccc-data-plane-ke-east-1 --region af-south-1 \
+  #     --query "Stacks[0].Outputs[?OutputKey=='InternalALBDNSName'].OutputValue" --output text)
+  #
+  # For Helm / K8s deployments, set the federation.endpoints.* values below,
+  # then re-upgrade the management plane chart.
+  federation:
+    enabled: true
+    endpoints:
+      india: "http://REPLACE_INDIA_ALB_DNS"
+      bahrain: "http://REPLACE_BAHRAIN_ALB_DNS"
+      kenya: "http://REPLACE_KENYA_ALB_DNS"
+    # dataPlaneEndpointsJson is the JSON string representation of the above map,
+    # injected as DATA_PLANE_ENDPOINTS env var into management plane pods.
+    dataPlaneEndpointsJson: '{"india":"http://REPLACE_INDIA_ALB_DNS","bahrain":"http://REPLACE_BAHRAIN_ALB_DNS","kenya":"http://REPLACE_KENYA_ALB_DNS"}'
+
+collector:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/collector
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: collector
+            topologyKey: topology.kubernetes.io/zone
+  syslog:
+    enabled: true
+    udpPort: 514
+    tcpPort: 1514
+    tlsPort: 6514
+  config:
+    logLevel: info
+    pollingConcurrency: "5"
+    maxEventsPerCycle: "10000"
+    circuitBreakerThreshold: "5"
+    circuitBreakerCooldownMs: "300000"
+
+normalizer:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/normalizer
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 15
+    targetCPU: 65
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: normalizer
+            topologyKey: topology.kubernetes.io/zone
+  config:
+    logLevel: info
+    consumerConcurrency: "10"
+
+detectionEngine:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/detection-engine
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPU: 70
+    targetMemory: 75
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: detection-engine
+            topologyKey: topology.kubernetes.io/zone
+  config:
+    logLevel: info
+    batchSize: "100"
+    sigmaRulesPath: /app/sigma-rules
+
+enrichment:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/enrichment
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: enrichment
+            topologyKey: topology.kubernetes.io/zone
+  config:
+    logLevel: info
+    iocCacheTtlMs: "3600000"
+    correlationWindowMs: "300000"
+
+storage:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: secureops/storage
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPU: 70
+    targetMemory: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                component: storage
+            topologyKey: topology.kubernetes.io/zone
+  config:
+    logLevel: info
+    batchSize: "500"
+    backpressureLatencyMs: "5000"
+    hotRetentionDays: "90"
+    warmRetentionDays: "365"
+    coldRetentionDays: "1095"
+
+kafka:
+  enabled: false
+
+kafkaKraft:
+  enabled: true
+  builtIn: true
+  replicaCount: 3
+  image:
+    repository: bitnami/kafka
+    tag: "3.8"
+    pullPolicy: IfNotPresent
+  clusterId: "secureops-kafka-cluster-001"
+  controllerQuorumVoters: "0@secureops-kafka-0.secureops-kafka-headless:9093,1@secureops-kafka-1.secureops-kafka-headless:9093,2@secureops-kafka-2.secureops-kafka-headless:9093"
+  logRetentionHours: 168
+  logRetentionBytes: "10737418240"
+  numPartitions: 12
+  defaultReplicationFactor: 3
+  minInsyncReplicas: 2
+  persistence:
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  pdb:
+    enabled: true
+    minAvailable: 2
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              component: kafka
+          topologyKey: topology.kubernetes.io/zone
+
+kafkaExternal:
+  enabled: false
+  brokers: ""
+  securityProtocol: ""
+  saslMechanism: ""
+  saslJaasConfig: ""
+  sslEnabled: false
+
+redis:
+  enabled: true
+  architecture: replicaset
+  sentinel:
+    enabled: true
+    quorum: 2
+  auth:
+    enabled: false
+  replica:
+    replicaCount: 3
+    pdb:
+      enabled: true
+      minAvailable: 1
+
+opensearch:
+  enabled: true
+  singleNode: false
+  replicas: 2
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: 2000m
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+networkPolicies:
+  enabled: false
+
+serviceAccount:
+  create: true
+  automountToken: true
+  annotations: {}
+  labels: {}
+
+rbac:
+  create: true
+
+secrets:
+  create: false
+  existingSecret: secureops-secrets
+  databaseUrl: ""
+  timescaledbUrl: ""
+  sessionSecret: ""
+  openaiApiKey: ""
+  superadminPassword: ""
+  cloudStorageAccessKey: ""
+  cloudStorageSecretKey: ""
+
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+
+objectStorage:
+  provider: s3
+  bucket: secureops-events
+  region: us-east-1
+  endpoint: ""
+
+vpa:
+  enabled: false
+  updateMode: "Auto"
+  maxCPU: "8"
+  maxMemory: "16Gi"
+
+# ── RDS / Aurora SSL configuration ───────────────────────────────────────────
+# These values are injected as env vars into management and data-plane pods
+# via the secureops.sslEnv Helm helper (templates/_helpers.tpl).
+# Override in regional values files (values-india.yaml, etc.) with the
+# actual CA bundle path once the RDS CA bundle is mounted or embedded.
+#
+# When dbSslCa is empty, the sslEnv helper emits no env vars — the app
+# uses its Dockerfile-embedded CA bundle (/etc/ssl/certs/rds-ca-bundle.pem).
+#
+# Example override for Kubernetes (mount CA from a ConfigMap / Secret):
+#   ssl:
+#     dbSslCa: /etc/ssl/certs/rds-ca-bundle.pem
+#     pgSslMode: verify-ca
+#     nodeExtraCaCerts: /etc/ssl/certs/rds-ca-bundle.pem
+ssl:
+  dbSslCa: ""
+  pgSslMode: "verify-ca"
+  nodeExtraCaCerts: ""

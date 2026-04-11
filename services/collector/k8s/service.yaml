@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-collector
+  namespace: secureops
+  labels:
+    app: secureops
+    service: collector
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: syslog-tcp
+      port: 1514
+      targetPort: syslog-tcp
+      protocol: TCP
+  selector:
+    app: secureops
+    service: collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-collector-syslog-udp
+  namespace: secureops
+  labels:
+    app: secureops
+    service: collector
+    component: syslog
+spec:
+  type: LoadBalancer
+  ports:
+    - name: syslog-udp
+      port: 514
+      targetPort: syslog-udp
+      protocol: UDP
+  selector:
+    app: secureops
+    service: collector

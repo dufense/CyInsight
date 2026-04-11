@@ -1,0 +1,142 @@
+{{- if .Values.vpa.enabled }}
+##############################################################################
+# Vertical Pod Autoscaler (VPA)
+# Requires: metrics-server + VPA admission controller installed in the cluster
+# Install VPA: https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+##############################################################################
+
+# Management Plane VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secureops.fullname" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: management
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secureops.fullname" . }}-management
+  updatePolicy:
+    updateMode: {{ .Values.vpa.updateMode | default "Auto" }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: management
+        minAllowed:
+          cpu: 250m
+          memory: 512Mi
+        maxAllowed:
+          cpu: {{ .Values.vpa.maxCPU | default "8" }}
+          memory: {{ .Values.vpa.maxMemory | default "16Gi" }}
+        controlledResources: ["cpu", "memory"]
+---
+# Receiver VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secureops.fullname" . }}-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: receiver
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secureops.fullname" . }}-receiver
+  updatePolicy:
+    updateMode: {{ .Values.vpa.updateMode | default "Auto" }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: receiver
+        minAllowed:
+          cpu: 250m
+          memory: 256Mi
+        maxAllowed:
+          cpu: {{ .Values.vpa.maxCPU | default "8" }}
+          memory: {{ .Values.vpa.maxMemory | default "8Gi" }}
+        controlledResources: ["cpu", "memory"]
+---
+# Detection Engine VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secureops.fullname" . }}-detection-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: detection-engine
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secureops.fullname" . }}-detection-engine
+  updatePolicy:
+    updateMode: {{ .Values.vpa.updateMode | default "Auto" }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: detection-engine
+        minAllowed:
+          cpu: 250m
+          memory: 256Mi
+        maxAllowed:
+          cpu: {{ .Values.vpa.maxCPU | default "8" }}
+          memory: {{ .Values.vpa.maxMemory | default "8Gi" }}
+        controlledResources: ["cpu", "memory"]
+---
+# Enrichment VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secureops.fullname" . }}-enrichment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: enrichment
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secureops.fullname" . }}-enrichment
+  updatePolicy:
+    updateMode: {{ .Values.vpa.updateMode | default "Auto" }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: enrichment
+        minAllowed:
+          cpu: 250m
+          memory: 256Mi
+        maxAllowed:
+          cpu: {{ .Values.vpa.maxCPU | default "8" }}
+          memory: {{ .Values.vpa.maxMemory | default "8Gi" }}
+        controlledResources: ["cpu", "memory"]
+---
+# Data Plane VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secureops.fullname" . }}-data-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: data
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secureops.fullname" . }}-data-plane
+  updatePolicy:
+    updateMode: {{ .Values.vpa.updateMode | default "Auto" }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: data-plane
+        minAllowed:
+          cpu: 500m
+          memory: 1Gi
+        maxAllowed:
+          cpu: {{ .Values.vpa.maxCPU | default "16" }}
+          memory: {{ .Values.vpa.maxMemory | default "32Gi" }}
+        controlledResources: ["cpu", "memory"]
+{{- end }}

@@ -1,0 +1,51 @@
+title: Email Financial Lure Subject Pattern
+id: sigma-email-checkpoint-005
+status: stable
+level: medium
+description: Detects emails with financial lure keywords in subject lines. These patterns are commonly used in phishing, BEC, and spam campaigns to trick recipients into divulging financial information, approving fraudulent payments, or clicking malicious links.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - invoice
+    - payment
+    - wire transfer
+    - bank transfer
+    - account verification
+    - refund
+    - tax return
+    - irs
+    - hmrc
+    - overdue
+    - outstanding balance
+    - direct debit
+    - credit card
+    - billing
+    - unpaid
+    - past due
+    - claim your reward
+    - claim now
+    - cashback
+    - crypto
+    - bitcoin
+    - nft
+    - investment opportunity
+    - double your money
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate billing and invoicing systems
+  - Bank notification emails
+  - Subscription renewal notices
+tags:
+  - attack.initial_access
+  - attack.t1566
+  - attack.t1534
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

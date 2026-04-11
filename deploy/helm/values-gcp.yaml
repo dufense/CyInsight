@@ -1,0 +1,99 @@
+# =============================================================================
+# Cyber Command Center — GCP GKE Helm Override Values
+# =============================================================================
+# Usage:
+#   helm upgrade --install secureops ./deploy/helm/secureops \
+#     -f deploy/helm/secureops/values.yaml \
+#     -f deploy/helm/values-gcp.yaml \
+#     --set secrets.databaseUrl="$DATABASE_URL" \
+#     --set secrets.sessionSecret="$SESSION_SECRET"
+# =============================================================================
+
+cloudProvider: gcp
+
+global:
+  storageClass: premium-rwo   # GKE Premium SSD (ReadWriteOnce)
+
+# ── Ingress — GKE Ingress / Google Cloud Load Balancer ────────────────────
+# Requires the GKE Ingress controller (enabled by default on GKE).
+receiver:
+  ingress:
+    className: gce
+    annotations:
+      kubernetes.io/ingress.class: gce
+      kubernetes.io/ingress.global-static-ip-name: ""   # optional: reserve a static IP
+      networking.gke.io/managed-certificates: secureops-receiver-cert
+      kubernetes.io/ingress.allow-http: "false"
+
+management:
+  ingress:
+    className: gce
+    annotations:
+      kubernetes.io/ingress.class: gce
+      kubernetes.io/ingress.global-static-ip-name: ""   # optional: reserve a static IP
+      networking.gke.io/managed-certificates: secureops-management-cert
+      kubernetes.io/ingress.allow-http: "false"
+      # Affinity via BackendConfig (reference a BackendConfig resource with sessionAffinity)
+      beta.cloud.google.com/backend-config: '{"default":"secureops-backend-config"}'
+
+# ── Storage — GKE Persistent Disk (SSD) ───────────────────────────────────
+dataPlane:
+  persistence:
+    storageClassName: premium-rwo
+
+# ── Object Storage — Google Cloud Storage ─────────────────────────────────
+objectStorage:
+  provider: gcs
+  bucket: secureops-events
+  region: us-central1         # override per deployment region
+
+# ── Service Account — Workload Identity ────────────────────────────────────
+# Bind the Kubernetes service account to a GCP service account so pods
+# automatically get GCS / Secret Manager access without embedded keys.
+# Steps:
+#   gcloud iam service-accounts create secureops-sa --project=<PROJECT>
+#   gcloud projects add-iam-policy-binding <PROJECT> \
+#     --member="serviceAccount:secureops-sa@<PROJECT>.iam.gserviceaccount.com" \
+#     --role="roles/storage.objectAdmin"
+#   gcloud iam service-accounts add-iam-policy-binding \
+#     secureops-sa@<PROJECT>.iam.gserviceaccount.com \
+#     --role="roles/iam.workloadIdentityUser" \
+#     --member="serviceAccount:<PROJECT>.svc.id.goog[secureops/secureops]"
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: ""   # set to secureops-sa@<PROJECT>.iam.gserviceaccount.com
+
+# ── cert-manager — Google-managed certificates (via GKE ManagedCertificate) ─
+# ManagedCertificate resources are referenced in the ingress annotations above.
+# cert-manager is optional on GKE if you use GKE-managed certs.
+certManager:
+  enabled: false
+
+# ── Kafka — Google Cloud Pub/Sub or self-managed on GKE ────────────────────
+# For small clusters keep builtIn Kafka; for production use Cloud Pub/Sub
+# via a Kafka-Pub/Sub connector bridge, or Cloud MSK equivalent on GCP.
+kafkaKraft:
+  enabled: true    # keep in-cluster; switch to false + kafkaExternal for Pub/Sub bridge
+
+kafkaExternal:
+  enabled: false
+
+# ── Redis — Google Cloud Memorystore (Redis) ───────────────────────────────
+# Set redis.enabled=false and configure REDIS_URL pointing at Memorystore.
+redis:
+  enabled: false   # use Memorystore; set REDIS_URL in the secret
+
+# ── OpenSearch — Google Cloud (Elasticsearch via GCP Marketplace or self-hosted) ─
+opensearch:
+  enabled: true    # or set to false and use OPENSEARCH_URL env var
+
+# ── Network Policies ───────────────────────────────────────────────────────
+networkPolicies:
+  enabled: true
+
+# ── Secrets — Google Secret Manager via External Secrets Operator ──────────
+# See: https://external-secrets.io/latest/provider/google-secrets-manager/
+secrets:
+  create: false
+  existingSecret: secureops-secrets

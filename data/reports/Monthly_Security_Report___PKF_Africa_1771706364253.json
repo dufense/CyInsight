@@ -1,0 +1,452 @@
+{
+  "title": "Monthly Security Report - PKF Africa",
+  "type": "executive_summary",
+  "tenant": "PKF Africa",
+  "period": "last_month",
+  "generatedAt": "2026-02-21T20:39:24.253Z",
+  "documentControl": {
+    "version": "1.0",
+    "classification": "Confidential",
+    "preparedBy": "PKF Africa Operations Center",
+    "reviewedBy": "Principal Security Consultant",
+    "approvedBy": "Head of Managed Security Services",
+    "distributionList": [
+      "CISO",
+      "CTO",
+      "IT Security Team",
+      "Risk Committee"
+    ],
+    "documentId": "SO-RPT-MLWS7ENS"
+  },
+  "managementSummary": {
+    "overallRiskRating": "medium",
+    "overallRiskScore": 58,
+    "previousRiskScore": 62,
+    "riskTrend": "decreasing",
+    "ragStatus": [
+      {
+        "area": "Endpoint Security",
+        "status": "amber",
+        "score": 65,
+        "detail": "Many blocked USB events; one open incident."
+      },
+      {
+        "area": "Network Security",
+        "status": "green",
+        "score": 80,
+        "detail": "No network-origin events detected."
+      },
+      {
+        "area": "Vulnerability Management",
+        "status": "amber",
+        "score": 45,
+        "detail": "No vulnerability events; scanning gaps likely."
+      },
+      {
+        "area": "Identity & Access",
+        "status": "amber",
+        "score": 55,
+        "detail": "Access controls untested against recent events."
+      },
+      {
+        "area": "Data Protection",
+        "status": "amber",
+        "score": 60,
+        "detail": "Removable-media controls active but not enforced."
+      },
+      {
+        "area": "Cloud Security",
+        "status": "green",
+        "score": 85,
+        "detail": "No cloud incidents recorded this period."
+      },
+      {
+        "area": "Incident Response",
+        "status": "green",
+        "score": 75,
+        "detail": "Incidents triaged; most resolved rapidly."
+      },
+      {
+        "area": "Security Awareness",
+        "status": "amber",
+        "score": 50,
+        "detail": "User behavior drives removable-media events."
+      }
+    ],
+    "criticalActions": [
+      "Enforce USB-block policy and remove admin override where unnecessary.",
+      "Harden EDR agent tamper protections and validate agent integrity.",
+      "Implement baseline vulnerability scanning and automated ticketing."
+    ]
+  },
+  "executiveSummary": "Period overview: 30-day window recorded 3,685 security events? (data sources total 4,685 events), 348 incidents (Endpoint-focused), 347 endpoint events, 2 high-severity incidents, 346 medium, 1 open incident, 0 tickets open. Operations: high detection coverage; gaps in vulnerability scanning and ticketing. Top risks: removable-media data exfil via USB (majority of incidents), EDR tampering attempts (1 high-severity), absence of vulnerability telemetry. Recommended actions: enforce USB controls, harden EDR, deploy vulnerability scanning and automated incident ticketing. Immediate focus: close open USB incident and validate EDR integrity.",
+  "keyHighlights": [
+    {
+      "label": "Total Security Events",
+      "value": "4,685",
+      "trend": "stable",
+      "trendDetail": "+0%",
+      "context": "All sources, last 30 days"
+    },
+    {
+      "label": "Total Incidents",
+      "value": "348",
+      "trend": "stable",
+      "trendDetail": "-6%",
+      "context": "Endpoint-dominant incidents"
+    },
+    {
+      "label": "Endpoint Events",
+      "value": "347",
+      "trend": "stable",
+      "trendDetail": "+0%",
+      "context": "EDR detections this period"
+    },
+    {
+      "label": "High-Severity Incidents",
+      "value": "2",
+      "trend": "down",
+      "trendDetail": "-50%",
+      "context": "Resolved: EDR tamper and file op"
+    },
+    {
+      "label": "Open Incidents",
+      "value": "1",
+      "trend": "down",
+      "trendDetail": "-1",
+      "context": "One USB insertion remains open"
+    },
+    {
+      "label": "Tickets Open",
+      "value": "0",
+      "trend": "stable",
+      "trendDetail": "0%",
+      "context": "No tickets logged this period"
+    }
+  ],
+  "securityScorecard": {
+    "overallScore": 68,
+    "previousScore": 70,
+    "categories": [
+      {
+        "name": "Threat Detection",
+        "score": 72,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "Endpoint detection effective"
+      },
+      {
+        "name": "Incident Response",
+        "score": 75,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "Rapid resolution of incidents"
+      },
+      {
+        "name": "Vulnerability Mgmt",
+        "score": 40,
+        "maxScore": 100,
+        "grade": "D",
+        "detail": "No vulnerability telemetry"
+      },
+      {
+        "name": "Asset Management",
+        "score": 60,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Asset controls partial"
+      },
+      {
+        "name": "Compliance",
+        "score": 70,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "Controls present; gaps exist"
+      },
+      {
+        "name": "Risk Management",
+        "score": 65,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Risks identified, remediation pending"
+      }
+    ]
+  },
+  "maturityAssessment": {
+    "overallMaturity": "Developing",
+    "domains": [
+      {
+        "domain": "Identify",
+        "score": 3,
+        "target": 4,
+        "detail": "Asset visibility exists but incomplete."
+      },
+      {
+        "domain": "Protect",
+        "score": 3,
+        "target": 4,
+        "detail": "Protective controls in place; enforcement inconsistent."
+      },
+      {
+        "domain": "Detect",
+        "score": 4,
+        "target": 4,
+        "detail": "Detection coverage strong for endpoints."
+      },
+      {
+        "domain": "Respond",
+        "score": 3,
+        "target": 4,
+        "detail": "Response effective but lacks automation."
+      },
+      {
+        "domain": "Recover",
+        "score": 2,
+        "target": 3,
+        "detail": "Recovery planning limited."
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Removable-media detections concentration",
+      "severity": "medium",
+      "cvssScore": 4,
+      "description": "Approximately 340+ 'Insertion of Storage Device Detected' incidents; majority blocked; one remains open.",
+      "mitreTechnique": "T1036 - Modify system image / T1056 - Input Capture (removable media)",
+      "affectedSystems": "Endpoints (workstations/laptops)"
+    },
+    {
+      "id": "F-002",
+      "title": "EDR tamper attempt",
+      "severity": "high",
+      "cvssScore": 7,
+      "description": "Attempt To Terminate Cynet Process recorded and resolved; indicates targeted EDR interference.",
+      "mitreTechnique": "T1562 - Impair Defenses",
+      "affectedSystems": "Affected endpoint(s) with Cynet agent"
+    },
+    {
+      "id": "F-003",
+      "title": "Unauthorized file operation detected",
+      "severity": "high",
+      "cvssScore": 7.5,
+      "description": "Unauthorized File Operation Attempt detected and resolved; potential lateral or privilege misuse indicator.",
+      "mitreTechnique": "T1005 - Data from Local System",
+      "affectedSystems": "Single endpoint(s)"
+    },
+    {
+      "id": "F-004",
+      "title": "No vulnerability events recorded",
+      "severity": "medium",
+      "cvssScore": 5,
+      "description": "Vulnerability event count is zero; suggests scanning/configuration gap rather than no findings.",
+      "mitreTechnique": "T1588 - Obtain Capabilities (operational gap)",
+      "affectedSystems": "Vulnerability management tooling / processes"
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "R-001",
+      "title": "Enforce removable-media policy",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "immediate",
+      "description": "Block USB usage by default; allow exceptions via documented approval workflow; close open USB incident immediately.",
+      "relatedFinding": "F-001"
+    },
+    {
+      "id": "R-002",
+      "title": "Harden EDR and validate agents",
+      "priority": "high",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Enable tamper-protection, verify agent integrity across endpoints, and escalate anomalies to SOC.",
+      "relatedFinding": "F-002"
+    },
+    {
+      "id": "R-003",
+      "title": "Deploy vulnerability scanning",
+      "priority": "high",
+      "effort": "medium",
+      "timeline": "short-term",
+      "description": "Implement authenticated scanning and ingest results into ticketing for prioritized remediation.",
+      "relatedFinding": "F-004"
+    },
+    {
+      "id": "R-004",
+      "title": "User awareness on removable media",
+      "priority": "medium",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Targeted communications and quick micro-training on USB risks for high-use groups.",
+      "relatedFinding": "F-001"
+    },
+    {
+      "id": "R-005",
+      "title": "Automate incident ticketing",
+      "priority": "medium",
+      "effort": "low",
+      "timeline": "short-term",
+      "description": "Integrate EDR alerts to ticketing to ensure traceable remediation and metrics.",
+      "relatedFinding": "F-004"
+    }
+  ],
+  "riskMatrix": [
+    {
+      "risk": "Removable-media data exfiltration",
+      "likelihood": 4,
+      "impact": 4,
+      "residualRisk": "high",
+      "treatmentPlan": "Enforce USB-block policy and monitoring."
+    },
+    {
+      "risk": "EDR tamper and disablement",
+      "likelihood": 2,
+      "impact": 5,
+      "residualRisk": "high",
+      "treatmentPlan": "Enable tamper protection and integrity checks."
+    },
+    {
+      "risk": "Undetected vulnerabilities",
+      "likelihood": 4,
+      "impact": 4,
+      "residualRisk": "high",
+      "treatmentPlan": "Deploy authenticated scanning and remediation pipeline."
+    },
+    {
+      "risk": "Operational ticketing gap",
+      "likelihood": 3,
+      "impact": 3,
+      "residualRisk": "medium",
+      "treatmentPlan": "Automate alerts into ticketing and SLAs."
+    }
+  ],
+  "sections": [
+    {
+      "title": "Incident Status Summary",
+      "content": "348 incidents: 347 resolved, 1 open. Majority are endpoint removable-media detections. No tickets logged.",
+      "chartData": [
+        {
+          "name": "Resolved",
+          "value": 347
+        },
+        {
+          "name": "Open",
+          "value": 1
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "High resolution rate; one outstanding USB incident."
+    },
+    {
+      "title": "Severity Breakdown",
+      "content": "Severity distribution: High = 2, Medium = 346. High incidents resolved; medium incidents dominated by USB blocks.",
+      "chartData": [
+        {
+          "name": "High",
+          "value": 2
+        },
+        {
+          "name": "Medium",
+          "value": 346
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Medium-severity USB events drive volume."
+    },
+    {
+      "title": "Event Source Distribution",
+      "content": "Endpoint events = 347 of 4,685 total events; email and vulnerability sources show zero events this period.",
+      "chartData": [
+        {
+          "name": "Endpoint",
+          "value": 347
+        },
+        {
+          "name": "Other",
+          "value": 4338
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "Endpoint is primary telemetry source; other sources require validation."
+    }
+  ],
+  "complianceMapping": [
+    {
+      "framework": "NIST",
+      "requirement": "PR.DS - Data Security",
+      "status": "Partial",
+      "gap": "Removable-media enforcement incomplete"
+    },
+    {
+      "framework": "ISO 27001",
+      "requirement": "A.8.2 - Media handling",
+      "status": "Partial",
+      "gap": "USB policy not fully enforced"
+    },
+    {
+      "framework": "SOC2",
+      "requirement": "CC6 - Change control",
+      "status": "Partial",
+      "gap": "EDR tamper protection needs strengthening"
+    },
+    {
+      "framework": "PCI-DSS",
+      "requirement": "9.1 - Restrict physical access",
+      "status": "Partial",
+      "gap": "Physical/removable media controls require proof of enforcement"
+    }
+  ],
+  "conclusion": "Posture: detection strong at endpoint level; operational gaps remain in vulnerability management, ticketing, and removable-media enforcement. Priorities next period: enforce USB policy, harden EDR agents, deploy vulnerability scanning and automated ticketing to reduce residual risk.",
+  "appendix": {
+    "glossary": [
+      {
+        "term": "EDR",
+        "definition": "Endpoint Detection and Response"
+      },
+      {
+        "term": "CVSS",
+        "definition": "Common Vulnerability Scoring System"
+      },
+      {
+        "term": "RAG",
+        "definition": "Red/Amber/Green risk rating"
+      },
+      {
+        "term": "MDR",
+        "definition": "Managed Detection and Response"
+      },
+      {
+        "term": "SOC",
+        "definition": "Security Operations Center"
+      },
+      {
+        "term": "SIEM",
+        "definition": "Security Information and Event Management"
+      }
+    ],
+    "severityDefinitions": [
+      {
+        "level": "Critical",
+        "description": "Immediate threat",
+        "responseTime": "< 1 hour"
+      },
+      {
+        "level": "High",
+        "description": "Urgent attention needed",
+        "responseTime": "< 4 hours"
+      },
+      {
+        "level": "Medium",
+        "description": "Planned remediation",
+        "responseTime": "< 24 hours"
+      },
+      {
+        "level": "Low",
+        "description": "Next maintenance window",
+        "responseTime": "< 72 hours"
+      }
+    ]
+  }
+}

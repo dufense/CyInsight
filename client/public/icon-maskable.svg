@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Maskable safe zone: content within central 80% -->
+  <rect width="512" height="512" rx="0" fill="#0f172a"/>
+  <!-- Shield centered with ~20% safe-zone padding from all sides -->
+  <path d="M256 96 L376 140 L376 248 C376 324 318 384 256 404 C194 384 136 324 136 248 L136 140 Z" fill="none" stroke="#3b82f6" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M256 148 L340 178 L340 248 C340 300 302 344 256 360 C210 344 172 300 172 248 L172 178 Z" fill="#1e3358"/>
+  <circle cx="256" cy="234" r="30" fill="none" stroke="#06b6d4" stroke-width="12"/>
+  <line x1="256" y1="200" x2="256" y2="174" stroke="#06b6d4" stroke-width="10" stroke-linecap="round"/>
+  <line x1="256" y1="268" x2="256" y2="294" stroke="#06b6d4" stroke-width="10" stroke-linecap="round"/>
+  <line x1="208" y1="234" x2="182" y2="234" stroke="#06b6d4" stroke-width="10" stroke-linecap="round"/>
+  <line x1="304" y1="234" x2="330" y2="234" stroke="#06b6d4" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="256" cy="234" r="10" fill="#3b82f6"/>
+</svg>

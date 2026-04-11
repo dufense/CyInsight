@@ -1,0 +1,16 @@
+{{- if .Values.collector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: collector
+data:
+  POLLING_CONCURRENCY: {{ .Values.collector.config.pollingConcurrency | quote }}
+  MAX_EVENTS_PER_CYCLE: {{ .Values.collector.config.maxEventsPerCycle | quote }}
+  CIRCUIT_BREAKER_THRESHOLD: {{ .Values.collector.config.circuitBreakerThreshold | quote }}
+  CIRCUIT_BREAKER_COOLDOWN_MS: {{ .Values.collector.config.circuitBreakerCooldownMs | quote }}
+  LOG_LEVEL: {{ .Values.collector.config.logLevel | default "info" | quote }}
+{{- end }}

@@ -1,0 +1,139 @@
+{
+  "family": "ccc-management-plane",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-management-task-role",
+  "containerDefinitions": [
+    {
+      "name": "management-plane",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/ccc-management-plane:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "hostPort": 5000,
+          "protocol": "tcp",
+          "name": "http"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",             "value": "production" },
+        { "name": "PORT",                 "value": "5000" },
+        { "name": "PLANE",                "value": "management" },
+        { "name": "ENABLE_SEEDING",       "value": "false" },
+        { "name": "CLUSTER_WORKERS_MAX",  "value": "2" },
+        { "name": "WORKER_MAX_RSS_MB",    "value": "800" },
+        { "name": "APP_REPORTS_DIR",      "value": "/app/data/reports" },
+        { "name": "APP_UPLOADS_DIR",      "value": "/app/data/uploads" },
+        { "name": "PARQUET_DATA_DIR",     "value": "/app/data/events" },
+        { "name": "DB_POOL_MAX",          "value": "5" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/management/database-url"
+        },
+        {
+          "name": "SESSION_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/management/session-secret"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/management/redis-url"
+        },
+        {
+          "name": "KAFKA_BROKERS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/shared/kafka-brokers"
+        },
+        {
+          "name": "AI_PROVIDER",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/ai/provider"
+        },
+        {
+          "name": "AI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/ai/api-key"
+        },
+        {
+          "name": "AI_MODEL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/ai/model"
+        },
+        {
+          "name": "AI_BASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/ai/base-url"
+        },
+        {
+          "name": "SUPERADMIN_DEFAULT_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/management/superadmin-password"
+        },
+        {
+          "name": "CLOUD_STORAGE_PROVIDER",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/storage/provider"
+        },
+        {
+          "name": "AWS_S3_BUCKET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/storage/s3-bucket"
+        },
+        {
+          "name": "AWS_S3_REGION",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/storage/s3-region"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ccc-management-plane",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "management-data",
+          "containerPath": "/app/data",
+          "readOnly": false
+        }
+      ],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ],
+      "stopTimeout": 30
+    }
+  ],
+  "volumes": [
+    {
+      "name": "management-data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "EFS_FILESYSTEM_ID",
+        "rootDirectory": "/management",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "EFS_ACCESS_POINT_ID",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ],
+  "tags": [
+    { "key": "Project",     "value": "CyberCommandCenter" },
+    { "key": "Plane",       "value": "management" },
+    { "key": "ManagedBy",   "value": "ecs" }
+  ]
+}

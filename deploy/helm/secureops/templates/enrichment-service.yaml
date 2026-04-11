@@ -1,0 +1,19 @@
+{{- if .Values.enrichment.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-enrichment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: enrichment
+spec:
+  type: {{ .Values.enrichment.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.enrichment.service.port }}
+      targetPort: http
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: enrichment
+{{- end }}

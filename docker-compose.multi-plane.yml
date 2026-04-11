@@ -1,0 +1,217 @@
+version: "3.9"
+
+x-common-env: &common-env
+  NODE_ENV: production
+  KAFKA_BROKERS: kafka:9092
+  REDIS_URL: redis://redis:6379
+
+services:
+  kafka:
+    image: bitnami/kafka:3.8
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_NUM_PARTITIONS: 6
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_KRAFT_CLUSTER_ID: "secureops-kafka-cluster-001"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  management-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: secureops_management
+      POSTGRES_USER: secureops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secureops_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - management_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureops -d secureops_management"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  data-plane-db:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: secureops_events
+      POSTGRES_USER: secureops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secureops_dev_password}
+    ports:
+      - "5433:5432"
+    volumes:
+      - dataplane_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureops -d secureops_events"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  opensearch:
+    image: opensearchproject/opensearch:2.12.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  receiver:
+    build:
+      context: .
+      dockerfile: deploy/receiver/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5001:5000"
+      - "514:514/udp"
+      - "1514:1514"
+      - "6514:6514"
+    environment:
+      <<: *common-env
+      PORT: 5000
+      PLANE: receiver
+      MANAGEMENT_PLANE_URL: http://management:5000
+      DATA_PLANE_URL: http://data-plane:5000
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-${OPENAI_API_KEY:-}}
+      AI_BASE_URL: ${AI_BASE_URL:-${OPENAI_BASE_URL:-}}
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  management:
+    build:
+      context: .
+      dockerfile: deploy/management/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      <<: *common-env
+      PORT: 5000
+      PLANE: management
+      DATABASE_URL: postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@management-db:5432/secureops_management
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-in-production}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-${OPENAI_API_KEY:-}}
+      AI_BASE_URL: ${AI_BASE_URL:-${OPENAI_BASE_URL:-}}
+      SUPERADMIN_DEFAULT_PASSWORD: ${SUPERADMIN_DEFAULT_PASSWORD:-Admin@123}
+      CLOUD_STORAGE_PROVIDER: ${CLOUD_STORAGE_PROVIDER:-minio}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    depends_on:
+      management-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - management_data:/app/data
+
+  data-plane:
+    build:
+      context: .
+      dockerfile: deploy/data-plane/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5002:5000"
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      PLANE: data
+      DATABASE_URL: postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@data-plane-db:5432/secureops_events
+      OPENSEARCH_URL: http://opensearch:9200
+      KAFKA_BROKERS: kafka:9092
+      REGION: ${DATA_PLANE_REGION:-in-west-1}
+      OBJECT_STORAGE_BUCKET: secureops-events-local
+      CLOUD_STORAGE_PROVIDER: ${CLOUD_STORAGE_PROVIDER:-minio}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    depends_on:
+      data-plane-db:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - dataplane_storage:/app/data
+
+volumes:
+  kafka_data:
+    driver: local
+  management_pgdata:
+    driver: local
+  dataplane_pgdata:
+    driver: local
+  opensearch_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  management_data:
+    driver: local
+  dataplane_storage:
+    driver: local

@@ -1,0 +1,44 @@
+title: Email Celebrity or Authority Bait Subject Line
+id: sigma-email-checkpoint-004
+status: stable
+level: medium
+description: Detects emails where the subject line uses celebrity names, authority figures, sports personalities, or public figures to entice recipients into clicking. This technique is commonly used in social engineering, spam campaigns, and graymail to drive engagement with malicious content.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - confirmed for
+    - spotted at
+    - caught with
+    - breaks silence
+    - reveals
+    - shock reveal
+    - endorses
+    - secret behind
+    - exclusive interview
+    - just confirmed
+    - breaking news
+    - has been found
+    - seen with
+    - leaked
+    - insider info
+    - celebrity
+    - influencer
+    - famous
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate celebrity news subscription newsletters
+  - Sports updates and sports notification emails
+tags:
+  - attack.initial_access
+  - attack.t1598
+  - attack.t1566
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

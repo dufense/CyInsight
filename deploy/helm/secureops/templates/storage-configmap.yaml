@@ -1,0 +1,17 @@
+{{- if .Values.storage.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-storage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: storage
+data:
+  BATCH_SIZE: {{ .Values.storage.config.batchSize | quote }}
+  BACKPRESSURE_LATENCY_MS: {{ .Values.storage.config.backpressureLatencyMs | quote }}
+  RETENTION_HOT_DAYS: {{ .Values.storage.config.hotRetentionDays | quote }}
+  RETENTION_WARM_DAYS: {{ .Values.storage.config.warmRetentionDays | quote }}
+  RETENTION_COLD_DAYS: {{ .Values.storage.config.coldRetentionDays | quote }}
+  LOG_LEVEL: {{ .Values.storage.config.logLevel | default "info" | quote }}
+{{- end }}

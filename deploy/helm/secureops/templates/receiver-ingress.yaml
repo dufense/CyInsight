@@ -1,0 +1,54 @@
+{{- if and .Values.receiver.enabled .Values.receiver.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "secureops.fullname" . }}-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: receiver
+  annotations:
+    {{- if .Values.certManager.enabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.certManager.issuer }}
+    {{- end }}
+    {{- if eq .Values.cloudProvider "aws" }}
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    {{- else if eq .Values.cloudProvider "azure" }}
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    {{- else if eq .Values.cloudProvider "gcp" }}
+    kubernetes.io/ingress.class: gce
+    networking.gke.io/managed-certificates: {{ include "secureops.fullname" . }}-receiver-cert
+    {{- else }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "200m"
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.receiver.ingress.className }}
+  {{- if .Values.receiver.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.receiver.ingress.host }}
+      secretName: {{ .Values.receiver.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.receiver.ingress.host }}
+      http:
+        paths:
+          - path: /ingest
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "secureops.fullname" . }}-receiver
+                port:
+                  number: {{ .Values.receiver.service.port }}
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "secureops.fullname" . }}-receiver
+                port:
+                  number: {{ .Values.receiver.service.port }}
+{{- end }}

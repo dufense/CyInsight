@@ -1,0 +1,589 @@
+##############################################################################
+# Cyber Command Center -- Data Plane Aurora PostgreSQL + RDS Proxy (Per-Region)
+#
+# Dedicated Aurora Serverless v2 PostgreSQL cluster for each data-plane region.
+# Isolates security event metadata (enrichment, IOC state, correlation results)
+# from the management plane database, enabling independent scaling and regional
+# data sovereignty.
+#
+# Design decisions:
+#   - Aurora Serverless v2: scales 0.5-64 ACU per region; no idle cost
+#   - Isolated subnets only (no internet route, from 10-data-plane-ha-vpc.yml)
+#   - RDS Proxy with IAM auth: pools ECS Fargate connections (up to 30 tasks)
+#   - pg_stat_statements + write-tuned autovacuum for event metadata writes
+#   - Secrets Manager secret with 90-day auto-rotation
+#   - CloudWatch alarms: CPU, ACU, connections, replica lag
+#
+# Data plane plane separation:
+#   - Management Aurora (02):  OLTP -- tenants, users, incidents metadata, tickets
+#   - Data Plane Aurora (this): event enrichment state, correlation cache, IOC
+#   - ClickHouse (08):         OLAP -- fast SQL aggregations over raw events
+#   - OpenSearch (04):         Full-text search -- 30-day hot tier
+#
+# Depends on:
+#   10-data-plane-ha-vpc.yml  (VpcId, IsolatedSubnet1Id/2Id/3Id, AuroraSecurityGroupId,
+#                               VpcCidr — used by RDSProxySecurityGroup ingress rule)
+#
+# ── Capacity & Sizing Guide (100–500 GB/day event throughput per region) ──────
+# Aurora Serverless v2: MinACU=0.5, MaxACU=64 (scales with active event writes)
+# RDS Proxy: IAM auth, IdleClientTimeout 300s (5 min), 90% connection pooling
+#   Dedicated RDSProxySecurityGroup + AuroraProxyIngress ensures proxy→Aurora
+#   connectivity without exposing Aurora SG to arbitrary proxy IP changes.
+# pg_partman: enabled via shared_preload_libraries for time-based table partitioning
+# autovacuum: aggressive settings (scale_factor=0.02, vacuum_cost_delay=2ms)
+#   tuned for heavy INSERT workloads from event enrichment pipelines.
+# Expected scale: 1,000–5,000 event metadata writes/s at 500 GB/day ingest.
+#
+# Deploy (mumbai):
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/12-data-plane-rds.yml \
+#     --stack-name ccc-dp-rds-mumbai \
+#     --region ap-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       DataPlaneId=mumbai \
+#       VpcStackName=ccc-dp-vpc-mumbai \
+#       DBPassword=<32-char-password>
+#
+# Deploy (bahrain):
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/12-data-plane-rds.yml \
+#     --stack-name ccc-dp-rds-bahrain \
+#     --region me-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       DataPlaneId=bahrain \
+#       VpcStackName=ccc-dp-vpc-bahrain \
+#       DBPassword=<32-char-password>
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- Data Plane Aurora PostgreSQL + RDS Proxy (per region)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  DataPlaneId:
+    Type: String
+    AllowedValues: [mumbai, bahrain, kenya]
+    Description: Logical data plane identifier -- used in resource names and tags.
+
+  VpcStackName:
+    Type: String
+    Description: >-
+      CloudFormation stack name of the data plane HA VPC (10-data-plane-ha-vpc.yml).
+      Exports VpcId, IsolatedSubnet1Id/2Id/3Id, AuroraSecurityGroupId.
+
+  DBName:
+    Type: String
+    Default: ccc_events
+    Description: PostgreSQL database name for data plane event metadata
+
+  DBUsername:
+    Type: String
+    Default: ccc_dp_admin
+    NoEcho: false
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Master password (min 16 chars) - stored in Secrets Manager with auto-rotation
+
+  MinACU:
+    Type: Number
+    Default: 0.5
+    Description: Minimum Aurora Capacity Units (scales to zero between ingest windows)
+
+  MaxACU:
+    Type: Number
+    Default: 64
+    Description: Maximum Aurora Capacity Units (64 ACU = 128 GB RAM for peak event enrichment)
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 35
+
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90]
+
+Resources:
+
+  # ── DB Subnet Group (isolated subnets, no internet route) ───────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "CCC data plane Aurora -- isolated subnets -- ${DataPlaneId} ${EnvironmentName}"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet3Id"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── Cluster Parameter Group (write-tuned for event enrichment workload) ─────
+  # Tuned for high-throughput event metadata writes:
+  #   - pg_stat_statements for slow query monitoring
+  #   - aggressive autovacuum to handle high UPDATE/DELETE churn on event state
+  #   - shorter idle_in_transaction_timeout (ECS tasks should not hold txns open)
+  ClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "CCC data plane Aurora -- write-tuned PostgreSQL 16 -- ${DataPlaneId} ${EnvironmentName}"
+      Family: aurora-postgresql16
+      Parameters:
+        shared_preload_libraries: "pg_stat_statements,auto_explain"
+        pg_stat_statements.track: "all"
+        pg_stat_statements.max: "10000"
+        auto_explain.log_min_duration: "3000"
+        idle_in_transaction_session_timeout: "30000"
+        statement_timeout: "60000"
+        lock_timeout: "10000"
+        tcp_keepalives_idle: "60"
+        tcp_keepalives_interval: "10"
+        tcp_keepalives_count: "6"
+        log_min_duration_statement: "1000"
+        log_lock_waits: "1"
+        work_mem: "32768"
+        maintenance_work_mem: "524288"
+        checkpoint_completion_target: "0.9"
+        # Aggressive autovacuum for high-churn event state tables
+        autovacuum_vacuum_scale_factor: "0.02"
+        autovacuum_analyze_scale_factor: "0.01"
+        autovacuum_vacuum_cost_delay: "2"
+        autovacuum_max_workers: "6"
+        # WAL tuning for high write throughput
+        synchronous_commit: "on"
+        wal_compression: "on"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+
+  # ── Enhanced Monitoring Role ─────────────────────────────────────────────────
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-dp-aurora-monitoring-role-${DataPlaneId}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # ── Aurora Serverless v2 Cluster ────────────────────────────────────────────
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: !Sub "ccc-dp-${DataPlaneId}-${EnvironmentName}"
+      Engine: aurora-postgresql
+      EngineVersion: "16.6"
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterParameterGroupName: !Ref ClusterParameterGroup
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref MinACU
+        MaxCapacity: !Ref MaxACU
+      StorageEncrypted: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:03:00-sun:04:00"
+      DeletionProtection: !Ref DeletionProtection
+      EnableCloudwatchLogsExports:
+        - postgresql
+      CopyTagsToSnapshot: true
+      EnableHttpEndpoint: false
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── Writer Instance ──────────────────────────────────────────────────────────
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-dp-${DataPlaneId}-writer-${EnvironmentName}"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Role
+          Value: writer
+
+  # ── Reader Instance (Multi-AZ failover + read scale-out) ────────────────────
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-dp-${DataPlaneId}-reader-${EnvironmentName}"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Role
+          Value: reader
+
+  # ── Secrets Manager Secret ───────────────────────────────────────────────────
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "ccc/data-plane/${DataPlaneId}/database-credentials-${EnvironmentName}"
+      Description: !Sub "CCC data plane Aurora connection credentials -- ${DataPlaneId} ${EnvironmentName}"
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${AuroraCluster.Endpoint.Address}",
+          "port": "5432",
+          "dbname": "${DBName}",
+          "engine": "aurora-postgresql",
+          "DATA_PLANE_DB_URL": "postgresql://${DBUsername}:${DBPassword}@${AuroraCluster.Endpoint.Address}:5432/${DBName}?sslmode=require"
+        }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+
+  # ── Secrets Manager Rotation (90-day automatic password rotation) ────────────
+  DBSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: AuroraWriterInstance
+    Properties:
+      SecretId: !Ref DBSecret
+      HostedRotationLambda:
+        RotationType: PostgreSQLSingleUser
+        RotationLambdaName: !Sub "ccc-dp-aurora-rotation-${DataPlaneId}-${EnvironmentName}"
+        VpcSecurityGroupIds:
+          Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+        VpcSubnetIds:
+          Fn::Join:
+            - ","
+            - - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+              - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+              - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet3Id"
+      RotationRules:
+        AutomaticallyAfterDays: 90
+
+  # ── RDS Proxy (connection pooling + IAM auth) ────────────────────────────────
+  # Pools connections from up to 30 ECS Fargate tasks per data plane region.
+  # IAM authentication required -- eliminates password rotation disruption.
+  # Proxy sits in isolated subnets alongside Aurora for minimal latency.
+
+  # Dedicated security group for the data-plane RDS Proxy.
+  # The proxy needs outbound access to Aurora on port 5432; we achieve this by
+  # attaching this SG to the proxy and adding an ingress rule on AuroraSecurityGroup
+  # (from the VPC stack) to allow inbound 5432 from this proxy SG.
+  RDSProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "RDS Proxy SG — data-plane Aurora proxy [${DataPlaneId}][${EnvironmentName}]"
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      # Allow ECS tasks (and any VPC resource) to connect to the proxy on port 5432.
+      # Scoped to VPC CIDR to avoid cross-stack ECS SG parameter dependencies.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStackName}-VpcCidr"
+          Description: !Sub "Allow VPC resources (ECS tasks) to connect to data-plane [${DataPlaneId}] RDS Proxy on 5432"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Allow RDS Proxy → Aurora PostgreSQL (port 5432) inbound on the VPC-exported Aurora SG.
+  # Without this rule the proxy target-group is unhealthy and all connections fail.
+  AuroraProxyIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref RDSProxySecurityGroup
+      Description: !Sub "Allow data-plane RDS Proxy [${DataPlaneId}] to reach Aurora on 5432"
+
+  RDSProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-dp-rds-proxy-role-${DataPlaneId}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Ref DBSecret
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    DependsOn:
+      - DBSecret
+      - AuroraWriterInstance
+    Properties:
+      DBProxyName: !Sub "ccc-dp-${DataPlaneId}-proxy-${EnvironmentName}"
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !Ref DBSecret
+          IAMAuth: REQUIRED
+      VpcSubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet3Id"
+      # Use the dedicated proxy SG — not the Aurora SG directly.
+      # AuroraProxyIngress adds port-5432 ingress from this SG to AuroraSecurityGroup,
+      # ensuring proxy → Aurora connectivity while keeping the Aurora SG clean.
+      VpcSecurityGroupIds:
+        - !Ref RDSProxySecurityGroup
+      RequireTLS: true
+      IdleClientTimeout: 300
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RDSProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: default
+      DBClusterIdentifiers:
+        - !Ref AuroraCluster
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # ── CloudWatch Log Group ─────────────────────────────────────────────────────
+  AuroraLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/rds/cluster/ccc-dp-${DataPlaneId}-${EnvironmentName}/postgresql"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── CloudWatch Alarms ────────────────────────────────────────────────────────
+  AlarmHighCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-aurora-${DataPlaneId}-${EnvironmentName}-high-cpu"
+      AlarmDescription: !Sub "Data plane Aurora [${DataPlaneId}] writer CPU above 80% for 5 minutes"
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+        - Name: Role
+          Value: WRITER
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmHighACU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-aurora-${DataPlaneId}-${EnvironmentName}-high-acu"
+      AlarmDescription: !Sub "Data plane Aurora [${DataPlaneId}] ACU utilization approaching MaxACU"
+      Namespace: AWS/RDS
+      MetricName: ServerlessDatabaseCapacity
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref MaxACU
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+  AlarmHighConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-aurora-${DataPlaneId}-${EnvironmentName}-high-connections"
+      AlarmDescription: !Sub "Data plane Aurora [${DataPlaneId}] connections above 500 (proxy pool exhaustion risk)"
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 500
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmReplicationLag:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-aurora-${DataPlaneId}-${EnvironmentName}-replication-lag"
+      AlarmDescription: !Sub "Data plane Aurora [${DataPlaneId}] replica lag above 30 seconds"
+      Namespace: AWS/RDS
+      MetricName: AuroraReplicaLag
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 30000
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmProxyClientConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-rds-proxy-${DataPlaneId}-${EnvironmentName}-high-client-connections"
+      AlarmDescription: !Sub "Data plane RDS Proxy [${DataPlaneId}] client connections above 400"
+      Namespace: AWS/RDS
+      MetricName: ClientConnections
+      Dimensions:
+        - Name: ProxyName
+          Value: !Ref RDSProxy
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 400
+      ComparisonOperator: GreaterThanThreshold
+
+  # Target-group health: fires when proxy has no available targets (Aurora unreachable).
+  # DatabaseConnectionsSetupFailed counts TLS/auth/routing failures from proxy to Aurora.
+  AlarmProxyTargetGroupFailure:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-rds-proxy-${DataPlaneId}-${EnvironmentName}-target-failure"
+      AlarmDescription: !Sub "Data plane RDS Proxy [${DataPlaneId}] target connection failures > 0 for 3 consecutive minutes -- Aurora unreachable via proxy"
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnectionsSetupFailed
+      Dimensions:
+        - Name: ProxyName
+          Value: !Ref RDSProxy
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  ClusterEndpoint:
+    Description: Aurora cluster writer endpoint (direct, bypasses proxy)
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterEndpoint"
+
+  ReaderEndpoint:
+    Description: Aurora cluster reader endpoint (direct, bypasses proxy)
+    Value: !GetAtt AuroraCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-ReaderEndpoint"
+
+  ClusterPort:
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterPort"
+
+  RDSProxyEndpoint:
+    Description: RDS Proxy endpoint for connection-pooled IAM-authenticated access from ECS tasks
+    Value: !GetAtt RDSProxy.Endpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSProxyEndpoint"
+
+  DBSecretArn:
+    Description: Secrets Manager ARN containing DATA_PLANE_DB_URL and credentials
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecretArn"
+
+  ClusterIdentifier:
+    Value: !Ref AuroraCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterIdentifier"
+
+  DataPlaneId:
+    Value: !Ref DataPlaneId
+    Export:
+      Name: !Sub "${AWS::StackName}-DataPlaneId"

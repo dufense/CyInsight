@@ -1,0 +1,48 @@
+title: Email Urgency and Pressure Attack Pattern
+id: sigma-email-checkpoint-008
+status: stable
+level: medium
+description: Detects emails using urgency, time pressure, and fear-based language in subject lines — classic social engineering manipulation tactics. These patterns are prevalent in phishing, BEC, credential harvesting, and vishing follow-up emails.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - action required
+    - immediate action
+    - account suspended
+    - account locked
+    - verify immediately
+    - expires today
+    - expires in 24 hours
+    - last warning
+    - final notice
+    - unauthorized access
+    - suspicious activity detected
+    - your account has been
+    - security alert
+    - unusual sign-in
+    - your password will expire
+    - respond immediately
+    - urgent request
+    - time sensitive
+    - important notice
+    - do not ignore
+    - failure to respond
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate security notifications from IT teams
+  - Password expiry reminder emails
+  - Genuine account security alerts
+tags:
+  - attack.initial_access
+  - attack.t1566
+  - attack.social_engineering
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

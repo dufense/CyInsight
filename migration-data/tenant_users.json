@@ -1,0 +1,27 @@
+[
+  {
+    "id": 22,
+    "user_id": "53872991",
+    "tenant_id": 30,
+    "role": "customer",
+    "created_at": "2026-02-21T08:31:17.883Z",
+    "assigned_roles": null
+  },
+  {
+    "id": 27,
+    "user_id": "superadmin-001",
+    "tenant_id": 30,
+    "role": "platform_admin",
+    "created_at": "2026-02-21T10:44:55.994Z",
+    "assigned_roles": [
+      "platform_admin",
+      "mss_admin",
+      "mss_analyst",
+      "soc_manager",
+      "security_engineer",
+      "security_analyst",
+      "service_desk",
+      "customer"
+    ]
+  }
+]

@@ -1,0 +1,408 @@
+Below are reusable, neutral, and concise email templates an AI SOC analyst can use for different attack types. You can parameterize fields like [Ticket_ID], [Hostname], [User_ID], [Severity], [Attack_Type], etc., in your tool.
+
+1. Generic incident notification (any attack type)
+Subject: [SEV-[Severity]] [Attack_Type] detected on [System/User] – Ticket [Ticket_ID]
+
+Body:
+Dear [Recipient_Group],
+
+This is to inform you that a [Attack_Type] has been detected on [System/User] at [Detection_Time] by our security monitoring systems. The incident has been logged under ticket [Ticket_ID] and is currently under investigation by the SOC team.
+​
+
+Initial details:
+
+Affected asset(s): [Hostname/IP/Application/User]
+
+Detection source: [EDR/SIEM/Email Gateway/WAF/etc.]
+
+Severity: [Critical/High/Medium/Low]
+
+Current status: [New/Investigating/Contained/Monitoring]
+
+Immediate actions requested from you (if any):
+
+[E.g., Do not use the affected system until cleared, reset password, confirm business impact, validate recent changes]
+
+We will share further updates, including root cause, impact, and remediation steps, as investigation progresses or if your immediate action is required.
+
+Regards,
+[SOC Analyst Name]
+[SOC / Cybersecurity Team]
+
+2. Malware infection (endpoint/server)
+Subject: Malware activity detected on [Hostname] – Action required – [Ticket_ID]
+
+Body:
+Dear [IT_Ops/Owner],
+
+Our monitoring tools have detected malware-related activity on the following asset:
+
+Hostname: [Hostname]
+
+IP: [IP]
+
+User: [User_ID]
+
+Detection time: [Time]
+
+Malware family / signature: [If available]
+
+Detection source: [EDR/AV/SIEM]
+
+Current SOC actions:
+
+Isolated host from the network: [Yes/No]
+
+Malicious file(s) quarantined or blocked: [Yes/No/Details]
+
+Indicators of compromise (IOCs) identified: [File path, hash, domain, IP]
+
+Required actions from you:
+
+Validate if the asset can be taken offline for full scan and remediation.
+
+Run full AV/EDR scan and remove/quarantine all detections.
+
+Confirm any business impact or critical processes running on this host.
+
+We will update this ticket once containment and eradication steps are completed and will provide a final incident report.
+
+Regards,
+[SOC Analyst Name]
+
+3. Phishing attack (user notification / awareness)
+Subject: Security Alert: Phishing email detected – Please delete
+
+Body:
+Dear [User/All_Employees],
+
+We have identified that a phishing email with the subject "[Phishing_Subject]" was delivered to some user mailboxes on [Date/Time]. The email contains malicious content designed to steal credentials or deliver malware.
+
+What you should do:
+
+If you received this email, do not click any links or open attachments.
+
+Delete the email from Inbox and Deleted Items.
+
+If you already clicked a link or entered any credentials, immediately change your password and inform the IT/SOC team.
+
+Key details:
+
+Sender: [Sender_Address]
+
+Subject: [Phishing_Subject]
+
+Malicious indicator(s): [URL/Attachment name]
+
+Thank you for your vigilance. Reporting suspicious emails helps protect the organization.
+
+Regards,
+[SOC / IT Security Team]
+
+4. Account brute-force / credential stuffing
+Subject: Multiple failed login attempts detected on account [User_ID] – [Ticket_ID]
+
+Body:
+Dear [IT_Ops/HR/Manager/User],
+
+The SOC has detected a high volume of failed login attempts against the following account:
+​
+
+Account: [User_ID or Service_Account]
+
+Target system: [AD/Email/VPN/Application]
+
+Source IP(s): [IP_List]
+
+Time window: [Start_Time – End_Time]
+
+Status: [Account locked/Not locked]
+
+SOC actions taken:
+
+Enabled/confirmed account lockout: [Yes/No]
+
+Blocked offending IP(s)/countries at [Firewall/WAF/VPN]: [Yes/No]
+
+Monitoring for further attempts: [Yes/No]
+
+Required actions:
+
+Confirm if this login activity could be legitimate (e.g., misconfigured script, VPN issue).
+
+If suspicious, reset the account password and enforce MFA (if not already enabled).
+
+Validate any recent access from unusual locations with the user.
+
+A final update and recommendations will follow once investigation is complete.
+
+Regards,
+[SOC Analyst Name]
+
+5. Ransomware incident
+Subject: Critical: Suspected ransomware activity on [Environment] – Immediate response – [Ticket_ID]
+
+Body:
+Dear [CISO/IT_Head/Incident_Command],
+
+We have identified indicators consistent with a ransomware attack affecting [Hosts/Environment].
+
+Current observations:
+
+Affected systems: [Hostnames/Business apps]
+
+Detection time: [Time]
+
+Symptoms: [File encryption, ransom note, unusual extensions, services stopped]
+
+Ransom note file name/location (if present): [Details]
+
+SOC actions initiated:
+
+Isolating affected systems from the network.
+
+Blocking known malicious IPs/domains associated with the incident.
+
+Preserving forensic evidence (logs, memory, disk snapshots) where possible.
+
+Immediate requests:
+
+Authorize isolation of additional at-risk systems if needed.
+
+Activate the incident response / crisis management plan and relevant communication channels.
+
+Confirm legal, PR, and compliance contacts for regulatory notifications (if data exposure is suspected).
+
+We will continue to provide structured updates, including containment status, recovery strategy, and business impact assessment.
+
+Regards,
+[SOC Incident Handler]
+
+6. Network intrusion / lateral movement
+Subject: Suspicious network activity and possible intrusion on [Segment] – [Ticket_ID]
+
+Body:
+Dear [Network_Team/IT_Ops],
+
+The SOC has detected suspicious network activity indicative of possible unauthorized access or lateral movement.
+
+Details:
+
+Affected segment/VLAN: [Segment]
+
+Key hosts involved: [IPs/Hostnames]
+
+Detected behavior: [Port scanning, lateral RDP, SMB enumeration, data exfiltration patterns]
+
+Detection source: [IDS/IPS/NDR/SIEM]
+
+Timeframe: [Start_Time – Ongoing]
+
+SOC actions:
+
+Applied temporary blocks or ACLs on suspicious IPs/ports.
+
+Enabled increased logging and packet capture on affected segments.
+
+Correlated events with endpoint and identity logs for potential compromise.
+
+Requested actions:
+
+Validate whether any of this traffic is expected (e.g., new tool, maintenance).
+
+Review recent changes and privileged sessions on the involved systems.
+
+Assist with additional segmentation or isolation as required.
+
+We will escalate severity and notify additional stakeholders if confirmed compromise is identified.
+
+Regards,
+[SOC Analyst Name]
+
+7. Web application attack (OWASP Top 10 style)
+Subject: Web application attack detected on [App_Name] – [Ticket_ID]
+
+Body:
+Dear [App_Owner/DevOps],
+
+Our monitoring has detected suspicious web traffic against the application [App_Name] that aligns with known OWASP Top 10 patterns (e.g., injection, authentication abuse, XSS).
+​
+
+Summary:
+
+Application: [URL / App_Name]
+
+Attack type(s): [SQL injection / XSS / Broken Auth / Path traversal / etc.]
+
+Source IP(s): [IPs or Geo]
+
+Detection source: [WAF/SIEM/IDS]
+
+Timeframe: [Start_Time – Ongoing]
+
+SOC actions:
+
+Blocked or rate-limited malicious IPs/ranges at WAF or firewall.
+
+Enabled or tightened specific WAF rules for the relevant attack pattern.
+
+Captured HTTP request samples for forensic and development review.
+
+Required actions:
+
+Review the captured requests and assess if any exploit attempts were successful.
+
+Validate that input validation, authentication, and authorization controls are correctly implemented and patched.
+
+Plan remediation (code fix/config change) and regression testing if vulnerabilities are confirmed.
+
+We will share additional IOCs and recommendations as more data is analyzed.
+
+Regards,
+[SOC Analyst Name]
+
+8. Vulnerability exploit attempt / exploit confirmed
+Subject: Exploit attempt against [Vulnerability_ID] on [System] – [Ticket_ID]
+
+Body:
+Dear [System_Owner/IT_Ops],
+
+We have detected activity indicating an attempt to exploit vulnerability [CVE-ID / Vendor_Bulletin] on the following system(s):
+
+Asset: [Hostname/IP]
+
+Vulnerability: [CVE-ID, short description]
+
+Detection time: [Time]
+
+Detection source: [IDS/WAF/EDR/SIEM]
+
+Status: [Attempted/Confirmed successful/Under investigation]
+
+SOC actions:
+
+Blocked the offending IP(s)/request patterns where feasible.
+
+Checked for known post-exploitation indicators on the host(s).
+
+Correlated with vulnerability scanning data to confirm exposure.
+
+Required actions:
+
+Apply the recommended patch/workaround for [Vulnerability_ID] on all affected systems as a priority.
+
+Validate system integrity (logs, processes, services, scheduled tasks) for signs of compromise.
+
+Confirm maintenance window and rollback plans if needed.
+
+We will provide a follow-up report summarizing whether the exploit attempt was successful and any remediation taken.
+
+Regards,
+[SOC Analyst Name]
+
+9. Social engineering (vishing, smishing, in-person, business email compromise)
+Subject: Security Alert: Social engineering attempt reported – [Ticket_ID]
+
+Body:
+Dear [HR/All_Employees/Specific_User],
+
+The SOC has received a report of a social engineering attempt targeting [User/Department] on [Date/Time].
+
+Incident details:
+
+Type: [Phishing / Vishing / Smishing / In-person / BEC]
+
+Channel: [Email/Phone/SMS/Physical]
+
+Attacker pretext: [e.g., pretending to be IT support, vendor, senior executive]
+
+Requested information/actions: [Passwords, OTP, payment, confidential data]
+
+SOC actions:
+
+Validated that the communication is not from a legitimate internal or trusted external source.
+
+Blocked any related domains/addresses/phone numbers where technically possible.
+
+Logged IOCs and updated awareness material.
+
+Required actions and awareness:
+
+Do not share passwords, OTPs, or financial information with anyone claiming to be from internal teams over email/SMS/unsolicited calls.
+
+Report any similar attempts immediately to SOC/IT security.
+
+If any sensitive information was shared, notify SOC so that we can initiate containment (password reset, access review, etc.).
+
+Regards,
+[SOC / Security Awareness Team]
+
+10. Final incident closure / executive summary
+Subject: Incident [Ticket_ID] – [Attack_Type] – Investigation closed
+
+Body:
+Dear [Stakeholders/Management],
+
+This email summarizes the closure of incident [Ticket_ID] related to [Attack_Type] initially detected on [Date/Time].
+​
+
+What happened
+
+Brief summary of the incident: [2–3 lines, business-language description]
+
+Affected systems/users: [List]
+
+Detection source: [Tool/Process]
+
+Impact
+
+Business impact: [Downtime, data exposure (if any), affected services]
+
+Scope: [Number of systems/users/sites impacted]
+
+Root cause
+
+Root cause identified: [Misconfiguration, missing patch, user action, third-party compromise, etc.]
+
+Actions taken
+
+Containment: [Steps]
+
+Eradication and recovery: [Rebuild, patching, password resets, etc.]
+
+Lessons learned & recommendations
+
+Process/technology improvements: [Monitoring rules, playbooks, hardening]
+
+User awareness or policy changes: [Training, revised procedures]
+
+The incident is now marked as Closed, with continued monitoring in place for any recurrence.
+
+Regards,
+[SOC Manager / Incident Commander]
+
+11. Suggested structure for your AI SOC analyst
+For your tool, define a standard JSON structure like:
+
+json
+{
+  "attack_type": "malware | phishing | brute_force | ransomware | owasp | vuln_exploit | network_intrusion | social_engineering | generic",
+  "audience": "user | it_ops | management | all_employees",
+  "severity": "Low | Medium | High | Critical",
+  "placeholders": {
+    "Ticket_ID": "",
+    "Hostname": "",
+    "IP": "",
+    "User_ID": "",
+    "Detection_Time": "",
+    "Tool": "",
+    "CVE_ID": "",
+    "App_Name": "",
+    "Phishing_Subject": ""
+  },
+  "email": {
+    "subject_template": "...",
+    "body_template": "..."
+  }
+}
+Your AI SOC analyst can then select the appropriate attack_type and audience, fill in placeholders from SIEM/EDR data, and generate clean incident emails consistently.

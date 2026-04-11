@@ -1,0 +1,59 @@
+> rest-express@1.0.0 build
+> tsx script/build.ts
+
+building client...
+vite v7.3.0 building client environment for production...
+transforming (5) ../node_modules/wouter/esm/index.js
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+✓ 2762 modules transformed.
+../dist/public/index.html                        2.01 kB │ gzip:   0.76 kB
+../dist/public/assets/index-CmR4_7Rf.css       132.38 kB │ gzip:  19.92 kB
+../dist/public/assets/purify.es-Bzr520pe.js     22.45 kB │ gzip:   8.59 kB
+../dist/public/assets/index.es-VD5FL_wc.js     158.58 kB │ gzip:  52.81 kB
+../dist/public/assets/index-CTonNxaU.js      2,486.27 kB │ gzip: 636.91 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 8.81s
+building server...
+▲ [WARNING] "import.meta" is not available with the "cjs" output format and will be empty [empty-import-meta]
+
+    server/static.ts:6:89:
+      6 │ ...t currentDir = typeof __dirname !== "undefined" ? __dirname : path.dirname(new URL(import.meta.url).pathname);
+        ╵                                                                                       ~~~~~~~~~~~
+
+  You need to set the output format to "esm" for "import.meta" to work correctly.
+
+1 warning
+
+  dist/index.cjs  3.1mb ⚠️
+
+⚡ Done in 204ms
+2026-02-26T06:45:50.680Z Starting server...
+Running database migrations...
+Database schema is up to date.
+6:45:51 AM [express] serving on port 5000
+  Tenant map: SecureOps MSSP (dev:30) → prod:30
+  Tenant map: Vinca Cyber (dev:32) → prod:32
+  Tenant map: MACM (dev:33) → prod:33
+  Tenant map: Fedfina (dev:34) → prod:34
+  Tenant map: Aspire Systems (dev:35) → prod:35
+  Tenant map: Cibervest (dev:36) → prod:36
+  Tenant map: PKF Africa (dev:37) → prod:37
+  Tenant map: Claim Power (dev:38) → prod:38
+Data migration complete (marker found, 8281 incidents). Skipping.
+6:45:52 AM [express] Background initialization complete
+6:45:54 AM [express] GET /api/auth/user 304 in 6ms
+6:45:54 AM [express] GET /api/superadmin/session 304 in 4ms
+6:45:54 AM [express] GET /api/user/profile 304 in 6ms
+6:45:54 AM [express] GET /api/tenants/hierarchy 304 in 9ms
+6:45:54 AM [express] GET /api/tenants 304 in 16ms
+6:45:55 AM [express] GET /api/user-assets/37 304 in 495ms
+6:45:55 AM [express] GET /api/web-security/37 304 in 864ms
+6:45:56 AM [express] GET /api/dashboard/37 304 in 1556ms
+6:45:56 AM [express] GET /api/ai/threat-analysis/37 304 in 1842ms
+6:45:57 AM [express] GET /api/assets/37 200 in 2097ms
+6:45:57 AM [express] GET /api/data-security/37 304 in 2092ms
+6:45:57 AM [express] GET /api/assets/software-analytics 304 in 1399ms

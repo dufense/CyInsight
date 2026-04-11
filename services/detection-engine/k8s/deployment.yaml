@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secureops-detection-engine
+  namespace: secureops
+  labels:
+    app: secureops
+    service: detection-engine
+    component: stream-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secureops
+      service: detection-engine
+  template:
+    metadata:
+      labels:
+        app: secureops
+        service: detection-engine
+        component: stream-processing
+    spec:
+      serviceAccountName: secureops-detection-engine
+      containers:
+        - name: detection-engine
+          image: secureops/detection-engine:latest
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          env:
+            - name: SERVICE
+              value: "detection-engine"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            - name: BATCH_SIZE
+              value: "100"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: secureops-detection-engine-config
+                  key: kafka-brokers
+            - name: KAFKA_GROUP_ID
+              value: "secureops-detection-engine"
+            - name: SIGMA_RULES_DIR
+              value: "/app/sigma-rules"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: sigma-rules
+              mountPath: /app/sigma-rules
+              readOnly: true
+      volumes:
+        - name: sigma-rules
+          configMap:
+            name: secureops-sigma-rules

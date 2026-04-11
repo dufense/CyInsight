@@ -1,0 +1,140 @@
+The compute-attached identity arn:aws:ec2:ap-south-1:831787377228:instance/i-055631c0aab13e0f1 executed API calls from United States. The region of the compute instance is ap-south-1. The activity was seen from an unusual ASN DNIC-AS-00749
+
+This event should be classified as a High-Risk Cloud Security Anomaly — specifically:
+
+Suspicious Geographic Anomaly / Potential Credential Compromise / Possible Command & Control Activity
+
+Let’s break it down technically.
+
+🔎 Event Summary
+
+Resource: EC2 instance
+
+Region of instance: ap-south-1 (Mumbai, India)
+
+Observed API call source: United States
+
+Identity type: Compute-attached identity (IAM role on EC2)
+
+ASN: DNIC-AS-00749 (unusual / non-cloud ASN)
+
+🧠 Why This Is Suspicious
+1️⃣ Geographic Improbability
+
+The EC2 instance resides in ap-south-1 (India).
+
+However:
+
+API calls are originating from the United States
+
+That suggests:
+
+The instance is communicating externally
+
+Or the credentials are being used remotely
+
+Normally:
+
+EC2 role-based API calls originate from AWS internal IP ranges
+
+They do NOT appear as coming from foreign ASNs
+
+This is abnormal behavior.
+
+2️⃣ Unusual ASN
+
+DNIC-AS-00749
+
+This ASN is:
+
+Not a typical AWS ASN
+
+Often associated with U.S. Department of Defense network allocations
+
+Not expected for a standard commercial AWS workload
+
+This increases risk classification.
+
+3️⃣ Compute-Attached Identity Misuse Risk
+
+The alert indicates:
+
+The EC2 IAM role executed API calls from outside expected geography.
+
+This could indicate:
+
+Possible Scenarios
+Scenario	Risk Level
+Legitimate outbound API call via NAT gateway	Low
+Misconfigured proxy routing	Medium
+Instance compromised and beaconing to C2	High
+Stolen temporary credentials used externally	Critical
+Metadata service (IMDS) exploited	Critical
+📊 Recommended Classification
+
+Depending on your SOC taxonomy, classify as:
+
+🔴 High Severity – Suspicious Cloud API Activity
+
+OR more formally:
+
+Cloud Account Anomaly – Suspicious IAM Role Usage from Unusual ASN
+
+If additional indicators exist (data exfiltration, privilege escalation), upgrade to:
+
+Potential Cloud Credential Compromise
+
+🎯 MITRE ATT&CK Mapping (Cloud)
+
+Likely mapped techniques:
+
+T1078 – Valid Accounts
+
+T1552.005 – Credentials in Cloud Instance Metadata
+
+T1021 – Remote Services
+
+T1105 – Ingress Tool Transfer (if downloading payloads)
+
+🧩 How SOC Should Handle It
+Step 1: Validate Source IP
+
+Confirm CloudTrail logs
+
+Check VPC Flow Logs
+
+Determine if IP belongs to AWS NAT or external entity
+
+Step 2: Check IAM Role Permissions
+
+Is the role privileged?
+
+Is it accessing S3, IAM, STS, Secrets Manager?
+
+Step 3: Check for Metadata Exploitation
+
+Was IMDSv1 enabled?
+
+Any suspicious curl/wget activity?
+
+Step 4: Inspect Instance
+
+Process list
+
+Network connections
+
+Unexpected outbound traffic
+
+Cron jobs
+
+Reverse shells
+
+🏷 Final Classification Recommendation
+
+If no immediate proof of compromise yet:
+
+Suspicious Cloud Behavior – Requires Investigation (High Priority)
+
+If confirmed credential misuse:
+
+Confirmed Cloud Credential Compromise

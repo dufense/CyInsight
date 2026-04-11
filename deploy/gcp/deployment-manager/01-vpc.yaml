@@ -1,0 +1,324 @@
+##############################################################################
+# Cyber Command Center -- GCP VPC Network (Management + Data Plane)
+#
+# Creates a 3-tier VPC using GCP Deployment Manager:
+#   - VPC network (custom mode, regional subnets)
+#   - Public subnet     (Cloud Run / Load Balancer origin)
+#   - Private subnet    (Cloud Run, Pub/Sub, Dataflow)
+#   - Isolated subnet   (Cloud SQL via Private Service Access)
+#
+# Also creates:
+#   - Cloud Router + Cloud NAT (outbound for private/isolated subnets)
+#   - Firewall rules (allow-health-check, allow-internal, deny-all-ingress)
+#   - Private Service Access peering for Cloud SQL
+#   - VPC Access Connector (ccc-vpc-connector-us-central1, 10.30.30.0/28)
+#     Required for Cloud Run to reach Cloud SQL private IP and internal services
+#   - VPC Flow Logs enabled per subnet
+#
+# Deploy:
+#   gcloud deployment-manager deployments create ccc-vpc \
+#     --config deploy/gcp/deployment-manager/01-vpc.yaml \
+#     --project YOUR_PROJECT_ID
+##############################################################################
+
+resources:
+
+  # ── VPC Network (global, regional subnets per data-plane region) ────────────
+  - name: ccc-vpc
+    type: compute.v1.network
+    properties:
+      autoCreateSubnetworks: false
+      description: "Cyber Command Center VPC - 3-tier subnet architecture, 5 data-plane regions"
+      routingConfig:
+        routingMode: GLOBAL
+
+  # ── us-central1: Management Plane Primary + us-east-1 data plane ─────────────
+  - name: ccc-public-subnet-us-central1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.1.0/24
+      description: "Public subnet us-central1 - Cloud Load Balancer origin"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  - name: ccc-private-subnet-us-central1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.10.0/24
+      description: "Private subnet us-central1 - Cloud Run, Pub/Sub (us-east-1 data plane)"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  - name: ccc-isolated-subnet-us-central1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.20.0/24
+      description: "Isolated subnet us-central1 - Cloud SQL private service access"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  # ── asia-south1: in-west-1 data plane (Mumbai) ───────────────────────────────
+  - name: ccc-private-subnet-asia-south1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: asia-south1
+      ipCidrRange: 10.31.10.0/24
+      description: "Private subnet asia-south1 - in-west-1 data plane"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  # ── africa-south1: ke-east-1 data plane (Johannesburg/Nairobi proxy) ─────────
+  - name: ccc-private-subnet-africa-south1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: africa-south1
+      ipCidrRange: 10.32.10.0/24
+      description: "Private subnet africa-south1 - ke-east-1 data plane"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  # ── southamerica-east1: sa-central-1 data plane (Sao Paulo) ─────────────────
+  - name: ccc-private-subnet-southamerica-east1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: southamerica-east1
+      ipCidrRange: 10.33.10.0/24
+      description: "Private subnet southamerica-east1 - sa-central-1 data plane"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  # ── me-west1: bh-east-1 data plane (Bahrain/Tel Aviv) ────────────────────────
+  - name: ccc-private-subnet-me-west1
+    type: compute.v1.subnetwork
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: me-west1
+      ipCidrRange: 10.34.10.0/24
+      description: "Private subnet me-west1 - bh-east-1 data plane"
+      privateIpGoogleAccess: true
+      enableFlowLogs: true
+      logConfig:
+        aggregationInterval: INTERVAL_5_SEC
+        flowSampling: 0.5
+        metadata: INCLUDE_ALL_METADATA
+
+  # ── Backward-compat aliases (retain original subnet names for deploy scripts) ─
+  - name: ccc-public-subnet
+    type: compute.v1.subnetwork
+    metadata:
+      dependsOn: [ccc-public-subnet-us-central1]
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.2.0/24
+      description: "Public subnet alias - legacy compat"
+      privateIpGoogleAccess: true
+
+  - name: ccc-private-subnet
+    type: compute.v1.subnetwork
+    metadata:
+      dependsOn: [ccc-private-subnet-us-central1]
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.11.0/24
+      description: "Private subnet alias - legacy compat"
+      privateIpGoogleAccess: true
+
+  - name: ccc-isolated-subnet
+    type: compute.v1.subnetwork
+    metadata:
+      dependsOn: [ccc-isolated-subnet-us-central1]
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      ipCidrRange: 10.30.21.0/24
+      description: "Isolated subnet alias - legacy compat"
+      privateIpGoogleAccess: true
+
+  # ── Cloud Router (for Cloud NAT outbound) ─────────────────────────────────────
+  - name: ccc-cloud-router
+    type: compute.v1.router
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      description: "CCC Cloud Router for NAT outbound"
+      bgp:
+        asn: 64514
+
+  # ── Cloud NAT (outbound for private/isolated subnets) ────────────────────────
+  - name: ccc-cloud-nat
+    type: compute.v1.router
+    metadata:
+      dependsOn: [ccc-cloud-router]
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      region: us-central1
+      nats:
+        - name: ccc-nat-gateway
+          natIpAllocateOption: AUTO_ONLY
+          sourceSubnetworkIpRangesToNat: LIST_OF_SUBNETWORKS
+          subnetworks:
+            - name: $(ref.ccc-private-subnet.selfLink)
+              sourceIpRangesToNat: [ALL_IP_RANGES]
+            - name: $(ref.ccc-isolated-subnet.selfLink)
+              sourceIpRangesToNat: [ALL_IP_RANGES]
+          logConfig:
+            enable: true
+            filter: ERRORS_ONLY
+          minPortsPerVm: 64
+          enableEndpointIndependentMapping: false
+
+  # ── Firewall: Allow Health Checks ────────────────────────────────────────────
+  - name: ccc-fw-allow-health-check
+    type: compute.v1.firewall
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      description: "Allow GCP health check probes"
+      direction: INGRESS
+      priority: 100
+      sourceRanges:
+        - "35.191.0.0/16"
+        - "130.211.0.0/22"
+      targetTags: [ccc-app]
+      allowed:
+        - IPProtocol: tcp
+          ports: ["5000", "80", "443"]
+
+  # ── Firewall: Allow Internal VPC ─────────────────────────────────────────────
+  - name: ccc-fw-allow-internal
+    type: compute.v1.firewall
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      description: "Allow all traffic within CCC VPC"
+      direction: INGRESS
+      priority: 200
+      sourceRanges:
+        - "10.30.0.0/16"
+      targetTags: [ccc-app]
+      allowed:
+        - IPProtocol: all
+
+  # ── Firewall: Allow HTTPS from internet ──────────────────────────────────────
+  - name: ccc-fw-allow-https
+    type: compute.v1.firewall
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      description: "Allow HTTPS from internet to load balancer backends"
+      direction: INGRESS
+      priority: 300
+      sourceRanges:
+        - "0.0.0.0/0"
+      targetTags: [ccc-lb-backend]
+      allowed:
+        - IPProtocol: tcp
+          ports: ["443", "5000"]
+
+  # ── Firewall: Deny all other ingress ─────────────────────────────────────────
+  - name: ccc-fw-deny-all
+    type: compute.v1.firewall
+    properties:
+      network: $(ref.ccc-vpc.selfLink)
+      description: "Deny all ingress not matched by higher priority rules"
+      direction: INGRESS
+      priority: 65534
+      sourceRanges:
+        - "0.0.0.0/0"
+      denied:
+        - IPProtocol: all
+
+  # ── Private Service Access for Cloud SQL ────────────────────────────────────
+  # Step 1: Reserve the IP range for the PSA peering
+  - name: ccc-private-service-access
+    type: compute.v1.globalAddress
+    properties:
+      name: ccc-private-service-access
+      purpose: VPC_PEERING
+      addressType: INTERNAL
+      prefixLength: 16
+      network: $(ref.ccc-vpc.selfLink)
+      description: "Reserved IP range for Cloud SQL Private Service Access"
+
+  # Step 2: Create the Service Networking VPC peering connection
+  # This is required for Cloud SQL private IP to work.
+  # Uses gcloud CLI wrapper via a type provider for servicenetworking.
+  - name: ccc-service-networking-connection
+    type: gcp-types/servicenetworking-v1:services.connections
+    metadata:
+      dependsOn: [ccc-private-service-access]
+    properties:
+      parent: services/servicenetworking.googleapis.com
+      network: projects/$(env.project)/global/networks/ccc-vpc
+      reservedPeeringRanges:
+        - ccc-private-service-access
+
+  # ── VPC Access Connector (Serverless -> Private VPC) ────────────────────────
+  # Required so Cloud Run services can reach Cloud SQL (private IP) and
+  # internal Pub/Sub / BigQuery endpoints without traversing the public internet.
+  # Connector CIDR (10.30.30.0/28) is non-overlapping with all existing subnets:
+  #   10.30.1.0/24  - public-us-central1
+  #   10.30.10.0/24 - private-us-central1
+  #   10.30.20.0/24 - isolated-us-central1
+  #   10.30.2.0/24  - public-us-east1
+  #   10.30.11.0/24 - private-us-east1
+  #   10.30.21.0/24 - isolated-us-east1
+  # GCP Serverless VPC connectors require a dedicated non-overlapping /28 range.
+  - name: ccc-vpc-connector-us-central1
+    type: vpcaccess.v1.connector
+    metadata:
+      dependsOn: [ccc-private-subnet-us-central1]
+    properties:
+      name: ccc-vpc-connector-us-central1
+      region: us-central1
+      network: ccc-vpc
+      ipCidrRange: 10.30.30.0/28
+      minThroughput: 200
+      maxThroughput: 1000
+      machineType: e2-standard-4
+
+outputs:
+  - name: vpcSelfLink
+    value: $(ref.ccc-vpc.selfLink)
+  - name: publicSubnetSelfLink
+    value: $(ref.ccc-public-subnet-us-central1.selfLink)
+  - name: privateSubnetSelfLink
+    value: $(ref.ccc-private-subnet-us-central1.selfLink)
+  - name: isolatedSubnetSelfLink
+    value: $(ref.ccc-isolated-subnet-us-central1.selfLink)
+  - name: vpcConnectorName
+    value: ccc-vpc-connector-us-central1
+  - name: vpcConnectorSelfLink
+    value: $(ref.ccc-vpc-connector-us-central1.selfLink)

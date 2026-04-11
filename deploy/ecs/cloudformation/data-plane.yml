@@ -1,0 +1,666 @@
+##############################################################################
+# Cyber Command Center — ECS Fargate Data Plane (per-region)
+#
+# Deploy one stack per data-plane region:
+#   in-west-1 | us-east-1 | ke-east-1 | sa-central-1 | bh-east-1
+#
+# Creates:
+#   - ECS Cluster (data plane, per region)
+#   - Internal Application Load Balancer (private, management→data traffic)
+#   - ECS Service (data-plane)
+#   - IAM Task Role
+#   - CloudWatch Log Group
+#   - EFS for parquet/data storage (elastic throughput)
+#   - Security Groups
+#   - SNS Alert Topic + CloudWatch Alarms (CPU + Memory)
+#   - CPU + Memory auto-scaling policies
+#   - AWS Backup Vault + Plan (EFS daily backup, 35-day retention)
+#
+# Deploy example (in-west-1 region):
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/data-plane.yml \
+#     --stack-name ccc-data-plane-in-west-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       DataPlaneRegion=in-west-1 \
+#       VpcId=vpc-xxxx \
+#       PrivateSubnetIds="subnet-aaa,subnet-bbb" \
+#       ManagementPlaneSecurityGroupId=sg-mgmt \
+#       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-data-plane:latest \
+#       AlertEmail=ops@example.com
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — Data Plane on ECS Fargate (per-region, hardened)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  DataPlaneRegion:
+    Type: String
+    Description: Logical data-plane region identifier
+    AllowedValues:
+      - in-west-1
+      - us-east-1
+      - ke-east-1
+      - sa-central-1
+      - bh-east-1
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks and internal ALB
+
+  ManagementPlaneSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID of the management plane ECS tasks (ingress source)
+
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI for ccc-data-plane
+
+  TaskCpu:
+    Type: Number
+    Default: 2048
+    AllowedValues: [1024, 2048, 4096]
+
+  TaskMemory:
+    Type: Number
+    Default: 4096
+    AllowedValues: [2048, 3072, 4096, 6144, 8192]
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+
+  MinCount:
+    Type: Number
+    Default: 1
+
+  MaxCount:
+    Type: Number
+    Default: 6
+
+  SecretsPrefix:
+    Type: String
+    Default: "ccc"
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [30, 60, 90, 180, 365]
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email address for CloudWatch Alarm notifications (leave empty to skip subscription)
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+
+  # ── CloudWatch Log Group ──────────────────────────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── ECS Cluster ───────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+
+  # ── IAM: Data Plane Task Role ─────────────────────────────────────────────────
+  DataPlaneTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-data-plane-task-role-${DataPlaneRegion}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3EventsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::ccc-events-${DataPlaneRegion}-${EnvironmentName}"
+                  - !Sub "arn:aws:s3:::ccc-events-${DataPlaneRegion}-${EnvironmentName}/*"
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EFSFileSystem.Arn
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ── Security Groups ───────────────────────────────────────────────────────────
+  DataPlaneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-data-plane-ecs-sg-${DataPlaneRegion}-${EnvironmentName}"
+      GroupDescription: !Sub "Data plane ECS tasks — ${DataPlaneRegion}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ManagementPlaneSecurityGroupId
+          Description: Traffic from management plane only
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref InternalALBSecurityGroup
+          Description: Traffic from internal ALB
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-data-plane-ecs-sg-${DataPlaneRegion}-${EnvironmentName}"
+
+  InternalALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-data-plane-alb-sg-${DataPlaneRegion}-${EnvironmentName}"
+      GroupDescription: !Sub "Internal ALB for data plane — ${DataPlaneRegion}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ManagementPlaneSecurityGroupId
+          Description: Internal HTTP from management plane
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ManagementPlaneSecurityGroupId
+          Description: Direct port from management plane
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-data-plane-alb-sg-${DataPlaneRegion}-${EnvironmentName}"
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-data-plane-efs-sg-${DataPlaneRegion}-${EnvironmentName}"
+      GroupDescription: EFS mount target security group for data plane
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref DataPlaneSecurityGroup
+          Description: NFS from data plane tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-data-plane-efs-sg-${DataPlaneRegion}-${EnvironmentName}"
+
+  # ── EFS File System — elastic throughput for SOC workloads ────────────────────
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "ccc-data-plane-efs-${DataPlaneRegion}-${EnvironmentName}"
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Select [0, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Select [1, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1001"
+        Gid: "1001"
+      RootDirectory:
+        Path: "/data-plane"
+        CreationInfo:
+          OwnerUid: "1001"
+          OwnerGid: "1001"
+          Permissions: "755"
+
+  # ── Internal ALB (management → data plane) ────────────────────────────────────
+  InternalALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-dp-${DataPlaneRegion}-alb-${EnvironmentName}"
+      Scheme: internal
+      Type: application
+      Subnets: !Ref PrivateSubnetIds
+      SecurityGroups:
+        - !Ref InternalALBSecurityGroup
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+
+  InternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-dp-${DataPlaneRegion}-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  InternalALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternalTargetGroup
+
+  # ── ECS Task Definition ────────────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ccc-ecs-execution-role-${EnvironmentName}"
+      TaskRoleArn: !GetAtt DataPlaneTaskRole.Arn
+      ContainerDefinitions:
+        - Name: data-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: data
+            - Name: REGION
+              Value: !Ref DataPlaneRegion
+            - Name: CLUSTER_WORKERS_MAX
+              Value: "4"
+            - Name: APP_REPORTS_DIR
+              Value: /app/data/reports
+            - Name: APP_UPLOADS_DIR
+              Value: /app/data/uploads
+            # PARQUET_DATA_DIR: DuckDB reads local Parquet files written by the
+            # data-lake warm-storage connector. Must be EFS-backed so files
+            # survive task restarts and are visible to all task replicas.
+            - Name: PARQUET_DATA_DIR
+              Value: /app/data/events
+            # DB_POOL_MAX: Limits pg-pool connections per worker process.
+            # Formula: DB_POOL_MAX × CLUSTER_WORKERS_MAX × ECS_task_count ≤ RDS_MAX_CONNECTIONS
+            # Example: 5 × 4 workers × 3 tasks = 60 connections (safe for db.t3.medium ~123 max).
+            # For RDS Proxy or PgBouncer deployments, raise to 20.
+            - Name: DB_POOL_MAX
+              Value: "5"
+            # ── Crash-guard tuning ─────────────────────────────────────────────
+            # WORKER_MAX_RSS_MB: cluster kills/restarts workers exceeding this RSS limit.
+            - Name: WORKER_MAX_RSS_MB
+              Value: "800"
+            # DB_STATEMENT_TIMEOUT_MS: pg aborts statements running longer than this.
+            - Name: DB_STATEMENT_TIMEOUT_MS
+              Value: "30000"
+            # DB_QUERY_TIMEOUT_MS: application-side query timeout (circuit breaker).
+            - Name: DB_QUERY_TIMEOUT_MS
+              Value: "25000"
+            # DB_SSL: enforce SSL on the RDS connection (required in production).
+            - Name: DB_SSL
+              Value: "true"
+            # NODE_OPTIONS: set V8 heap ceiling so OOM kills are caught by
+            # crash-guard before the OS OOM killer fires.
+            - Name: NODE_OPTIONS
+              Value: "--max-old-space-size=1536"
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/database-url"
+            - Name: KAFKA_BROKERS
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/kafka-brokers"
+            - Name: OPENSEARCH_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-url"
+            - Name: OPENSEARCH_USERNAME
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-username"
+            - Name: OPENSEARCH_PASSWORD
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-password"
+            - Name: MANAGEMENT_PLANE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/management-plane-url"
+            - Name: CLOUD_STORAGE_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/provider"
+            - Name: AWS_S3_BUCKET
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/s3-bucket"
+            - Name: AWS_S3_REGION
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-region"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          MountPoints:
+            - SourceVolume: data-plane-storage
+              ContainerPath: /app/data
+              ReadOnly: false
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+          StopTimeout: 30
+      Volumes:
+        - Name: data-plane-storage
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            RootDirectory: /
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              IAM: ENABLED
+
+  # ── ECS Service ───────────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - InternalALBListener
+      - EFSMountTarget1
+      - EFSMountTarget2
+    Properties:
+      ServiceName: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref DataPlaneSecurityGroup
+      LoadBalancers:
+        - ContainerName: data-plane
+          ContainerPort: 5000
+          TargetGroupArn: !Ref InternalTargetGroup
+      HealthCheckGracePeriodSeconds: 90
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+
+  # ── Auto Scaling (CPU + Memory) ───────────────────────────────────────────────
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinCount
+      MaxCapacity: !Ref MaxCount
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  ScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-dp-${DataPlaneRegion}-cpu-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  ScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-dp-${DataPlaneRegion}-memory-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # ── SNS Alert Topic ───────────────────────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "ccc-dp-${DataPlaneRegion}-alerts-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  AlertTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+  AlarmECSCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-${DataPlaneRegion}-ecs-cpu-high-${EnvironmentName}"
+      AlarmDescription: !Sub "Data plane ECS CPU > 80% in ${DataPlaneRegion}"
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  AlarmECSMemory:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-${DataPlaneRegion}-ecs-memory-high-${EnvironmentName}"
+      AlarmDescription: !Sub "Data plane ECS Memory > 80% in ${DataPlaneRegion}"
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ── AWS Backup (data-plane EFS daily backup, 35-day retention) ───────────────
+  # Mirrors the management-plane backup config so both EFS volumes are protected.
+  DataPlaneBackupIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-dp-backup-role-${DataPlaneRegion}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+  DataPlaneBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub "ccc-dp-backup-vault-${DataPlaneRegion}-${EnvironmentName}"
+
+  DataPlaneBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "ccc-dp-backup-plan-${DataPlaneRegion}-${EnvironmentName}"
+        BackupPlanRule:
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref DataPlaneBackupVault
+            ScheduleExpression: "cron(0 3 * * ? *)"
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              MoveToColdStorageAfterDays: 14
+              DeleteAfterDays: 35
+
+  DataPlaneBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref DataPlaneBackupPlan
+      BackupSelection:
+        SelectionName: !Sub "ccc-dp-efs-${DataPlaneRegion}-${EnvironmentName}"
+        IamRoleArn: !GetAtt DataPlaneBackupIAMRole.Arn
+        Resources:
+          - !GetAtt EFSFileSystem.Arn
+
+Outputs:
+
+  ClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterName"
+
+  ServiceName:
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceName"
+
+  InternalALBDNSName:
+    Description: Internal ALB DNS — use this as DATA_PLANE_URL in management plane secrets
+    Value: !Sub "http://${InternalALB.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-InternalALBDNSName"
+
+  DataPlaneSecurityGroupId:
+    Value: !Ref DataPlaneSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DataPlaneSecurityGroupId"
+
+  EFSFileSystemId:
+    Value: !Ref EFSFileSystem
+    Export:
+      Name: !Sub "${AWS::StackName}-EFSFileSystemId"
+
+  AlertTopicArn:
+    Description: SNS Topic ARN for data-plane operational alerts
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertTopicArn"

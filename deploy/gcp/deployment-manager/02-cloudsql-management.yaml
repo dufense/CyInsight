@@ -1,0 +1,196 @@
+##############################################################################
+# Cyber Command Center -- Cloud SQL for PostgreSQL (Management Plane OLTP)
+#
+# GCP equivalent of AWS Aurora Serverless v2 / Azure PostgreSQL Flexible.
+# Management-plane OLTP only (tenants, users, incidents metadata, tickets).
+# NOT for security event data (that goes to BigQuery).
+#
+# Creates:
+#   - Cloud SQL PostgreSQL 16 instance (HA with failover replica)
+#   - Private IP only (no public IP)
+#   - Automated backups (daily) + point-in-time recovery
+#   - Secret Manager secrets for connection credentials
+#   - Cloud Monitoring alerts (CPU, connections, disk)
+#
+# Deploy:
+#   gcloud deployment-manager deployments create ccc-cloudsql \
+#     --config deploy/gcp/deployment-manager/02-cloudsql-management.yaml \
+#     --project YOUR_PROJECT_ID
+##############################################################################
+
+resources:
+
+  # ── Cloud SQL PostgreSQL 16 Instance ──────────────────────────────────────────
+  - name: ccc-management-postgres
+    type: sqladmin.v1beta4.instance
+    properties:
+      databaseVersion: POSTGRES_16
+      region: us-central1
+      settings:
+        tier: db-custom-4-15360
+        availabilityType: REGIONAL
+        storageAutoResize: true
+        storageAutoResizeLimit: 500
+        diskSize: 100
+        diskType: PD_SSD
+        backupConfiguration:
+          enabled: true
+          startTime: "03:00"
+          # binaryLogEnabled is a MySQL-only field and must NOT be set for PostgreSQL.
+          pointInTimeRecoveryEnabled: true
+          retainedBackups:
+            retentionUnit: COUNT
+            retainedBackups: 14
+          transactionLogRetentionDays: 7
+        ipConfiguration:
+          ipv4Enabled: false
+          privateNetwork: projects/$(env.project)/global/networks/ccc-vpc
+          requireSsl: true
+          sslMode: TRUSTED_CLIENT_CERTIFICATE_REQUIRED
+        databaseFlags:
+          - name: max_connections
+            value: "500"
+          - name: shared_buffers
+            value: "256MB"
+          - name: effective_cache_size
+            value: "768MB"
+          - name: maintenance_work_mem
+            value: "64MB"
+          - name: checkpoint_completion_target
+            value: "0.9"
+          - name: wal_buffers
+            value: "16MB"
+          - name: random_page_cost
+            value: "1.1"
+          - name: effective_io_concurrency
+            value: "200"
+          - name: work_mem
+            value: "16384"
+          - name: idle_in_transaction_session_timeout
+            value: "60000"
+          - name: log_min_duration_statement
+            value: "2000"
+          - name: log_lock_waits
+            value: "on"
+          - name: shared_preload_libraries
+            value: "pg_stat_statements"
+        maintenanceWindow:
+          day: 7
+          hour: 3
+          updateTrack: stable
+        insightsConfig:
+          queryInsightsEnabled: true
+          queryStringLength: 1024
+          recordApplicationTags: true
+          recordClientAddress: false
+        userLabels:
+          project: cybercommandcenter
+          plane: management
+
+  # NOTE: No separate failover replica resource for PostgreSQL.
+  # Cloud SQL PostgreSQL REGIONAL instances provide synchronous HA across zones
+  # natively (availabilityType: REGIONAL above). A separate "failover replica"
+  # with replicaConfiguration.failoverTarget=true is a MySQL-only concept and
+  # is invalid/unsupported for PostgreSQL instances.
+  # For read scalability, add sqladmin.v1beta4.instance with no failoverTarget.
+
+  # ── Database ─────────────────────────────────────────────────────────────────
+  - name: ccc-management-db
+    type: sqladmin.v1beta4.database
+    metadata:
+      dependsOn: [ccc-management-postgres]
+    properties:
+      name: ccc_management
+      instance: ccc-management-postgres
+      charset: UTF8
+      collation: en_US.UTF8
+
+  # ── DB User (with password) ───────────────────────────────────────────────────
+  # Password is auto-generated per deployment and stored in Secret Manager.
+  # Use: gcloud secrets versions access latest --secret=ccc-postgres-db-password
+  - name: ccc-management-db-user
+    type: sqladmin.v1beta4.user
+    metadata:
+      dependsOn: [ccc-management-postgres]
+    properties:
+      name: ccc_admin
+      instance: ccc-management-postgres
+      type: BUILT_IN
+      # Password injected at deploy time via --properties flag:
+      #   gcloud deployment-manager deployments create ccc-cloudsql \
+      #     --config 02-cloudsql-management.yaml \
+      #     --properties dbPassword:$(openssl rand -base64 24)
+      password: $(properties.dbPassword)
+
+  # ── Secret Manager Secrets ───────────────────────────────────────────────────
+  - name: ccc-postgres-instance-name-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-postgres-instance-name
+      replication:
+        automatic: {}
+      labels:
+        project: cybercommandcenter
+
+  - name: ccc-postgres-connection-name-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn:
+        - ccc-postgres-instance-name-secret
+        - ccc-management-postgres
+    properties:
+      secret: $(ref.ccc-postgres-instance-name-secret.name)
+      payload:
+        data: $(ref.ccc-management-postgres.connectionName)
+
+  # Store DB password in Secret Manager for app runtime retrieval
+  - name: ccc-postgres-db-password-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-postgres-db-password
+      replication:
+        automatic: {}
+      labels:
+        project: cybercommandcenter
+
+  - name: ccc-postgres-db-password-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn: [ccc-postgres-db-password-secret, ccc-management-db-user]
+    properties:
+      secret: $(ref.ccc-postgres-db-password-secret.name)
+      payload:
+        data: $(properties.dbPassword)
+
+  # Full DSN for Cloud SQL Proxy / alloydb connections
+  - name: ccc-postgres-dsn-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-postgres-connection-string
+      replication:
+        automatic: {}
+      labels:
+        project: cybercommandcenter
+
+  - name: ccc-postgres-dsn-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn: [ccc-postgres-dsn-secret, ccc-management-db-user]
+    properties:
+      secret: $(ref.ccc-postgres-dsn-secret.name)
+      payload:
+        data: postgresql://ccc_admin:$(properties.dbPassword)@localhost:5432/ccc_management?host=/cloudsql/$(ref.ccc-management-postgres.connectionName)
+
+outputs:
+  - name: instanceName
+    value: ccc-management-postgres
+  - name: connectionName
+    value: $(ref.ccc-management-postgres.connectionName)
+  - name: databaseName
+    value: ccc_management
+  - name: instanceSelfLink
+    value: $(ref.ccc-management-postgres.selfLink)
+  - name: dbPasswordSecretName
+    value: $(ref.ccc-postgres-db-password-secret.name)
+  - name: dsnSecretName
+    value: $(ref.ccc-postgres-dsn-secret.name)

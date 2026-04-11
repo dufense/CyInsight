@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secureops-receiver
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+    component: api-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secureops
+      plane: receiver
+  template:
+    metadata:
+      labels:
+        app: secureops
+        plane: receiver
+        component: api-gateway
+    spec:
+      serviceAccountName: secureops-receiver
+      containers:
+        - name: receiver
+          image: secureops/receiver:latest
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+            - name: syslog-udp
+              containerPort: 514
+              protocol: UDP
+            - name: syslog-tcp
+              containerPort: 1514
+              protocol: TCP
+            - name: syslog-tls
+              containerPort: 6514
+              protocol: TCP
+          env:
+            - name: PLANE
+              value: "receiver"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: secureops-receiver-config
+                  key: kafka-brokers
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: secureops-secrets
+                  key: openai-api-key
+            - name: MANAGEMENT_PLANE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: secureops-receiver-config
+                  key: management-plane-url
+            - name: DATA_PLANE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: secureops-receiver-config
+                  key: data-plane-url
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: sigma-rules
+              mountPath: /app/sigma-rules
+              readOnly: true
+      volumes:
+        - name: sigma-rules
+          configMap:
+            name: secureops-sigma-rules

@@ -1,0 +1,43 @@
+title: Email from Known Free or Suspicious Domain
+id: sigma-email-checkpoint-006
+status: stable
+level: low
+description: Detects emails originating from free public email domains (gmail, yahoo, hotmail, etc.) targeting corporate mailboxes. While not inherently malicious, free domain senders in a corporate context may indicate social engineering, phishing, or BEC attempts especially when paired with financial or urgency keywords.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - gmail.com
+    - yahoo.com
+    - hotmail.com
+    - outlook.com
+    - protonmail.com
+    - tutanota.com
+    - yandex.com
+    - mail.ru
+    - gmx.com
+    - zoho.com
+    - aol.com
+    - icloud.com
+    - temp-mail
+    - guerrillamail
+    - mailinator
+    - throwam
+    - dispostable
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate personal emails from staff using personal accounts
+  - Vendor communications via public email
+  - External contractors
+tags:
+  - attack.initial_access
+  - attack.t1566
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

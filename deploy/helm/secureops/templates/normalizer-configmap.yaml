@@ -1,0 +1,13 @@
+{{- if .Values.normalizer.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-normalizer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: normalizer
+data:
+  CONSUMER_CONCURRENCY: {{ .Values.normalizer.config.consumerConcurrency | quote }}
+  LOG_LEVEL: {{ .Values.normalizer.config.logLevel | default "info" | quote }}
+{{- end }}

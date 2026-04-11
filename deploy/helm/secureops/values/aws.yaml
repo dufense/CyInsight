@@ -1,0 +1,140 @@
+cloudProvider: "aws"
+
+cloudProviderConfig:
+  name: AWS
+  zones:
+    - us-east-1a
+    - us-east-1b
+    - us-east-1c
+
+global:
+  storageClass: "gp3"
+  dataResidency:
+    country: US
+    label: aws
+    complianceFramework: SOC2
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::role/secureops-irsa-role"
+
+objectStorage:
+  provider: s3
+  bucket: secureops-events
+  region: us-east-1
+  endpoint: ""
+  storageClass: STANDARD
+  archiveStorageClass: GLACIER
+
+ingress:
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: ""
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/success-codes: "200"
+
+receiver:
+  replicaCount: 2
+  ingress:
+    enabled: true
+    className: alb
+    host: ingest.secureops.io
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/certificate-arn: ""
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+    tls:
+      enabled: true
+      secretName: secureops-receiver-tls
+  service:
+    type: ClusterIP
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+
+management:
+  enabled: true
+  ingress:
+    enabled: true
+    className: alb
+    host: app.secureops.io
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/certificate-arn: ""
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+      alb.ingress.kubernetes.io/stickiness.enabled: "true"
+      alb.ingress.kubernetes.io/stickiness.type: lb_cookie
+    tls:
+      enabled: true
+      secretName: secureops-management-tls
+  database:
+    host: ""
+    port: 5432
+    name: secureops_management
+    existingSecret: secureops-secrets
+    secretKey: database-url
+    ssl: true
+    sslMode: require
+
+dataPlane:
+  persistence:
+    enabled: true
+    hotStorage:
+      size: 100Gi
+      storageClass: gp3
+    coldStorage:
+      size: 500Gi
+      storageClass: gp3
+
+kafka:
+  enabled: false
+
+kafkaKraft:
+  enabled: false
+
+kafkaExternal:
+  enabled: true
+  brokers: ""
+  securityProtocol: SASL_SSL
+  saslMechanism: AWS_MSK_IAM
+  saslJaasConfig: ""
+  sslEnabled: true
+
+redis:
+  enabled: true
+  architecture: replicaset
+  sentinel:
+    enabled: true
+  auth:
+    enabled: true
+
+opensearch:
+  enabled: true
+  replicas: 2
+
+secrets:
+  create: true
+  databaseUrl: ""
+  sessionSecret: ""
+  aiApiKey: ""
+  superadminPassword: ""
+  cloudStorage:
+    accessKeyId: ""
+    secretAccessKey: ""
+
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+
+networkPolicies:
+  enabled: true

@@ -1,0 +1,70 @@
+#48 - Threat Radar: SVG Symbol Icons with Severity Color-Coding
+Problem
+The current Threat Radar uses Unicode characters and emoji as sector icons (✉, ⬡, ⟡, 🌐, </>, ☁, ◉, ⏃, ⚠, ◈). These are inconsistent across operating systems, often render poorly at small sizes inside SVG, and don't convey the attack type with enough precision. The user specifically wants purpose-built symbols for attack categories: vulnerability, malware, ransomware, email, BOT attacks, DDoS — colored by severity.
+
+What & Why
+Design principle
+Each sector icon should be:
+
+Recognizable at 12–14px — simple, bold strokes with no fine detail
+Colored by dominant severity — critical=red, high=orange, medium=yellow, low=green, none=slate
+Rendered as inline SVG <path> elements inside the radar SVG — no emoji, no external assets, no font dependencies
+Universally consistent — same look on Windows, Mac, Linux, any browser
+Icon definitions (lucide-inspired, simplified for small size)
+Each icon is defined as an SVG path at a 14×14 coordinate space, then scaled and translated to the label position:
+
+Sector	Attack type conveyed	Icon concept
+Email	Phishing, BEC, spam campaigns	Envelope with fold lines
+Endpoint	Malware, ransomware, EDR alerts	Monitor with alert triangle overlay
+Network	DDoS, lateral movement, NDR	3-node branching network
+Web (SWG)	Proxy threats, malicious URLs	Globe with meridian lines
+Web App	OWASP, SQLi, XSS, CSRF	Code brackets < / > as clean SVG paths
+Cloud	Cloud misconfig, shadow IT, CASB	Cloud shape with gear
+Identity	Credential abuse, MFA bypass	Fingerprint / key silhouette
+Data (DLP)	Exfiltration, exposure	Database cylinder with warning
+Vulnerability	CVE exploitation, scanning	Shield with exclamation mark inside
+AI	Prompt injection, model poisoning	Circuit brain / chip with node connections
+Severity ring around icon
+In addition to coloring the icon path itself, add a small severity-colored ring around the sector's blip dot (replacing the current outer glow-only approach) so severity is doubly visible.
+
+Additional "attack sub-type" data
+The user wants BOT, DDoS, ransomware specifically called out. These are sub-categories within existing sectors:
+
+BOT attacks → mostly in Network sector (DDoS, C2 beaconing) and Email sector (spam bots)
+DDoS → Network sector
+Ransomware → Endpoint sector (sub-type of malware)
+Malware → Endpoint sector
+Approach: query security_events.threat_vector and security_events.mitre_technique for each sector to identify the top sub-type. Return topSubType alongside each sector in the API response. Display it as a small annotation next to the sector label (e.g. "ENDPOINT [ransomware]") when a dominant sub-type is detectable.
+
+API change for /api/threat-radar/:tenantId
+Extend the response to include topSubType: string | null:
+
+For endpoint sector: query threat_vector ILIKE '%ransom%' vs '%malware%' vs '%trojan%' to find which is dominant
+For network sector: check for '%ddos%' vs '%bot%' vs '%c2%' / '%beacon%'
+For email sector: check for '%phish%' vs '%spam%' vs '%bec%'
+For vulnerability sector: check '%exploit%' vs '%scan%' Return whichever sub-type has the most events; null if not determinable.
+Frontend changes in ThreatRadar.tsx
+Remove SECTOR_ICONS text object — replace with SECTOR_SVG_PATHS object mapping vector key → SVG d string (at 14×14 scale)
+
+New SectorIcon function renders an SVG <g> element:
+
+Translates to (labelPos.x - 7, labelPos.y - 7) (centering 14×14 icon)
+Renders <path d={SECTOR_SVG_PATHS[sector.vector]} stroke={color} fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+Wraps with severity-colored <circle> background ring (r=9, fill + opacity appropriate for dark/light)
+Label text moves below icon (not inline with it) — dy adjusted to clear the icon height
+
+topSubType annotation: when sector.topSubType is non-null, render a small italic text below the count label in the same severity color: e.g. "[ransomware]" or "[DDoS]"
+
+Legend strip (optional): below the radar SVG, a 2-column legend showing: icon + label + count for all active sectors, making the icons readable at list size
+
+Done looks like
+All 10 sectors display crisp, recognizable SVG icons that look identical on all OS/browsers
+Icon color matches the sector's dominant severity (red for critical, orange for high, etc.)
+When endpoint sector has ransomware-dominant events, the label shows "[ransomware]" sub-type annotation
+When network sector is DDoS-dominant, it shows "[DDoS]"
+Bot attacks annotated when bot/C2 beaconing is the dominant threat vector
+The legend strip below the radar makes icons readable even at smaller display sizes
+Dark and light themes both look polished
+Relevant files
+client/src/components/threat-map/ThreatRadar.tsx — full icon replacement
+server/routes.ts — extend /api/threat-radar/:tenantId to return topSubType per sector

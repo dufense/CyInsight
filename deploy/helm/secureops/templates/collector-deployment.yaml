@@ -1,0 +1,81 @@
+{{- if .Values.collector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secureops.fullname" . }}-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: collector
+spec:
+  replicas: {{ .Values.collector.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: collector
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "secureops.selectorLabels" . | nindent 8 }}
+        component: collector
+    spec:
+      {{- include "secureops.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "secureops.fullname" . }}-collector
+      {{- end }}
+      containers:
+        - name: collector
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.collector.image.repository }}:{{ .Values.collector.image.tag }}"
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5000
+            {{- if .Values.collector.syslog.enabled }}
+            - name: syslog-udp
+              containerPort: {{ .Values.collector.syslog.udpPort }}
+              protocol: UDP
+            - name: syslog-tcp
+              containerPort: {{ .Values.collector.syslog.tcpPort }}
+            - name: syslog-tls
+              containerPort: {{ .Values.collector.syslog.tlsPort }}
+            {{- end }}
+          env:
+            - name: SERVICE_NAME
+              value: "collector"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            {{- include "secureops.kafkaEnv" . | nindent 12 }}
+            - name: REDIS_URL
+              value: redis://{{ include "secureops.fullname" . }}-redis:6379
+            - name: MANAGEMENT_PLANE_URL
+              value: http://{{ include "secureops.fullname" . }}-management:{{ .Values.management.service.port }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: openai-api-key
+          envFrom:
+            - configMapRef:
+                name: {{ include "secureops.fullname" . }}-collector
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+{{- end }}

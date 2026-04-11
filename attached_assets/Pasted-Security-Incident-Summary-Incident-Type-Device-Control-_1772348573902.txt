@@ -1,0 +1,66 @@
+Security Incident Summary
+
+Incident Type: Device Control Policy Enforcement
+Severity: Informational / Policy Enforcement
+Status: Successfully Blocked
+
+1. Affected Host Information
+Parameter	Details
+Hostname	PKFTZ-AAI
+IP Address	192.168.100.6
+Operating System	Windows 11 (64-bit)
+Security Agent Version	4.31.0.19214
+Agent Configuration Date	26-Feb-2026
+2. Incident Details
+Parameter	Details
+Incident Category	Device Control
+Device Type	MTP (Mobile Transfer Protocol)
+Device Name	Apple iPhone
+Device Status	Blocked (as per policy)
+Detection Time (Local)	01-Mar-2026 09:03:06
+Detection Time (UTC)	01-Mar-2026 06:03:06
+3. Device Information
+Parameter	Details
+Vendor ID	05AC
+Product ID	12A8
+Serial Number	6&23F52FB5&0&0000
+Removable Device	No
+Last Inserted	01-Mar-2026 09:03:01
+Last Seen	01-Mar-2026 09:03:01
+
+Description:
+A portable device (smartphone) was connected to the endpoint and was automatically blocked in accordance with the organization’s device control policy.
+
+4. Process Context
+
+The event was handled by a legitimate Windows system process.
+
+Parameter	Details
+Process Name	ntoskrnl.exe
+Process Publisher	Microsoft Windows
+Signature Status	Verified
+Integrity Level	System
+Process SHA256	54F57116BCBBE96DA72088130A8F949E13884A3DB39D81F4B80CB26A88DE00AC
+Process Running Since	2 days 19 hours
+
+No malicious or unauthorized process activity was detected.
+
+5. Analysis & Conclusion
+
+A smartphone device (Apple iPhone) was connected to the system.
+
+The endpoint protection policy identified the device as a portable storage/media device.
+
+Based on existing device control rules, the connection was automatically blocked.
+
+The activity was initiated and managed by a legitimate Windows system process.
+
+No evidence of malicious behavior was observed.
+
+No further action required unless business justification exists.
+
+📌 Final Assessment
+
+This was a policy-based preventive action, not a security breach.
+
+The endpoint protection system functioned as expected by blocking unauthorized portable device access.

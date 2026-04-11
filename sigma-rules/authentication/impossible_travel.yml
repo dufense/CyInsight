@@ -1,0 +1,32 @@
+title: Impossible Travel Login Detection
+id: sigma-auth-002
+status: stable
+level: high
+description: Detects login events from geographically distant locations within a short time frame, suggesting compromised credentials.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: authentication
+  product: any
+detection:
+  selection:
+    eventType:
+      - identity
+      - cloud
+  keywords:
+    - impossible travel
+    - unusual location
+    - geographic anomaly
+    - login from new country
+    - sign-in from unfamiliar location
+  condition: selection AND keywords
+falsepositives:
+  - VPN usage
+  - Traveling employees
+tags:
+  - attack.initial_access
+  - attack.t1078
+mitre:
+  tactic: Initial Access
+  technique: T1078
+  technique_name: Valid Accounts

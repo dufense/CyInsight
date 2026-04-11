@@ -1,0 +1,370 @@
+##############################################################################
+# devsecops.yml — Cyber Command Center: DevSecOps Security Gate
+#
+# Triggers:
+#   • pull_request (any branch → main)  → full security gate (blocks merge)
+#   • push to `main`                    → post-merge security audit
+#   • workflow_dispatch                 → manual on-demand security scan
+#
+# Jobs (all run in parallel):
+#   A. secrets-scan   — Gitleaks: detect committed secrets / API keys
+#   B. dependency-audit — npm audit SCA: HIGH/CRITICAL CVEs block merge
+#   C. sast-codeql    — CodeQL SAST: SQL injection, XSS, path traversal, SSRF
+#   D. iac-checkov    — Checkov: CloudFormation + Dockerfile security rules
+#   E. sbom           — Syft/CycloneDX SBOM generation (main branch only)
+#
+# Required GitHub repository settings:
+#   • Enable GitHub Advanced Security (required for CodeQL SARIF upload)
+#   • Branch protection on `main`: require status checks
+#       secrets-scan, dependency-audit, sast-codeql, iac-checkov
+#
+# No AWS credentials needed — this workflow is purely static analysis.
+##############################################################################
+
+name: DevSecOps Security Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # ── Job A: Secrets Scanning (Gitleaks) ──────────────────────────────────────
+  secrets-scan:
+    name: Secrets Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks — scan entire git history
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        with:
+          config-path: .gitleaks.toml
+
+  # ── Job B: Dependency Audit / SCA (npm audit) ───────────────────────────────
+  dependency-audit:
+    name: Dependency Audit (npm audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (ci — exact lock file)
+        run: npm ci --ignore-scripts
+
+      - name: Run npm audit (fail on HIGH or CRITICAL)
+        run: |
+          set +e
+          npm audit --audit-level=high --json > audit-report.json 2>&1
+          EXIT_CODE=$?
+          set -e
+          echo "npm audit exit code: ${EXIT_CODE}"
+          if [ -f audit-report.json ]; then
+            echo "=== Audit Summary ==="
+            node -e "
+              const r = require('./audit-report.json');
+              const v = r.metadata?.vulnerabilities || {};
+              console.log('critical:', v.critical || 0);
+              console.log('high:    ', v.high || 0);
+              console.log('moderate:', v.moderate || 0);
+              console.log('low:     ', v.low || 0);
+            " 2>/dev/null || head -50 audit-report.json
+          fi
+          exit $EXIT_CODE
+
+      - name: Convert npm audit JSON to SARIF
+        if: always()
+        run: |
+          node - << 'SARIF_SCRIPT'
+          const fs = require('fs');
+
+          let audit = {};
+          try { audit = JSON.parse(fs.readFileSync('audit-report.json', 'utf8')); } catch(e) {}
+
+          const vulns = audit.vulnerabilities || {};
+          const results = [];
+          const rules   = [];
+          const ruleIds  = new Set();
+
+          for (const [pkgName, vuln] of Object.entries(vulns)) {
+            const severity = (vuln.severity || 'info').toUpperCase();
+            const trivialSeverity = severity === 'CRITICAL' ? 'error'
+              : severity === 'HIGH' ? 'error'
+              : severity === 'MODERATE' ? 'warning'
+              : 'note';
+
+            const via = Array.isArray(vuln.via) ? vuln.via : [];
+            for (const v of via) {
+              if (typeof v !== 'object') continue;
+              const ruleId = v.source ? String(v.source) : ('npm-audit-' + pkgName);
+              if (!ruleIds.has(ruleId)) {
+                ruleIds.add(ruleId);
+                rules.push({
+                  id: ruleId,
+                  name: 'NpmAudit/' + (v.cwe || severity),
+                  shortDescription: { text: v.title || ('Vulnerability in ' + pkgName) },
+                  helpUri: v.url || 'https://www.npmjs.com/advisories/' + (v.source || ''),
+                  properties: { tags: ['npm', 'security', severity.toLowerCase()] }
+                });
+              }
+              results.push({
+                ruleId,
+                message: { text: (v.title || 'Vulnerability in ' + pkgName) + ' — ' + pkgName + '@' + (vuln.range || 'unknown') + ' [' + severity + ']' },
+                level: trivialSeverity,
+                locations: [{
+                  physicalLocation: {
+                    artifactLocation: { uri: 'package.json', uriBaseId: '%SRCROOT%' },
+                    region: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 1 }
+                  },
+                  logicalLocations: [{ name: pkgName, kind: 'module' }]
+                }]
+              });
+            }
+          }
+
+          const sarif = {
+            '$schema': 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+            version: '2.1.0',
+            runs: [{
+              tool: {
+                driver: {
+                  name: 'npm-audit',
+                  version: '1.0.0',
+                  informationUri: 'https://docs.npmjs.com/cli/commands/npm-audit',
+                  rules
+                }
+              },
+              results,
+              artifacts: [{ location: { uri: 'package.json', uriBaseId: '%SRCROOT%' } }]
+            }]
+          };
+
+          fs.writeFileSync('audit-report.sarif', JSON.stringify(sarif, null, 2));
+          console.log('SARIF written: ' + results.length + ' findings, ' + rules.length + ' rules');
+          SARIF_SCRIPT
+
+      - name: Upload npm audit SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: audit-report.sarif
+          category:   npm-audit
+
+      - name: Upload npm audit reports as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report-${{ github.sha }}
+          path: |
+            audit-report.json
+            audit-report.sarif
+          retention-days: 90
+
+  # ── Job C: SAST — CodeQL (JavaScript/TypeScript) ────────────────────────────
+  sast-codeql:
+    name: SAST — CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+          config: |
+            paths:
+              - server
+              - client/src
+              - shared
+            paths-ignore:
+              - node_modules
+              - dist
+              - .cache
+              - migrations
+
+      - name: Autobuild (no compilation needed for JS/TS)
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+          upload: always
+
+  # ── Job D: IaC Security — Checkov ───────────────────────────────────────────
+  iac-checkov:
+    name: IaC Scan (Checkov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Checkov on CloudFormation templates
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: deploy/ecs/cloudformation
+          framework: cloudformation
+          config_file: .checkov.yaml
+          output_format: sarif
+          output_file_path: checkov-cloudformation.sarif
+          soft_fail: false
+          quiet: false
+
+      - name: Run Checkov on Dockerfile
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file: Dockerfile
+          framework: dockerfile
+          config_file: .checkov.yaml
+          output_format: sarif
+          output_file_path: checkov-dockerfile.sarif
+          soft_fail: false
+
+      - name: Upload CloudFormation Checkov SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-cloudformation.sarif
+          category: checkov-cloudformation
+
+      - name: Upload Dockerfile Checkov SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-dockerfile.sarif
+          category: checkov-dockerfile
+
+  # ── Job E: SBOM Generation (Syft / CycloneDX) ───────────────────────────────
+  sbom:
+    name: Generate SBOM (Syft/CycloneDX)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin v1.4.1
+
+      - name: Generate SBOM (CycloneDX JSON)
+        run: |
+          syft dir:. \
+            --output cyclonedx-json=sbom-cyclonedx.json \
+            --output spdx-json=sbom-spdx.json \
+            --exclude './.git' \
+            --exclude './node_modules/.cache' \
+            --exclude './dist'
+          echo "SBOM generated:"
+          wc -l sbom-cyclonedx.json sbom-spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom-cyclonedx.json
+            sbom-spdx.json
+          retention-days: 90
+
+  # ── Security Gate Summary ────────────────────────────────────────────────────
+  security-gate-summary:
+    name: Security Gate Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [secrets-scan, dependency-audit, sast-codeql, iac-checkov]
+    if: always()
+
+    steps:
+      - name: Print security gate summary
+        env:
+          SECRETS_STATUS:    ${{ needs.secrets-scan.result }}
+          AUDIT_STATUS:      ${{ needs.dependency-audit.result }}
+          CODEQL_STATUS:     ${{ needs.sast-codeql.result }}
+          CHECKOV_STATUS:    ${{ needs.iac-checkov.result }}
+        run: |
+          echo "## DevSecOps Security Gate — Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Secrets Scan (Gitleaks)    | ${SECRETS_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dependency Audit (npm)     | ${AUDIT_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SAST — CodeQL              | ${CODEQL_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| IaC Scan — Checkov         | ${CHECKOV_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Actor:  ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+
+          ALL_OK=true
+          for STATUS in "${SECRETS_STATUS}" "${AUDIT_STATUS}" "${CODEQL_STATUS}" "${CHECKOV_STATUS}"; do
+            if [[ "${STATUS}" != "success" && "${STATUS}" != "skipped" ]]; then
+              ALL_OK=false
+            fi
+          done
+
+          if [[ "${ALL_OK}" == "true" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "All security gates passed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**One or more security gates FAILED. Merge blocked.**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

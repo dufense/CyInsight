@@ -1,0 +1,986 @@
+##############################################################################
+# Cyber Command Center -- Data Plane ECS Fargate Service (Per-Region)
+#
+# Per-region data-plane service that handles:
+#   - Security event ingestion from MSK Kafka
+#   - Real-time OpenSearch indexing (30-day hot tier)
+#   - S3 Iceberg write (raw events + processed Parquet)
+#   - Sigma rule evaluation engine
+#   - AI normalization pipeline
+#   - Data plane health reporting to management plane
+#
+# Multi-Region HA Architecture (3 data planes):
+#
+#   Management Plane                        Data Planes (HA)
+#   ─────────────────────────────────────── ──────────────────────────────────
+#   ap-south-1 (India, Mumbai)              ap-south-1 (Mumbai)  -- internal ALB
+#   VPC CIDR: 10.10.0.0/16                   VPC CIDR: 10.20.0.0/16
+#   ECS cluster: ccc-management             VPC peering with management
+#   ALB: internet-facing (HTTPS)
+#                                           me-south-1 (Bahrain) -- internet-facing ALB
+#                                             VPC CIDR: 10.30.0.0/16
+#                                             ALB SG: HTTPS only from mgmt NAT EIPs
+#
+#                                           af-south-1 (Kenya)   -- internet-facing ALB
+#                                             VPC CIDR: 10.40.0.0/16
+#                                             ALB SG: HTTPS only from mgmt NAT EIPs
+#
+# HA configuration per data plane:
+#   - DesiredCount=2, MinCount=2 across 3 AZs
+#   - FARGATE_SPOT 4:1 weight with Base=1 FARGATE
+#   - ECS deployment circuit-breaker with rollback
+#   - CPU (65%) + Memory (70%) auto-scaling to MaxCount
+#
+# ALB scheme:
+#   - Mumbai (same region as mgmt): AlbScheme=internal  (reached via VPC peering)
+#   - Bahrain/Kenya (remote):       AlbScheme=internet-facing + ManagementNatEip1/2/3
+#
+# GRC Shield lessons applied:
+#   - No em-dashes in GroupDescription
+#   - Fn::ImportValue syntax (not !ImportValue !Sub)
+#   - RuntimePlatform: X86_64
+#   - HealthCheckGracePeriodSeconds: 180
+#   - FARGATE_SPOT 4:1 weight
+#
+# Deploy (example -- mumbai, internal ALB, same region as mgmt):
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/07-data-plane-ecs.yml \
+#     --stack-name ccc-data-plane-mumbai \
+#     --region ap-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-dp-vpc-mumbai \
+#       MSKStackName=ccc-msk-kafka \
+#       OpenSearchStackName=ccc-opensearch \
+#       DataLakeStackName=ccc-data-lake \
+#       DataPlaneRegion=mumbai \
+#       RegionCode=ap-south-1 \
+#       DataPlaneId=mumbai \
+#       AlbScheme=internal \
+#       ImageUri=ACCOUNT.dkr.ecr.ap-south-1.amazonaws.com/ccc-data-plane:latest
+#
+# Deploy (example -- bahrain, internet-facing ALB with mgmt NAT EIP allowlist):
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/07-data-plane-ecs.yml \
+#     --stack-name ccc-data-plane-bahrain \
+#     --region me-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-dp-vpc-bahrain \
+#       MSKStackName=ccc-msk-kafka \
+#       OpenSearchStackName=ccc-opensearch \
+#       DataLakeStackName=ccc-data-lake \
+#       DataPlaneRegion=bahrain \
+#       RegionCode=me-south-1 \
+#       DataPlaneId=bahrain \
+#       AlbScheme=internet-facing \
+#       AlbCertificateArn=arn:aws:acm:me-south-1:ACCOUNT:certificate/... \
+#       ManagementNatEip1=1.2.3.4 \
+#       ManagementNatEip2=5.6.7.8 \
+#       ImageUri=ACCOUNT.dkr.ecr.me-south-1.amazonaws.com/ccc-data-plane:latest
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- Data Plane ECS Fargate (per region)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  DataPlaneRegion:
+    Type: String
+    AllowedValues: [mumbai, bahrain, kenya]
+    Description: >-
+      Logical data plane region identifier.
+      mumbai   = ap-south-1 (same AWS region as management plane; internal ALB)
+      bahrain  = me-south-1 (internet-facing ALB, mgmt NAT EIP allowlist)
+      kenya    = af-south-1 (internet-facing ALB, mgmt NAT EIP allowlist)
+
+  # ── HA deployment target parameters ─────────────────────────────────────────
+  # RegionCode + DataPlaneId are injected as ECS task environment variables so
+  # the application can identify its physical AWS region and logical data plane
+  # name without parsing the DataPlaneRegion string.
+  RegionCode:
+    Type: String
+    AllowedValues: [ap-south-1, me-south-1, af-south-1]
+    Default: ap-south-1
+    Description: >-
+      AWS region code where this data plane is deployed.
+      Injected as AWS_REGION env var into the ECS task.
+      ap-south-1 = Mumbai, me-south-1 = Bahrain, af-south-1 = Kenya
+
+  DataPlaneId:
+    Type: String
+    AllowedValues: [mumbai, bahrain, kenya]
+    Default: mumbai
+    Description: >-
+      Human-readable logical data plane identifier.
+      Injected as DATA_PLANE_ID env var. Used by the management plane for routing.
+
+  # ── ALB scheme + cross-region access control ──────────────────────────────
+  # Mumbai data plane: AlbScheme=internal (VPC peering to management plane)
+  # Bahrain + Kenya:   AlbScheme=internet-facing with HTTPS cert + NAT EIP allowlist
+  AlbScheme:
+    Type: String
+    Default: internal
+    AllowedValues: [internal, internet-facing]
+    Description: >-
+      ALB scheme. Use "internal" for Mumbai (same region, VPC peered with management).
+      Use "internet-facing" for Bahrain/Kenya (remote regions).
+
+  AlbCertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ACM certificate ARN for HTTPS on internet-facing ALBs (Bahrain/Kenya).
+      Must be in the same region as the data plane. Leave empty for internal ALBs.
+
+  ManagementNatEip1:
+    Type: String
+    Default: ""
+    Description: >-
+      Management plane NAT Gateway EIP #1 (Elastic IP address, not ARN).
+      Required when AlbScheme=internet-facing. Used to restrict ALB ingress.
+
+  ManagementNatEip2:
+    Type: String
+    Default: ""
+    Description: >-
+      Management plane NAT Gateway EIP #2. Optional second IP for HA management plane.
+
+  ManagementNatEip3:
+    Type: String
+    Default: ""
+    Description: >-
+      Management plane NAT Gateway EIP #3. Optional third IP for 3-AZ management plane.
+
+  ManagementVpcCidr:
+    Type: String
+    Default: "10.10.0.0/16"
+    Description: >-
+      Management plane VPC CIDR. Used to allow management traffic into the internal ALB
+      (Mumbai only, via VPC peering). For Bahrain/Kenya this parameter is unused since
+      the ALB SG uses ManagementNatEip1/2/3 EIP allow-listing instead.
+
+  # ── Optional third private subnet (for 3-AZ ECS task spread) ─────────────
+  VpcPrivateSubnet3Id:
+    Type: String
+    Default: ""
+    Description: >-
+      Private subnet ID for AZ3. When provided, ECS tasks and the internal ALB
+      use all three AZs for full HA. Exported as PrivateSubnet3Id from
+      10-data-plane-ha-vpc.yml. Leave empty when using the legacy 2-AZ VPC stack.
+
+  VpcStackName:
+    Type: String
+    Default: ccc-vpc
+
+  MSKStackName:
+    Type: String
+    Default: ccc-msk-kafka
+
+  OpenSearchStackName:
+    Type: String
+    Default: ccc-opensearch
+
+  DataLakeStackName:
+    Type: String
+    Default: ccc-data-lake
+
+  AuroraStackName:
+    Type: String
+    Default: ccc-aurora-management
+
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI for ccc-data-plane
+
+  TaskCpu:
+    Type: Number
+    Default: 2048
+    AllowedValues: [1024, 2048, 4096]
+
+  TaskMemory:
+    Type: Number
+    Default: 4096
+    AllowedValues: [2048, 4096, 8192]
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+
+  MinCount:
+    Type: Number
+    Default: 2
+
+  MaxCount:
+    Type: Number
+    Default: 30
+    Description: Max task count - data plane scales aggressively for ingest spikes
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+  ClickHouseStackName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional: CloudFormation stack name of the ccc-clickhouse cluster
+      (08-clickhouse-cluster.yml). When set, CLICKHOUSE_URL is injected into
+      the task definition using the stack's ALBDNSName export.
+      Leave empty to operate without ClickHouse (OpenSearch-only mode).
+
+  ClickHouseUser:
+    Type: String
+    Default: "default"
+    Description: ClickHouse username (must match the cluster admin user config)
+
+  ClickHouseDatabase:
+    Type: String
+    Default: "ccc"
+    Description: ClickHouse database used by the data-plane for event analytics
+
+  # ── Data Plane Aurora + RDS Proxy (12-data-plane-rds.yml) ────────────────────
+  # When set, DATA_PLANE_DB_URL and DATA_PLANE_RDS_PROXY are injected into the
+  # task definition as secrets from the per-region data plane Aurora stack.
+  # Isolates event metadata writes from the management plane Aurora cluster.
+  DataPlaneRDSStackName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional: CloudFormation stack name of the data plane Aurora + RDS Proxy
+      (12-data-plane-rds.yml). When set, DATA_PLANE_DB_URL and DATA_PLANE_RDS_PROXY
+      are injected into the ECS task environment.
+      Example: ccc-dp-rds-mumbai (for the Mumbai data plane).
+      Leave empty to use management Aurora only (DATA_PLANE_DB_URL not injected).
+
+  # ── RDS / Aurora SSL enforcement ─────────────────────────────────────────────
+  # Mirror of the same parameter in 06-management-ecs.yml so each regional
+  # data-plane deployment can independently control SSL enforcement.
+  # Default is "0" — SSL is verified by the app (PGSSLMODE=verify-ca + CA bundle).
+  RdsForceSSL:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+    Description: >-
+      Value for rds.force_ssl in the Aurora PostgreSQL cluster parameter group.
+      "0" = SSL optional (verified by app via PGSSLMODE=verify-ca + CA bundle).
+      "1" = DB engine rejects non-SSL connections (requires CA bundle in clients).
+
+Conditions:
+  HasClickHouse:          !Not [!Equals [!Ref ClickHouseStackName, ""]]
+  HasDataPlaneRDS:        !Not [!Equals [!Ref DataPlaneRDSStackName, ""]]
+  IsInternetFacing:       !Equals [!Ref AlbScheme, "internet-facing"]
+  IsInternal:             !Equals [!Ref AlbScheme, "internal"]
+  HasThirdSubnet:         !Not [!Equals [!Ref VpcPrivateSubnet3Id, ""]]
+  HasAlbCert:             !Not [!Equals [!Ref AlbCertificateArn, ""]]
+  # HTTPS listener is only valid when internet-facing AND a cert ARN is supplied.
+  # If internet-facing but no cert yet, HTTP-only listener is used instead.
+  HasInternetFacingCert:  !And [!Condition IsInternetFacing, !Condition HasAlbCert]
+  HasNatEip1:             !Not [!Equals [!Ref ManagementNatEip1, ""]]
+  HasNatEip2:             !Not [!Equals [!Ref ManagementNatEip2, ""]]
+  HasNatEip3:             !Not [!Equals [!Ref ManagementNatEip3, ""]]
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── RDS / Aurora Cluster Parameter Group ─────────────────────────────────────
+  # Each regional data-plane deployment creates its own Aurora parameter group.
+  # This ensures regional DB clusters can have independent SSL / keepalive
+  # settings without affecting other regions.
+  # Default: rds.force_ssl=0 — app-layer SSL verification handles security.
+  # Override with RdsForceSSL=1 for engine-level enforcement.
+  AuroraParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "CCC Aurora PostgreSQL params -- data-plane ${DataPlaneId} ${EnvironmentName}"
+      Family: aurora-postgresql15
+      Parameters:
+        # rds.force_ssl: 0 = app handles SSL (PGSSLMODE=verify-ca + CA bundle).
+        # rds.force_ssl: 1 = engine rejects non-SSL; requires CA bundle in all clients.
+        rds.force_ssl: !Ref RdsForceSSL
+        log_connections: "1"
+        tcp_keepalives_idle: "60"
+        tcp_keepalives_interval: "10"
+        tcp_keepalives_count: "6"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DataPlaneId
+          Value: !Ref DataPlaneId
+        - Key: RegionCode
+          Value: !Ref RegionCode
+
+  # ── ECS Cluster ──────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+
+  # ── Execution Role ───────────────────────────────────────────────────────────
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-data-plane-execution-role-${DataPlaneRegion}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+                  - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
+                  # Data plane per-region Aurora secret (conditional -- only when DataPlaneRDSStackName is set)
+                  - !If
+                    - HasDataPlaneRDS
+                    - Fn::ImportValue: !Sub "${DataPlaneRDSStackName}-DBSecretArn"
+                    - !Ref AWS::NoValue
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ClickHouseAdminPasswordRead
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ccc/clickhouse/admin-password"
+
+  # ── Task Role (data-plane-specific AWS access) ───────────────────────────────
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-data-plane-task-role-${DataPlaneRegion}-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+        - PolicyName: S3DataLakeFullAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource:
+                  - Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketArn"
+                  - !Sub
+                    - "${BucketArn}/*"
+                    - BucketArn:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketArn"
+                  - Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketArn"
+                  - !Sub
+                    - "${BucketArn}/*"
+                    - BucketArn:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketArn"
+        - PolicyName: GlueAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetDatabase
+                  - glue:GetPartitions
+                  - glue:CreatePartition
+                  - glue:BatchCreatePartition
+                  - glue:UpdatePartition
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/ccc_security_events_${EnvironmentName}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/ccc_security_events_${EnvironmentName}/*"
+        - PolicyName: AthenaAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                Resource:
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/ccc-security-analytics-${EnvironmentName}"
+        - PolicyName: MSKConsumerAndProducer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka:DescribeCluster
+                  - kafka:GetBootstrapBrokers
+                Resource:
+                  - Fn::ImportValue: !Sub "${MSKStackName}-ClusterArn"
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:Connect
+                  - kafka-cluster:DescribeTopic
+                  - kafka-cluster:ReadData
+                  - kafka-cluster:WriteData
+                  - kafka-cluster:CreateTopic
+                  - kafka-cluster:DescribeGroup
+                  - kafka-cluster:AlterGroup
+                # MSK IAM ARNs for topics and consumer groups:
+                # Format: arn:aws:kafka:REGION:ACCOUNT:topic/CLUSTER_NAME/UUID/TOPIC
+                # The UUID is unknown at deploy time, so we use wildcard for both
+                # UUID and resource name segments (cluster-name/*/*).
+                Resource:
+                  - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/ccc-msk-${EnvironmentName}/*/*"
+                  - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/ccc-msk-${EnvironmentName}/*/*"
+        - PolicyName: OpenSearchReadWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                  - es:ESHttpPost
+                  - es:ESHttpPut
+                  - es:ESHttpDelete
+                  - es:ESHttpHead
+                  - es:DescribeDomain
+                Resource:
+                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-DomainArn"
+                  - !Sub
+                    - "${DomainArn}/*"
+                    - DomainArn:
+                        Fn::ImportValue: !Sub "${OpenSearchStackName}-DomainArn"
+
+  # ── Task Definition ──────────────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: data-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: data
+            - Name: DATA_PLANE_REGION
+              Value: !Ref DataPlaneRegion
+            # ── HA region identification ────────────────────────────────────
+            # RegionCode and DataPlaneId are injected so the application can
+            # identify its AWS region and logical placement without parsing
+            # the DataPlaneRegion string (e.g. "ap-south-1" + "india").
+            - Name: AWS_REGION
+              Value: !Ref RegionCode
+            - Name: DATA_PLANE_ID
+              Value: !Ref DataPlaneId
+            # ── RDS / TimescaleDB SSL configuration ─────────────────────────
+            # DB_SSL_CA points to the RDS global CA bundle embedded at build time.
+            # NODE_EXTRA_CA_CERTS ensures the Node TLS stack trusts the RDS CA.
+            # These two variables together prevent SELF_SIGNED_CERT_IN_CHAIN.
+            - Name: DB_SSL_CA
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: PGSSLMODE
+              Value: verify-ca
+            - Name: NODE_EXTRA_CA_CERTS
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: S3_RAW_BUCKET
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketName"
+            - Name: S3_ICEBERG_BUCKET
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketName"
+            - Name: GLUE_DATABASE
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-GlueDatabaseName"
+            - Name: ATHENA_WORKGROUP
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-AthenaWorkgroupName"
+            # ── ClickHouse OLAP cluster (optional; injected when HasClickHouse) ──
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_URL
+                Value: !Sub
+                  - "http://${ALBDns}:8123"
+                  - ALBDns:
+                      Fn::ImportValue: !Sub "${ClickHouseStackName}-ALBDNSName"
+              - !Ref AWS::NoValue
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_USER
+                Value: !Ref ClickHouseUser
+              - !Ref AWS::NoValue
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_DATABASE
+                Value: !Ref ClickHouseDatabase
+              - !Ref AWS::NoValue
+            # ── Data plane RDS Proxy endpoint (plain hostname, safe as env var) ──────
+            # Injected when DataPlaneRDSStackName is set. Points to the per-region
+            # RDS Proxy, not the Aurora writer endpoint, enabling ECS tasks to use
+            # connection-pooled IAM-authenticated access to the data plane Aurora DB.
+            - !If
+              - HasDataPlaneRDS
+              - Name: DATA_PLANE_RDS_PROXY
+                Value:
+                  Fn::ImportValue: !Sub "${DataPlaneRDSStackName}-RDSProxyEndpoint"
+              - !Ref AWS::NoValue
+          Secrets:
+            - Name: KAFKA_BROKERS
+              ValueFrom: !Sub
+                - "${SecretArn}:KAFKA_BROKERS::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+            - Name: OPENSEARCH_URL
+              ValueFrom: !Sub
+                - "${SecretArn}:OPENSEARCH_URL::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+            - Name: DATABASE_URL
+              ValueFrom: !Sub
+                - "${SecretArn}:DATABASE_URL::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+            - Name: AI_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/provider-${EnvironmentName}"
+            - Name: AI_API_KEY
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/api-key-${EnvironmentName}"
+            # ClickHouse admin password (stored in SSM SecureString; optional)
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_PASSWORD
+                ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ccc/clickhouse/admin-password"
+              - !Ref AWS::NoValue
+            # Data plane Aurora credentials (injected when DataPlaneRDSStackName is set)
+            # DATA_PLANE_DB_URL: PostgreSQL connection string for per-region event metadata DB
+            # DATA_PLANE_RDS_PROXY: RDS Proxy endpoint hostname (plain env var -- just a hostname, not a secret)
+            - !If
+              - HasDataPlaneRDS
+              - Name: DATA_PLANE_DB_URL
+                ValueFrom: !Sub
+                  - "${SecretArn}:DATA_PLANE_DB_URL::"
+                  - SecretArn:
+                      Fn::ImportValue: !Sub "${DataPlaneRDSStackName}-DBSecretArn"
+              - !Ref AWS::NoValue
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+          StopTimeout: 30
+
+  # ── ALB Security Groups ───────────────────────────────────────────────────────
+  # ── Internal ALB Security Group (Mumbai -- reached via VPC peering) ──────────
+  # Allows port 80 traffic from the management plane VPC CIDR (peered via pcx).
+  # Without this rule, the management ECS tasks would have no path to the ALB
+  # even though the VPC route table has a peering entry for 10.20.0.0/16.
+  InternalALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsInternal
+    Properties:
+      GroupDescription: CCC Data Plane internal ALB - allow port 80 from management VPC CIDR
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref ManagementVpcCidr
+          Description: Management plane VPC CIDR (via VPC peering)
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound to ECS targets
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-dp-${DataPlaneRegion}-internal-alb-sg-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── Internet-Facing ALB Security Group (Bahrain/Kenya) ────────────────────
+  # Restricts HTTPS access to the known management plane NAT Gateway EIPs.
+  # This resource is only created when AlbScheme=internet-facing.
+  InternetFacingALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsInternetFacing
+    Properties:
+      GroupDescription: CCC Data Plane internet-facing ALB - HTTP and HTTPS from mgmt NAT EIPs
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        # Port 443 (HTTPS) -- primary data path when cert is configured
+        - !If
+          - HasNatEip1
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Sub "${ManagementNatEip1}/32"
+            Description: HTTPS -- Management plane NAT EIP 1
+          - !Ref AWS::NoValue
+        - !If
+          - HasNatEip2
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Sub "${ManagementNatEip2}/32"
+            Description: HTTPS -- Management plane NAT EIP 2
+          - !Ref AWS::NoValue
+        - !If
+          - HasNatEip3
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Sub "${ManagementNatEip3}/32"
+            Description: HTTPS -- Management plane NAT EIP 3
+          - !Ref AWS::NoValue
+        # Port 80 (HTTP) -- needed for: (a) HTTPS redirect path, (b) cert-less fallback
+        - !If
+          - HasNatEip1
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: !Sub "${ManagementNatEip1}/32"
+            Description: HTTP -- Management plane NAT EIP 1
+          - !Ref AWS::NoValue
+        - !If
+          - HasNatEip2
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: !Sub "${ManagementNatEip2}/32"
+            Description: HTTP -- Management plane NAT EIP 2
+          - !Ref AWS::NoValue
+        - !If
+          - HasNatEip3
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: !Sub "${ManagementNatEip3}/32"
+            Description: HTTP -- Management plane NAT EIP 3
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+        - Key: Name
+          Value: !Sub "ccc-dp-${DataPlaneRegion}-internet-alb-sg-${EnvironmentName}"
+
+  # ── Data Plane ALB (internal for Mumbai / internet-facing for Bahrain+Kenya) ──
+  DataPlaneALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-dp-${DataPlaneRegion}-alb-${EnvironmentName}"
+      Scheme: !Ref AlbScheme
+      Type: application
+      SecurityGroups:
+        - !If
+          - IsInternetFacing
+          - !Ref InternetFacingALBSecurityGroup
+          - !Ref InternalALBSecurityGroup
+      Subnets:
+        - !If
+          - IsInternetFacing
+          - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet1Id"
+          - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+        - !If
+          - IsInternetFacing
+          - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet2Id"
+          - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: DataPlaneRegion
+          Value: !Ref DataPlaneRegion
+        - Key: AlbScheme
+          Value: !Ref AlbScheme
+
+  DataPlaneTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-dp-${DataPlaneRegion}-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      HealthCheckPath: /health
+      HealthCheckPort: "5000"
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # HTTP listener:
+  #   - Internal ALBs (Mumbai):              forward directly to target group on port 5000
+  #   - Internet-facing WITH cert (Bahrain/Kenya): 301 redirect to HTTPS
+  #   - Internet-facing WITHOUT cert:        forward directly (cert-less fallback, not recommended)
+  DataPlaneALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DataPlaneALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasInternetFacingCert
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref DataPlaneTargetGroup
+
+  # HTTPS listener — only created for internet-facing ALBs that have a cert ARN (Bahrain/Kenya).
+  # If AlbCertificateArn is empty the listener is omitted and HTTP forwarding is used instead.
+  DataPlaneALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasInternetFacingCert
+    Properties:
+      LoadBalancerArn: !Ref DataPlaneALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref AlbCertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DataPlaneTargetGroup
+
+  # ── ECS Service ──────────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: DataPlaneALBListenerHTTP
+    Properties:
+      ServiceName: !Sub "ccc-data-plane-${DataPlaneRegion}-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      PlacementStrategies:
+        # Spread tasks evenly across Availability Zones for maximum HA.
+        # (Fargate supports only AZ spread; instanceId spread is EC2-only.)
+        - Type: spread
+          Field: "attribute:ecs.availability-zone"
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            # Always deploy ECS tasks to private subnets regardless of ALB scheme.
+            # 3-AZ spread: include the optional third subnet when the HA VPC is used.
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+            - !If
+              - HasThirdSubnet
+              - !Ref VpcPrivateSubnet3Id
+              - !Ref AWS::NoValue
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+      LoadBalancers:
+        - ContainerName: data-plane
+          ContainerPort: 5000
+          TargetGroupArn: !Ref DataPlaneTargetGroup
+
+  # ── Auto Scaling ─────────────────────────────────────────────────────────────
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: ECSService
+    Properties:
+      MinCapacity: !Ref MinCount
+      MaxCapacity: !Ref MaxCount
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-dp-${DataPlaneRegion}-${EnvironmentName}-cpu"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 65
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 30
+
+  ScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-dp-${DataPlaneRegion}-${EnvironmentName}-memory"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 30
+
+Outputs:
+
+  ALBDNSName:
+    Description: >-
+      ALB DNS for management-to-data plane queries.
+      Internal for Mumbai (via VPC peering); HTTPS endpoint for Bahrain/Kenya.
+    Value: !GetAtt DataPlaneALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDNSName"
+
+  # Keep legacy export name for backward compatibility with existing stacks
+  InternalALBDNSName:
+    Description: Alias for ALBDNSName (backward compatibility)
+    Value: !GetAtt DataPlaneALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-InternalALBDNSName"
+
+  AlbScheme:
+    Description: ALB scheme -- internal (Mumbai) or internet-facing (Bahrain/Kenya)
+    Value: !Ref AlbScheme
+    Export:
+      Name: !Sub "${AWS::StackName}-AlbScheme"
+
+  ECSClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSClusterName"
+
+  ECSServiceName:
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSServiceName"
+
+  TaskRoleArn:
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskRoleArn"
+
+  DataPlaneRegion:
+    Value: !Ref DataPlaneRegion
+    Export:
+      Name: !Sub "${AWS::StackName}-DataPlaneRegion"
+
+  AuroraParameterGroupName:
+    Description: >-
+      Name of the Aurora PostgreSQL cluster parameter group for this data plane.
+      Pass to the Aurora cluster stack as DBClusterParameterGroupName.
+    Value: !Ref AuroraParameterGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraParameterGroupName"
+
+  RdsForceSSLSetting:
+    Description: '"0" = app-layer SSL. "1" = engine rejects non-SSL connections.'
+    Value: !Ref RdsForceSSL
+    Export:
+      Name: !Sub "${AWS::StackName}-RdsForceSSLSetting"

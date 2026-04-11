@@ -1,0 +1,412 @@
+##############################################################################
+# Cyber Command Center — ECS Fargate Receiver Plane
+#
+# Creates:
+#   - ECS Cluster (receiver plane)
+#   - Network Load Balancer (TCP/UDP — for Syslog/CEF ingest)
+#   - ECS Service (receiver-plane)
+#   - IAM Task Role
+#   - CloudWatch Log Group
+#   - Security Groups
+#
+# NOTE: Fargate supports UDP port mappings from Fargate platform 1.4+.
+#       The NLB UDP listener routes to ip targets.
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/receiver-plane.yml \
+#     --stack-name ccc-receiver-plane \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcId=vpc-xxxx \
+#       PublicSubnetIds="subnet-aaa,subnet-bbb" \
+#       PrivateSubnetIds="subnet-ccc,subnet-ddd" \
+#       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-receiver-plane:latest
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — Receiver Plane on ECS Fargate"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the NLB
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks
+
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI for ccc-receiver-plane
+
+  TaskCpu:
+    Type: Number
+    Default: 512
+    AllowedValues: [256, 512, 1024, 2048]
+
+  TaskMemory:
+    Type: Number
+    Default: 1024
+    AllowedValues: [512, 1024, 2048, 4096]
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+
+  SecretsPrefix:
+    Type: String
+    Default: "ccc"
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-receiver-plane-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "ccc-receiver-${EnvironmentName}"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: receiver
+
+  ReceiverTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-receiver-task-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # NLB Security Group (NLBs are technically Security-Group-less, but ECS tasks need SG)
+  ReceiverECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-receiver-ecs-sg-${EnvironmentName}"
+      GroupDescription: Security group for Receiver Plane ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: "0.0.0.0/0"
+          Description: Push API (REST ingest)
+        - IpProtocol: udp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: "0.0.0.0/0"
+          Description: Syslog UDP
+        - IpProtocol: tcp
+          FromPort: 1514
+          ToPort: 1514
+          CidrIp: "0.0.0.0/0"
+          Description: Syslog TCP
+        - IpProtocol: tcp
+          FromPort: 6514
+          ToPort: 6514
+          CidrIp: "0.0.0.0/0"
+          Description: Syslog TLS
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-receiver-ecs-sg-${EnvironmentName}"
+
+  # ── Network Load Balancer ─────────────────────────────────────────────────────
+  NLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-receiver-nlb-${EnvironmentName}"
+      Scheme: internet-facing
+      Type: network
+      Subnets: !Ref PublicSubnetIds
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: receiver
+
+  NLBTargetGroupAPI:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-receiver-api-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPort: "5000"
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  NLBTargetGroupSyslogUDP:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-receiver-sysudp-tg-${EnvironmentName}"
+      Port: 514
+      Protocol: UDP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPort: "5000"
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  NLBTargetGroupSyslogTCP:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-receiver-systcp-tg-${EnvironmentName}"
+      Port: 1514
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPort: "5000"
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  NLBTargetGroupSyslogTLS:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-receiver-systls-tg-${EnvironmentName}"
+      Port: 6514
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPort: "5000"
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  NLBListenerAPI:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NLB
+      Port: 5000
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroupAPI
+
+  NLBListenerSyslogUDP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NLB
+      Port: 514
+      Protocol: UDP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroupSyslogUDP
+
+  NLBListenerSyslogTCP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NLB
+      Port: 1514
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroupSyslogTCP
+
+  NLBListenerSyslogTLS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NLB
+      Port: 6514
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroupSyslogTLS
+
+  # ── ECS Task Definition ───────────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "ccc-receiver-plane-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ccc-ecs-execution-role-${EnvironmentName}"
+      TaskRoleArn: !GetAtt ReceiverTaskRole.Arn
+      ContainerDefinitions:
+        - Name: receiver-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+            - ContainerPort: 514
+              Protocol: udp
+            - ContainerPort: 1514
+              Protocol: tcp
+            - ContainerPort: 6514
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: receiver
+            - Name: CLUSTER_WORKERS_MAX
+              Value: "1"
+            # PARQUET_DATA_DIR: receiver writes event batches as local Parquet before
+            # forwarding to Kafka / data plane. Uses ephemeral task storage (no EFS needed
+            # for the collector role — batches are short-lived). Set to /app/data/events
+            # to match the Dockerfile default and avoid /tmp path issues.
+            - Name: PARQUET_DATA_DIR
+              Value: /app/data/events
+            - Name: APP_REPORTS_DIR
+              Value: /app/data/reports
+            - Name: APP_UPLOADS_DIR
+              Value: /app/data/uploads
+            # DB_POOL_MAX: Receiver plane is stateless (no DATABASE_URL by default — events go via Kafka).
+            # If you add DATABASE_URL for direct DB writes, set DB_POOL_MAX=5 to limit per-worker connections
+            # and avoid exhausting RDS connection limits.
+            # Formula: DB_POOL_MAX × CLUSTER_WORKERS_MAX × task_count ≤ RDS_MAX_CONNECTIONS
+            # For RDS Proxy or PgBouncer deployments, raise to 20 (the proxy/bouncer multiplexes efficiently).
+            - Name: DB_POOL_MAX
+              Value: "5"
+          Secrets:
+            - Name: KAFKA_BROKERS
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/kafka-brokers"
+            - Name: MANAGEMENT_PLANE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/management-plane-url"
+            - Name: DATA_PLANE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/data-plane-url"
+            - Name: AI_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/provider"
+            - Name: AI_API_KEY
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/api-key"
+            - Name: AI_MODEL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/model"
+            - Name: AI_BASE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/base-url"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 45
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+          StopTimeout: 30
+
+  # ── ECS Service ───────────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - NLBListenerAPI
+      - NLBListenerSyslogUDP
+      - NLBListenerSyslogTCP
+      - NLBListenerSyslogTLS
+    Properties:
+      ServiceName: !Sub "ccc-receiver-plane-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref ReceiverECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: receiver-plane
+          ContainerPort: 5000
+          TargetGroupArn: !Ref NLBTargetGroupAPI
+        - ContainerName: receiver-plane
+          ContainerPort: 514
+          TargetGroupArn: !Ref NLBTargetGroupSyslogUDP
+        - ContainerName: receiver-plane
+          ContainerPort: 1514
+          TargetGroupArn: !Ref NLBTargetGroupSyslogTCP
+        - ContainerName: receiver-plane
+          ContainerPort: 6514
+          TargetGroupArn: !Ref NLBTargetGroupSyslogTLS
+      HealthCheckGracePeriodSeconds: 60
+
+Outputs:
+
+  NLBDNSName:
+    Description: Network Load Balancer DNS — point your Syslog/CEF sources here
+    Value: !GetAtt NLB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-NLBDNSName"
+
+  ReceiverSecurityGroupId:
+    Value: !Ref ReceiverECSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ReceiverSecurityGroupId"

@@ -1,0 +1,1086 @@
+##############################################################################
+# Cyber Command Center — ECS Fargate Management Plane
+#
+# Creates:
+#   - ECS Cluster (management plane)
+#   - Application Load Balancer (HTTPS) + WAF v2 WebACL
+#   - ALB access-log S3 bucket
+#   - ECS Service (management-plane)
+#   - IAM Roles (execution + task + backup)
+#   - CloudWatch Log Group
+#   - EFS File System + Access Point (elastic throughput, persistent reports/uploads)
+#   - Security Groups
+#   - SNS Alert Topic + CloudWatch Alarms
+#   - AWS Backup Vault + Plan (EFS daily backup)
+#   - CloudWatch Operational Dashboard
+#
+# Pre-requisites (create before this stack):
+#   - VPC with at least 2 public subnets + 2 private subnets
+#   - ACM certificate for your domain
+#   - Secrets in AWS Secrets Manager (see deploy/ecs/.env.ecs.example)
+#   - ECR repositories with images pushed (run deploy/ecs/scripts/push-images.sh)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/management-plane.yml \
+#     --stack-name ccc-management-plane \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcId=vpc-xxxx \
+#       PublicSubnetIds="subnet-aaa,subnet-bbb" \
+#       PrivateSubnetIds="subnet-ccc,subnet-ddd" \
+#       CertificateArn=arn:aws:acm:... \
+#       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-management-plane:latest \
+#       AlertEmail=ops@example.com
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — Management Plane on ECS Fargate (hardened)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the cluster will be deployed
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the ALB (minimum 2, different AZs)
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks (minimum 2, different AZs)
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for HTTPS on the ALB
+
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI (e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com/ccc-management-plane:latest)
+
+  TaskCpu:
+    Type: Number
+    Default: 1024
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+
+  TaskMemory:
+    Type: Number
+    Default: 2048
+    AllowedValues: [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+
+  MinCount:
+    Type: Number
+    Default: 1
+
+  MaxCount:
+    Type: Number
+    Default: 10
+
+  SecretsPrefix:
+    Type: String
+    Default: "ccc"
+    Description: Prefix used in Secrets Manager paths (e.g. "ccc" → ccc/management/database-url)
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 180, 365]
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email address for CloudWatch Alarm notifications (leave empty to skip subscription)
+
+  RDSIdentifier:
+    Type: String
+    Default: ""
+    Description: RDS DB Identifier for the management-plane RDS instance (used in operational dashboard; leave empty to skip)
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasRDSIdentifier: !Not [!Equals [!Ref RDSIdentifier, ""]]
+
+Resources:
+
+  # ── CloudWatch Log Group ─────────────────────────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-management-plane-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── ECS Cluster ──────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "ccc-management-${EnvironmentName}"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── IAM: ECS Execution Role ──────────────────────────────────────────────────
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-ecs-execution-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/*"
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+
+  # ── IAM: Management Plane Task Role ─────────────────────────────────────────
+  ManagementTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-management-task-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReportsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::ccc-reports-${EnvironmentName}"
+                  - !Sub "arn:aws:s3:::ccc-reports-${EnvironmentName}/*"
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EFSFileSystem.Arn
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ── IAM: AWS Backup Role ─────────────────────────────────────────────────────
+  BackupIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-backup-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+  # ── Security Groups ──────────────────────────────────────────────────────────
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-management-alb-sg-${EnvironmentName}"
+      GroupDescription: Security group for Management Plane ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+          Description: HTTP redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: HTTPS
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIpv6: "::/0"
+          Description: HTTP IPv6 redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: "::/0"
+          Description: HTTPS IPv6
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-management-alb-sg-${EnvironmentName}"
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-management-ecs-sg-${EnvironmentName}"
+      GroupDescription: Security group for Management Plane ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Traffic from ALB only
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-management-ecs-sg-${EnvironmentName}"
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-management-efs-sg-${EnvironmentName}"
+      GroupDescription: Security group for EFS (management data)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+          Description: NFS from ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-management-efs-sg-${EnvironmentName}"
+
+  # ── EFS File System (reports/uploads) — elastic throughput for SOC workloads ──
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "ccc-management-efs-${EnvironmentName}"
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Select [0, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Select [1, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1001"
+        Gid: "1001"
+      RootDirectory:
+        Path: "/management"
+        CreationInfo:
+          OwnerUid: "1001"
+          OwnerGid: "1001"
+          Permissions: "755"
+
+  # ── ALB Access Logs S3 Bucket ─────────────────────────────────────────────────
+  ALBAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ccc-alb-logs-${EnvironmentName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  ALBAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ALBAccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # ALB access log delivery — delivery.logs.amazonaws.com is the recommended
+          # service principal for all ALB regions (replaces legacy ELB service accounts).
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${ALBAccessLogsBucket}/alb-access-logs/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSLogDeliveryAclCheck
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${ALBAccessLogsBucket}"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          # Legacy ELB service account grant — required for regions where ALB was launched
+          # before August 2022 (us-east-1, us-west-2, eu-west-1, ap-south-1, etc.).
+          # Operators deploying to those regions should add their regional ELB account
+          # (see: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html)
+          # via a stack update or separate CFN change once the regional account ID is known.
+          - Sid: ElbLegacyLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${ALBAccessLogsBucket}/alb-access-logs/AWSLogs/${AWS::AccountId}/*"
+
+  # ── WAF v2 WebACL (REGIONAL — protects ALB) ───────────────────────────────────
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "ccc-management-waf-${EnvironmentName}"
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "ccc-waf-common-${EnvironmentName}"
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "ccc-waf-bad-inputs-${EnvironmentName}"
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 30
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "ccc-waf-sqli-${EnvironmentName}"
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 40
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "ccc-waf-ip-rep-${EnvironmentName}"
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "ccc-management-waf-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: ALBListenerHTTPS
+    Properties:
+      ResourceArn: !Ref ALB
+      WebACLArn: !GetAtt WAFWebACL.Arn
+
+  # ── Application Load Balancer ─────────────────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: ALBAccessLogsBucketPolicy
+    Properties:
+      Name: !Sub "ccc-management-alb-${EnvironmentName}"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "120"
+        - Key: routing.http2.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref ALBAccessLogsBucket
+        - Key: access_logs.s3.prefix
+          Value: alb-access-logs
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-management-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "86400"
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── ECS Task Definition ───────────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "ccc-management-plane-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ManagementTaskRole.Arn
+      ContainerDefinitions:
+        - Name: management-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: management
+            - Name: ENABLE_SEEDING
+              Value: "false"
+            - Name: CLUSTER_WORKERS_MAX
+              Value: "2"
+            - Name: APP_REPORTS_DIR
+              Value: /app/data/reports
+            - Name: APP_UPLOADS_DIR
+              Value: /app/data/uploads
+            # PARQUET_DATA_DIR: DuckDB reads local Parquet files written by the
+            # data-lake warm-storage connector. Must be EFS-backed so files
+            # survive task restarts and are visible to all task replicas.
+            - Name: PARQUET_DATA_DIR
+              Value: /app/data/events
+            # DB_POOL_MAX: Limits pg-pool connections per worker process.
+            # Formula: DB_POOL_MAX × CLUSTER_WORKERS_MAX × ECS_task_count ≤ RDS_MAX_CONNECTIONS
+            # Example: 5 × 2 workers × 4 tasks = 40 connections (safe for db.t3.medium ~123 max).
+            # For RDS Proxy or PgBouncer deployments, raise to 20.
+            - Name: DB_POOL_MAX
+              Value: "5"
+            # ── Crash-guard tuning ─────────────────────────────────────────────
+            # WORKER_MAX_RSS_MB: cluster kills/restarts workers exceeding this RSS limit.
+            - Name: WORKER_MAX_RSS_MB
+              Value: "800"
+            # DB_STATEMENT_TIMEOUT_MS: pg aborts statements running longer than this.
+            - Name: DB_STATEMENT_TIMEOUT_MS
+              Value: "30000"
+            # DB_QUERY_TIMEOUT_MS: application-side query timeout (circuit breaker).
+            - Name: DB_QUERY_TIMEOUT_MS
+              Value: "25000"
+            # DB_SSL: enforce SSL on the RDS connection (required in production).
+            - Name: DB_SSL
+              Value: "true"
+            # NODE_OPTIONS: set V8 heap ceiling slightly below TaskMemory so OOM
+            # kills are caught by crash-guard before the OS OOM killer fires.
+            - Name: NODE_OPTIONS
+              Value: "--max-old-space-size=1536"
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/management/database-url"
+            - Name: SESSION_SECRET
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/management/session-secret"
+            - Name: REDIS_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/management/redis-url"
+            - Name: KAFKA_BROKERS
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/kafka-brokers"
+            - Name: AI_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/provider"
+            - Name: AI_API_KEY
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/api-key"
+            - Name: AI_MODEL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/model"
+            - Name: AI_BASE_URL
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/ai/base-url"
+            - Name: SUPERADMIN_DEFAULT_PASSWORD
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/management/superadmin-password"
+            - Name: CLOUD_STORAGE_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/provider"
+            - Name: AWS_S3_BUCKET
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-bucket"
+            - Name: AWS_S3_REGION
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-region"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          MountPoints:
+            - SourceVolume: management-data
+              ContainerPath: /app/data
+              ReadOnly: false
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+          StopTimeout: 30
+      Volumes:
+        - Name: management-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            RootDirectory: /
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              IAM: ENABLED
+
+  # ── ECS Service ───────────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ALBListenerHTTPS
+      - EFSMountTarget1
+      - EFSMountTarget2
+    Properties:
+      ServiceName: !Sub "ccc-management-plane-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: management-plane
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+      HealthCheckGracePeriodSeconds: 90
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── Auto Scaling ─────────────────────────────────────────────────────────────
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinCount
+      MaxCapacity: !Ref MaxCount
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  ScaleOutPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-management-cpu-scale-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 65.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  ScaleOutPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-management-memory-scale-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 75.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # ── SNS Alert Topic ───────────────────────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "ccc-management-alerts-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  AlertTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+  AlarmALB5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-management-alb-5xx-rate-${EnvironmentName}"
+      AlarmDescription: "ALB 5xx error rate exceeds 5% of total requests over 5 minutes"
+      # Metric math: rate = (5xx count / request count) * 100. Uses IF() to guard
+      # against division by zero when there is no traffic (returns 0 in that case).
+      Metrics:
+        - Id: m1
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_ELB_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt ALB.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: m2
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: RequestCount
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt ALB.LoadBalancerFullName
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: errorRate
+          Expression: "IF(m2 > 0, (m1 / m2) * 100, 0)"
+          Label: "5xx Error Rate %"
+          ReturnData: true
+      EvaluationPeriods: 2
+      Threshold: 5.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  AlarmALBTargetResponseTime:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-management-alb-p99-latency-${EnvironmentName}"
+      AlarmDescription: "ALB P99 target response time exceeds 2 seconds"
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ALB.LoadBalancerFullName
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 2.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  AlarmECSCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-management-ecs-cpu-high-${EnvironmentName}"
+      AlarmDescription: "Management plane ECS service CPU utilization exceeds 80%"
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  AlarmECSMemory:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-management-ecs-memory-high-${EnvironmentName}"
+      AlarmDescription: "Management plane ECS service memory utilization exceeds 80%"
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80.0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # ── AWS Backup (EFS daily backup, 35-day retention) ───────────────────────────
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub "ccc-management-backup-vault-${EnvironmentName}"
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "ccc-management-backup-plan-${EnvironmentName}"
+        BackupPlanRule:
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: "cron(0 2 * * ? *)"
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              MoveToColdStorageAfterDays: 14
+              DeleteAfterDays: 35
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub "ccc-management-efs-${EnvironmentName}"
+        IamRoleArn: !GetAtt BackupIAMRole.Arn
+        Resources:
+          - !GetAtt EFSFileSystem.Arn
+
+  # ── CloudWatch Operational Dashboard ─────────────────────────────────────────
+  OperationalDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "CyberCommandCenter-Management-${EnvironmentName}"
+      # DashboardBody uses the two-argument form of !Sub so we can inject the
+      # RDS identifier conditionally (empty string → "no data" in console) without
+      # a FindInMap that could fail at deploy time.
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric",
+                "x": 0, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "ALB — Request Count & 5xx Errors",
+                  "metrics": [
+                    [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${ALB.LoadBalancerFullName}", { "stat": "Sum", "period": 300, "label": "Requests" } ],
+                    [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ALB.LoadBalancerFullName}", { "stat": "Sum", "period": 300, "label": "5xx Errors", "color": "#d62728" } ]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${AWS::Region}"
+                }
+              },
+              {
+                "type": "metric",
+                "x": 12, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "ALB — Target Response Time (P99)",
+                  "metrics": [
+                    [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ALB.LoadBalancerFullName}", { "stat": "p99", "period": 300, "label": "P99 Latency (s)", "color": "#ff7f0e" } ]
+                  ],
+                  "view": "timeSeries",
+                  "region": "${AWS::Region}",
+                  "annotations": {
+                    "horizontal": [ { "value": 2, "label": "SLO 2s", "color": "#d62728" } ]
+                  }
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "ECS — CPU & Memory Utilization",
+                  "metrics": [
+                    [ "AWS/ECS", "CPUUtilization", "ClusterName", "ccc-management-${EnvironmentName}", "ServiceName", "ccc-management-plane-${EnvironmentName}", { "stat": "Average", "period": 300, "label": "CPU %" } ],
+                    [ "AWS/ECS", "MemoryUtilization", "ClusterName", "ccc-management-${EnvironmentName}", "ServiceName", "ccc-management-plane-${EnvironmentName}", { "stat": "Average", "period": 300, "label": "Memory %", "color": "#9467bd" } ]
+                  ],
+                  "view": "timeSeries",
+                  "region": "${AWS::Region}",
+                  "annotations": {
+                    "horizontal": [ { "value": 80, "label": "Alarm threshold", "color": "#d62728" } ]
+                  }
+                }
+              },
+              {
+                "type": "metric",
+                "x": 12, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "EFS — Data Throughput",
+                  "metrics": [
+                    [ "AWS/EFS", "DataReadIOBytes", "FileSystemId", "${EFSFileSystem}", { "stat": "Sum", "period": 300, "label": "Read bytes" } ],
+                    [ "AWS/EFS", "DataWriteIOBytes", "FileSystemId", "${EFSFileSystem}", { "stat": "Sum", "period": 300, "label": "Write bytes", "color": "#2ca02c" } ]
+                  ],
+                  "view": "timeSeries",
+                  "region": "${AWS::Region}"
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0, "y": 12, "width": 24, "height": 6,
+                "properties": {
+                  "title": "RDS — Database Connections",
+                  "metrics": [
+                    [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${RDSId}", { "stat": "Average", "period": 300, "label": "Connections (avg)", "color": "#1f77b4" } ],
+                    [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${RDSId}", { "stat": "Maximum", "period": 300, "label": "Connections (max)", "color": "#d62728" } ]
+                  ],
+                  "view": "timeSeries",
+                  "region": "${AWS::Region}",
+                  "annotations": {
+                    "horizontal": [ { "value": 100, "label": "Connection warning", "color": "#ff7f0e" } ]
+                  }
+                }
+              }
+            ]
+          }
+        - RDSId: !If [HasRDSIdentifier, !Ref RDSIdentifier, "rds-not-configured"]
+
+Outputs:
+
+  ClusterName:
+    Description: ECS Cluster name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterName"
+
+  ServiceName:
+    Description: ECS Service name
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceName"
+
+  ALBDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDNSName"
+
+  ALBArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ALB
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBArn"
+
+  WAFWebACLArn:
+    Description: WAF v2 WebACL ARN protecting the management plane ALB
+    Value: !GetAtt WAFWebACL.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-WAFWebACLArn"
+
+  AlertTopicArn:
+    Description: SNS Topic ARN for management plane operational alerts
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertTopicArn"
+
+  ECSSecurityGroupId:
+    Description: Security group ID for ECS tasks (share with RDS/ElastiCache)
+    Value: !Ref ECSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSSecurityGroupId"
+
+  EFSFileSystemId:
+    Description: EFS File System ID
+    Value: !Ref EFSFileSystem
+    Export:
+      Name: !Sub "${AWS::StackName}-EFSFileSystemId"
+
+  TaskDefinitionArn:
+    Description: Management plane task definition ARN
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskDefinitionArn"
+
+  BackupVaultName:
+    Description: AWS Backup vault protecting EFS persistent data
+    Value: !Ref BackupVault
+    Export:
+      Name: !Sub "${AWS::StackName}-BackupVaultName"
+
+  DashboardName:
+    Description: CloudWatch Operational Dashboard
+    Value: !Ref OperationalDashboard
+    Export:
+      Name: !Sub "${AWS::StackName}-DashboardName"

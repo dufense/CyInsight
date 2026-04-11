@@ -1,0 +1,1154 @@
+##############################################################################
+# Cyber Command Center -- ClickHouse OLAP Cluster (Data Plane)
+#
+# Deploys a 3-node ClickHouse 24.x LTS cluster in the data plane:
+#   - 1 shard, 3 replicas (ClickHouse Keeper embedded for coordination)
+#   - EC2 r6i.xlarge per node (4 vCPU, 32 GB RAM, gp3 EBS hot tier)
+#   - S3 tiered storage policy: hot (EBS) -> warm (S3 Standard-IA) -> cold (Glacier IR)
+#   - Network Load Balancer port 9000 (native ClickHouse protocol)
+#   - Application Load Balancer port 8123 (HTTP query interface)
+#   - IAM instance profile: SSM, S3 (iceberg + raw), CloudWatch, MSK describe
+#   - CloudWatch alarms: CPU, memory, replication lag, query latency
+#
+# Plane separation:
+#   - Management plane (Aurora): OLTP - tenants, users, config, incidents metadata
+#   - Data plane (ClickHouse):   OLAP - fast SQL aggregations over security events
+#   - Data lake (S3/Iceberg):    Long-term cold storage, ClickHouse tiers cold data there
+#
+# ClickHouse reads Iceberg tables natively via icebergS3() table function.
+# Data-plane ECS tasks push events to ClickHouse via HTTP API (no Kafka engine
+# needed because ECS tasks handle MSK IAM auth and forward to CH HTTP endpoint).
+#
+# Cluster coordination (IP discovery):
+#   Each node on startup registers its private IP in SSM Parameter Store
+#   (/ccc/clickhouse/{env}/node/{index}/ip) then waits for all 3 peers to
+#   register before writing ClickHouse Keeper + cluster XML config.
+#
+# ── Capacity & Sizing Guide (100–500 GB/day event throughput) ─────────────────
+# InstanceType:   r6i.2xlarge — 8 vCPU / 64 GiB; handles columnar scans at 500 GB/day
+# HotDiskSizeGiB: 500 GiB gp3 SSD × 3 nodes = 1.5 TiB raw hot storage
+# Iops:           12000 per volume (3× the 4000 baseline; needed for parallel inserts)
+# Throughput:     700 MB/s (sustained write + scan; ClickHouse benefits from seq I/O)
+# Previous sizing (r6i.xlarge / 200 GiB / 6000 IOPS / 500 MB/s) was for ≤50 GB/day.
+#
+# Depends on:
+#   01-vpc.yml     (VpcId, private subnets, VPC CIDR, security groups)
+#   03-msk-kafka.yml (MSKSecurityGroupId for ingress rule)
+#   05-data-lake.yml (S3 bucket names via predictable naming pattern)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/08-clickhouse-cluster.yml \
+#     --stack-name ccc-clickhouse \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-vpc \
+#       MskStackName=ccc-msk-kafka \
+#       EnvironmentName=production
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- ClickHouse 3-node OLAP Cluster (Data Plane)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  VpcStackName:
+    Type: String
+    Default: ccc-vpc
+
+  MskStackName:
+    Type: String
+    Default: ccc-msk-kafka
+
+  DataLakeStackName:
+    Type: String
+    Default: ccc-data-lake
+
+  ClickHouseVersion:
+    Type: String
+    Default: "24.8"
+    Description: "ClickHouse LTS version (24.8 = 24.8.x LTS)"
+
+  InstanceType:
+    Type: String
+    Default: r6i.2xlarge
+    AllowedValues:
+      - r6i.large
+      - r6i.xlarge
+      - r6i.2xlarge
+      - r6i.4xlarge
+      - r6i.8xlarge
+      - r6id.xlarge
+      - r6id.2xlarge
+    Description: "r6i.2xlarge (8 vCPU, 64 GB) sized for 100-500 GB/day OLAP analytics; r6id adds NVMe SSD"
+
+  ClusterSize:
+    Type: Number
+    Default: 3
+    AllowedValues: [3]
+    Description: "Fixed at 3 for Keeper quorum (must be odd, >= 3)"
+
+  HotDiskSizeGiB:
+    Type: Number
+    Default: 500
+    Description: "gp3 EBS volume size per node for ClickHouse hot data (GiB); 500 GiB per node = 1.5 TB total"
+
+  HotDiskIops:
+    Type: Number
+    Default: 12000
+    Description: "Provisioned IOPS for hot gp3 EBS volume (12000 IOPS for 100-500 GB/day writes)"
+
+  HotDiskThroughputMBps:
+    Type: Number
+    Default: 700
+    Description: "Provisioned throughput (MB/s) for hot gp3 EBS volume (700 MB/s for high-throughput ingest)"
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90]
+
+  ClickHouseAdminPasswordParam:
+    Type: String
+    Default: "/ccc/clickhouse/admin-password"
+    Description: "SSM SecureString parameter path holding the ClickHouse admin password"
+
+  KeyName:
+    Type: String
+    Default: ""
+    Description: "Optional EC2 key pair for SSH access (leave empty for SSM-only access)"
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+
+  # ── SSM Parameters (cluster discovery registry) ──────────────────────────────
+  # Each node writes its private IP here on boot. Peers poll until all 3 are set.
+  SSMNode1Ip:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/ccc/clickhouse/${EnvironmentName}/node/1/ip"
+      Type: String
+      Value: "pending"
+      Description: "ClickHouse node 1 private IP (AZ1) - set by EC2 user-data on boot"
+      Tags:
+        Project: CyberCommandCenter
+        Plane: data
+
+  SSMNode2Ip:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/ccc/clickhouse/${EnvironmentName}/node/2/ip"
+      Type: String
+      Value: "pending"
+      Description: "ClickHouse node 2 private IP (AZ2) - set by EC2 user-data on boot"
+      Tags:
+        Project: CyberCommandCenter
+        Plane: data
+
+  SSMNode3Ip:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/ccc/clickhouse/${EnvironmentName}/node/3/ip"
+      Type: String
+      Value: "pending"
+      Description: "ClickHouse node 3 private IP (AZ3) - set by EC2 user-data on boot"
+      Tags:
+        Project: CyberCommandCenter
+        Plane: data
+
+  # ── IAM Role + Instance Profile ──────────────────────────────────────────────
+  ClickHouseInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-clickhouse-instance-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3DataLakeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ClickHouseS3TieredStorage
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource:
+                  # Processed Iceberg bucket (ClickHouse tiers warm/cold data here)
+                  - !Sub "arn:aws:s3:::ccc-iceberg-${EnvironmentName}-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::ccc-iceberg-${EnvironmentName}-${AWS::AccountId}/*"
+                  # Raw events bucket (ClickHouse can read raw Parquet for backfill)
+                  - !Sub "arn:aws:s3:::ccc-raw-events-${EnvironmentName}-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::ccc-raw-events-${EnvironmentName}-${AWS::AccountId}/*"
+
+        - PolicyName: SSMClusterDiscovery
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadWriteClusterParams
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ccc/clickhouse/${EnvironmentName}/*"
+              - Sid: GetAdminPassword
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ClickHouseAdminPasswordParam}"
+
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: "*"
+
+        - PolicyName: MSKDescribe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka:DescribeCluster
+                  - kafka:GetBootstrapBrokers
+                Resource:
+                  - Fn::ImportValue: !Sub "${MskStackName}-ClusterArn"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: Component
+          Value: clickhouse
+
+  ClickHouseInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "ccc-clickhouse-profile-${EnvironmentName}"
+      Roles:
+        - !Ref ClickHouseInstanceRole
+
+  # ── Security Group ────────────────────────────────────────────────────────────
+  ClickHouseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-clickhouse-sg-${EnvironmentName}"
+      GroupDescription: ClickHouse cluster - HTTP 8123, native 9000, interserver 9009, keeper 9181
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        # HTTP interface (Athena/Spark/data-plane ECS → ClickHouse queries)
+        - IpProtocol: tcp
+          FromPort: 8123
+          ToPort: 8123
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+          Description: ClickHouse HTTP API from ECS tasks
+        # Native protocol port (ClickHouse client, JDBC, ClickHouse-go driver)
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+          Description: ClickHouse native protocol from ECS tasks
+        # NLB health check (NLB uses VPC CIDR for health probes)
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStackName}-VpcCidr"
+          Description: NLB health check from VPC
+        - IpProtocol: tcp
+          FromPort: 8123
+          ToPort: 8123
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStackName}-VpcCidr"
+          Description: ALB health check from VPC
+        # Inter-server replication (node-to-node)
+        - IpProtocol: tcp
+          FromPort: 9009
+          ToPort: 9009
+          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+          Description: ClickHouse interserver replication
+        # ClickHouse Keeper (Raft quorum - node-to-node)
+        - IpProtocol: tcp
+          FromPort: 9181
+          ToPort: 9181
+          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+          Description: ClickHouse Keeper client port
+        - IpProtocol: tcp
+          FromPort: 9234
+          ToPort: 9234
+          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+          Description: ClickHouse Keeper raft port
+        # SSH (via SSM Session Manager preferred; this is optional backup)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStackName}-VpcCidr"
+          Description: SSH from VPC (use SSM Session Manager instead)
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound (S3 VPC endpoint, SSM, MSK)
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-sg-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: Component
+          Value: clickhouse
+
+  # Allow ClickHouse nodes to connect to MSK brokers
+  MSKIngressFromClickHouse:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${VpcStackName}-MSKSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 9096
+      ToPort: 9096
+      SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+      Description: MSK IAM auth from ClickHouse cluster
+
+  # ── CloudWatch Log Group ──────────────────────────────────────────────────────
+  ClickHouseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ec2/ccc-clickhouse-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── Launch Template ───────────────────────────────────────────────────────────
+  ClickHouseLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "ccc-clickhouse-lt-${EnvironmentName}"
+      LaunchTemplateData:
+        ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt ClickHouseInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref ClickHouseSecurityGroup
+        KeyName: !If [HasKeyPair, !Ref KeyName, !Ref "AWS::NoValue"]
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+          # ClickHouse hot data disk
+          - DeviceName: /dev/xvdb
+            Ebs:
+              VolumeSize: !Ref HotDiskSizeGiB
+              VolumeType: gp3
+              Iops: !Ref HotDiskIops
+              Throughput: !Ref HotDiskThroughputMBps
+              DeleteOnTermination: false
+              Encrypted: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpEndpoint: enabled
+        Monitoring:
+          Enabled: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "ccc-clickhouse-${EnvironmentName}"
+              - Key: Project
+                Value: CyberCommandCenter
+              - Key: Plane
+                Value: data
+              - Key: Component
+                Value: clickhouse
+              - Key: Environment
+                Value: !Ref EnvironmentName
+          - ResourceType: volume
+            Tags:
+              - Key: Project
+                Value: CyberCommandCenter
+              - Key: Plane
+                Value: data
+        UserData:
+          Fn::Base64: !Sub |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            export HOME=/root
+
+            # ── Logging ──────────────────────────────────────────────────────────
+            exec > >(tee /var/log/ccc-clickhouse-init.log | logger -t ccc-clickhouse) 2>&1
+            log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+            log "=== CCC ClickHouse ${ClickHouseVersion} bootstrap started ==="
+            ENVIRONMENT="${EnvironmentName}"
+            AWS_REGION="${AWS::Region}"
+            AWS_ACCOUNT="${AWS::AccountId}"
+            SSM_PREFIX="/ccc/clickhouse/${EnvironmentName}"
+            CH_VERSION="${ClickHouseVersion}"
+            CH_DATA_PATH="/data/clickhouse"
+            CH_S3_BUCKET="ccc-iceberg-${EnvironmentName}-${AWS::AccountId}"
+            # ── Instance metadata ─────────────────────────────────────────────────
+            IMDSv2_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+              -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDSv2_TOKEN" \
+              http://169.254.169.254/latest/meta-data/local-ipv4)
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDSv2_TOKEN" \
+              http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $IMDSv2_TOKEN" \
+              http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            log "Instance: $INSTANCE_ID | AZ: $AZ | IP: $PRIVATE_IP"
+
+            # ── Determine node index from ASG logical index tag ───────────────────
+            # ASG node index is passed via instance tag CH_NODE_INDEX (1, 2, or 3)
+            NODE_INDEX=$(aws ec2 describe-instances --region "$AWS_REGION" \
+              --instance-ids "$INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].Tags[?Key=='CHNodeIndex'].Value" \
+              --output text 2>/dev/null || echo "1")
+            log "Node index: $NODE_INDEX"
+
+            # Register this node's IP in SSM
+            aws ssm put-parameter --region "$AWS_REGION" \
+              --name "$SSM_PREFIX/node/$NODE_INDEX/ip" \
+              --value "$PRIVATE_IP" --type String --overwrite
+            log "Registered IP $PRIVATE_IP as node $NODE_INDEX in SSM"
+
+            # ── Install system dependencies ───────────────────────────────────────
+            dnf update -y -q
+            dnf install -y -q awscli amazon-cloudwatch-agent xfsprogs
+
+            # ── Prepare hot data disk (/dev/xvdb) ────────────────────────────────
+            if ! blkid /dev/xvdb | grep -q xfs; then
+              log "Formatting /dev/xvdb as xfs..."
+              mkfs.xfs -L clickhouse_data /dev/xvdb
+            fi
+            mkdir -p "$CH_DATA_PATH"
+            if ! grep -q "$CH_DATA_PATH" /etc/fstab; then
+              echo "LABEL=clickhouse_data  $CH_DATA_PATH  xfs  defaults,noatime  0  2" >> /etc/fstab
+            fi
+            mount -a
+            log "Hot data disk mounted at $CH_DATA_PATH"
+
+            # ── Install ClickHouse ────────────────────────────────────────────────
+            log "Installing ClickHouse ${ClickHouseVersion}..."
+            MAJOR=$(echo "$CH_VERSION" | cut -d. -f1)
+            MINOR=$(echo "$CH_VERSION" | cut -d. -f2)
+            cat > /etc/yum.repos.d/clickhouse.repo << EOF
+            [clickhouse-stable]
+            name=ClickHouse Stable Repository
+            baseurl=https://packages.clickhouse.com/rpm/stable/
+            enabled=1
+            gpgcheck=1
+            gpgkey=https://packages.clickhouse.com/rpm/stable/repodata/repomd.xml.key
+            EOF
+            dnf install -y -q \
+              clickhouse-server-${ClickHouseVersion}.* \
+              clickhouse-client-${ClickHouseVersion}.* 2>/dev/null || \
+            dnf install -y -q clickhouse-server clickhouse-client
+            log "ClickHouse installed"
+
+            # ── Wait for all 3 peers to register in SSM ───────────────────────────
+            log "Waiting for all 3 cluster nodes to register..."
+            for attempt in $(seq 1 60); do
+              NODE1_IP=$(aws ssm get-parameter --region "$AWS_REGION" \
+                --name "$SSM_PREFIX/node/1/ip" --query "Parameter.Value" --output text 2>/dev/null || echo "pending")
+              NODE2_IP=$(aws ssm get-parameter --region "$AWS_REGION" \
+                --name "$SSM_PREFIX/node/2/ip" --query "Parameter.Value" --output text 2>/dev/null || echo "pending")
+              NODE3_IP=$(aws ssm get-parameter --region "$AWS_REGION" \
+                --name "$SSM_PREFIX/node/3/ip" --query "Parameter.Value" --output text 2>/dev/null || echo "pending")
+              if [[ "$NODE1_IP" != "pending" && "$NODE2_IP" != "pending" && "$NODE3_IP" != "pending" ]]; then
+                log "All nodes registered: 1=$NODE1_IP 2=$NODE2_IP 3=$NODE3_IP"
+                break
+              fi
+              log "Attempt $attempt/60: waiting for peers (1=$NODE1_IP 2=$NODE2_IP 3=$NODE3_IP)..."
+              sleep 10
+            done
+
+            # ── Retrieve admin password from SSM ──────────────────────────────────
+            CH_ADMIN_PASS=$(aws ssm get-parameter --region "$AWS_REGION" \
+              --name "${ClickHouseAdminPasswordParam}" --with-decryption \
+              --query "Parameter.Value" --output text 2>/dev/null || echo "CCC@ClickHouse!Change_Me")
+
+            # ── ClickHouse Keeper config (embedded Raft coordinator) ───────────────
+            mkdir -p /etc/clickhouse-server/config.d
+            cat > /etc/clickhouse-server/config.d/keeper.xml << EOF
+            <clickhouse>
+              <keeper_server>
+                <tcp_port>9181</tcp_port>
+                <server_id>$NODE_INDEX</server_id>
+                <log_storage_path>$CH_DATA_PATH/keeper/log</log_storage_path>
+                <snapshot_storage_path>$CH_DATA_PATH/keeper/snapshots</snapshot_storage_path>
+                <coordination_settings>
+                  <operation_timeout_ms>10000</operation_timeout_ms>
+                  <session_timeout_ms>30000</session_timeout_ms>
+                  <raft_logs_level>information</raft_logs_level>
+                  <rotate_log_storage_interval>10000</rotate_log_storage_interval>
+                </coordination_settings>
+                <raft_configuration>
+                  <server>
+                    <id>1</id>
+                    <hostname>$NODE1_IP</hostname>
+                    <port>9234</port>
+                  </server>
+                  <server>
+                    <id>2</id>
+                    <hostname>$NODE2_IP</hostname>
+                    <port>9234</port>
+                  </server>
+                  <server>
+                    <id>3</id>
+                    <hostname>$NODE3_IP</hostname>
+                    <port>9234</port>
+                  </server>
+                </raft_configuration>
+              </keeper_server>
+              <zookeeper>
+                <node>
+                  <host>$NODE1_IP</host>
+                  <port>9181</port>
+                </node>
+                <node>
+                  <host>$NODE2_IP</host>
+                  <port>9181</port>
+                </node>
+                <node>
+                  <host>$NODE3_IP</host>
+                  <port>9181</port>
+                </node>
+              </zookeeper>
+            </clickhouse>
+            EOF
+
+            # ── Cluster XML (1 shard, 3 replicas) ────────────────────────────────
+            cat > /etc/clickhouse-server/config.d/cluster.xml << EOF
+            <clickhouse>
+              <remote_servers>
+                <ccc_cluster>
+                  <shard>
+                    <replica>
+                      <host>$NODE1_IP</host>
+                      <port>9000</port>
+                    </replica>
+                    <replica>
+                      <host>$NODE2_IP</host>
+                      <port>9000</port>
+                    </replica>
+                    <replica>
+                      <host>$NODE3_IP</host>
+                      <port>9000</port>
+                    </replica>
+                  </shard>
+                </ccc_cluster>
+              </remote_servers>
+              <macros>
+                <cluster>ccc_cluster</cluster>
+                <shard>1</shard>
+                <replica>ccc-node-$NODE_INDEX</replica>
+              </macros>
+              <listen_host>0.0.0.0</listen_host>
+              <interserver_http_port>9009</interserver_http_port>
+              <interserver_http_host>$PRIVATE_IP</interserver_http_host>
+            </clickhouse>
+            EOF
+
+            # ── S3 Tiered Storage configuration ──────────────────────────────────
+            cat > /etc/clickhouse-server/config.d/storage.xml << EOF
+            <clickhouse>
+              <storage_configuration>
+                <disks>
+                  <default>
+                    <type>local</type>
+                    <path>$CH_DATA_PATH/data/</path>
+                    <keep_free_space_bytes>10737418240</keep_free_space_bytes>
+                  </default>
+                  <s3_warm>
+                    <type>s3</type>
+                    <endpoint>https://s3.$AWS_REGION.amazonaws.com/$CH_S3_BUCKET/clickhouse/warm/</endpoint>
+                    <region>$AWS_REGION</region>
+                    <use_environment_credentials>true</use_environment_credentials>
+                    <server_side_encryption_customer_key_md5></server_side_encryption_customer_key_md5>
+                    <metadata_path>$CH_DATA_PATH/metadata/s3_warm/</metadata_path>
+                    <cache_path>$CH_DATA_PATH/caches/s3_warm/</cache_path>
+                    <cache_enabled>true</cache_enabled>
+                    <cache_max_size>5368709120</cache_max_size>
+                  </s3_warm>
+                  <s3_cold>
+                    <type>s3</type>
+                    <endpoint>https://s3.$AWS_REGION.amazonaws.com/$CH_S3_BUCKET/clickhouse/cold/</endpoint>
+                    <region>$AWS_REGION</region>
+                    <use_environment_credentials>true</use_environment_credentials>
+                    <metadata_path>$CH_DATA_PATH/metadata/s3_cold/</metadata_path>
+                    <cache_enabled>false</cache_enabled>
+                  </s3_cold>
+                </disks>
+                <policies>
+                  <ccc_tiered>
+                    <volumes>
+                      <hot>
+                        <disk>default</disk>
+                        <max_data_part_size_bytes>10737418240</max_data_part_size_bytes>
+                      </hot>
+                      <warm>
+                        <disk>s3_warm</disk>
+                        <move_factor>0.2</move_factor>
+                        <max_data_part_size_bytes>107374182400</max_data_part_size_bytes>
+                      </warm>
+                      <cold>
+                        <disk>s3_cold</disk>
+                        <move_factor>0.1</move_factor>
+                        <prefer_not_to_merge>true</prefer_not_to_merge>
+                      </cold>
+                    </volumes>
+                    <move_factor>0.2</move_factor>
+                  </ccc_tiered>
+                </policies>
+              </storage_configuration>
+            </clickhouse>
+            EOF
+
+            # ── Data paths, logging, network ─────────────────────────────────────
+            mkdir -p \
+              "$CH_DATA_PATH/data" \
+              "$CH_DATA_PATH/tmp" \
+              "$CH_DATA_PATH/logs" \
+              "$CH_DATA_PATH/keeper/log" \
+              "$CH_DATA_PATH/keeper/snapshots" \
+              "$CH_DATA_PATH/metadata/s3_warm" \
+              "$CH_DATA_PATH/metadata/s3_cold" \
+              "$CH_DATA_PATH/caches/s3_warm"
+            chown -R clickhouse:clickhouse "$CH_DATA_PATH"
+
+            cat > /etc/clickhouse-server/config.d/paths.xml << EOF
+            <clickhouse>
+              <path>$CH_DATA_PATH/data/</path>
+              <tmp_path>$CH_DATA_PATH/tmp/</tmp_path>
+              <user_files_path>$CH_DATA_PATH/user_files/</user_files_path>
+              <log_queries>1</log_queries>
+              <log_queries_min_type>QUERY_FINISH</log_queries_min_type>
+              <logger>
+                <level>information</level>
+                <log>$CH_DATA_PATH/logs/clickhouse-server.log</log>
+                <errorlog>$CH_DATA_PATH/logs/clickhouse-server.err.log</errorlog>
+                <size>500M</size>
+                <count>5</count>
+              </logger>
+            </clickhouse>
+            EOF
+
+            # ── Users config (admin password) ─────────────────────────────────────
+            CH_PASS_SHA=$(echo -n "$CH_ADMIN_PASS" | sha256sum | awk '{print $1}')
+            mkdir -p /etc/clickhouse-server/users.d
+            cat > /etc/clickhouse-server/users.d/admin.xml << EOF
+            <clickhouse>
+              <users>
+                <default>
+                  <password_sha256_hex>$CH_PASS_SHA</password_sha256_hex>
+                  <networks>
+                    <ip>::/0</ip>
+                  </networks>
+                  <profile>default</profile>
+                  <quota>default</quota>
+                  <access_management>1</access_management>
+                </default>
+              </users>
+            </clickhouse>
+            EOF
+
+            # ── Start ClickHouse ──────────────────────────────────────────────────
+            systemctl enable clickhouse-server
+            systemctl start clickhouse-server
+            log "ClickHouse server started"
+
+            # ── Wait for ClickHouse to be ready ───────────────────────────────────
+            for attempt in $(seq 1 30); do
+              if clickhouse-client --host 127.0.0.1 --password "$CH_ADMIN_PASS" \
+                  --query "SELECT 1" &>/dev/null; then
+                log "ClickHouse is ready (attempt $attempt)"
+                break
+              fi
+              log "Waiting for ClickHouse to start (attempt $attempt/30)..."
+              sleep 5
+            done
+
+            # ── Create databases and tables ───────────────────────────────────────
+            log "Creating CCC security_events tables..."
+            clickhouse-client --host 127.0.0.1 --password "$CH_ADMIN_PASS" << 'CHSQL'
+
+            -- Database
+            CREATE DATABASE IF NOT EXISTS ccc ON CLUSTER ccc_cluster;
+
+            -- ReplicatedMergeTree for security events (per-replica table)
+            CREATE TABLE IF NOT EXISTS ccc.security_events ON CLUSTER ccc_cluster
+            (
+                event_id        UUID         DEFAULT generateUUIDv4(),
+                tenant_id       Int32,
+                event_date      Date         MATERIALIZED toDate(ingested_at),
+                source_type     LowCardinality(String),
+                severity        LowCardinality(String),
+                event_type      String,
+                host            String,
+                src_ip          IPv4,
+                dst_ip          IPv4,
+                user_name       String,
+                process_name    String,
+                mitre_tactic    LowCardinality(String),
+                mitre_technique LowCardinality(String),
+                kill_chain_phase LowCardinality(String),
+                confidence_score UInt8,
+                data_region     LowCardinality(String),
+                raw_event       String        CODEC(ZSTD(3)),
+                normalized_event String       CODEC(ZSTD(3)),
+                iocs            String        CODEC(ZSTD(1)),
+                ingested_at     DateTime64(3) DEFAULT now64(3)
+            )
+            ENGINE = ReplicatedMergeTree(
+                '/clickhouse/tables/ccc_cluster/ccc/security_events/{shard}',
+                '{replica}'
+            )
+            PARTITION BY (tenant_id, toYYYYMM(event_date))
+            ORDER BY (tenant_id, event_date, severity, source_type)
+            TTL
+                ingested_at + INTERVAL 30 DAY TO VOLUME 'warm',
+                ingested_at + INTERVAL 90 DAY TO VOLUME 'cold'
+            SETTINGS
+                storage_policy = 'ccc_tiered',
+                index_granularity = 8192;
+
+            -- Distributed table (query all replicas as one)
+            CREATE TABLE IF NOT EXISTS ccc.security_events_distributed ON CLUSTER ccc_cluster
+            AS ccc.security_events
+            ENGINE = Distributed(ccc_cluster, ccc, security_events, rand());
+
+            -- Materialised view: hourly event counts per tenant (pre-aggregated dashboard)
+            CREATE MATERIALIZED VIEW IF NOT EXISTS ccc.mv_hourly_event_counts ON CLUSTER ccc_cluster
+            ENGINE = ReplicatedAggregatingMergeTree(
+                '/clickhouse/tables/ccc_cluster/ccc/mv_hourly_event_counts/{shard}',
+                '{replica}'
+            )
+            PARTITION BY toYYYYMM(hour)
+            ORDER BY (tenant_id, hour, severity, source_type)
+            AS SELECT
+                tenant_id,
+                toStartOfHour(ingested_at) AS hour,
+                severity,
+                source_type,
+                countState() AS cnt,
+                avgState(confidence_score) AS avg_confidence
+            FROM ccc.security_events
+            GROUP BY tenant_id, hour, severity, source_type;
+
+            SELECT 'CCC ClickHouse tables created successfully' AS status;
+            CHSQL
+
+            log "=== CCC ClickHouse bootstrap complete ==="
+
+  # ── Auto Scaling Groups (one per AZ for HA) ───────────────────────────────────
+  # Node 1 — AZ1 (PrivateSubnet1)
+  ASGNode1:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: SSMNode1Ip
+    Properties:
+      AutoScalingGroupName: !Sub "ccc-clickhouse-node1-${EnvironmentName}"
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ClickHouseLaunchTemplate
+        Version: !GetAtt ClickHouseLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 600
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-node1-${EnvironmentName}"
+          PropagateAtLaunch: true
+        - Key: CHNodeIndex
+          Value: "1"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: CyberCommandCenter
+          PropagateAtLaunch: true
+        - Key: Plane
+          Value: data
+          PropagateAtLaunch: true
+        - Key: Component
+          Value: clickhouse
+          PropagateAtLaunch: true
+
+  # Node 2 — AZ2 (PrivateSubnet2)
+  ASGNode2:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: SSMNode2Ip
+    Properties:
+      AutoScalingGroupName: !Sub "ccc-clickhouse-node2-${EnvironmentName}"
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ClickHouseLaunchTemplate
+        Version: !GetAtt ClickHouseLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 600
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-node2-${EnvironmentName}"
+          PropagateAtLaunch: true
+        - Key: CHNodeIndex
+          Value: "2"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: CyberCommandCenter
+          PropagateAtLaunch: true
+        - Key: Plane
+          Value: data
+          PropagateAtLaunch: true
+        - Key: Component
+          Value: clickhouse
+          PropagateAtLaunch: true
+
+  # Node 3 — AZ3 (PrivateSubnet3)
+  ASGNode3:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: SSMNode3Ip
+    Properties:
+      AutoScalingGroupName: !Sub "ccc-clickhouse-node3-${EnvironmentName}"
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ClickHouseLaunchTemplate
+        Version: !GetAtt ClickHouseLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet3Id"
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 600
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-node3-${EnvironmentName}"
+          PropagateAtLaunch: true
+        - Key: CHNodeIndex
+          Value: "3"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: CyberCommandCenter
+          PropagateAtLaunch: true
+        - Key: Plane
+          Value: data
+          PropagateAtLaunch: true
+        - Key: Component
+          Value: clickhouse
+          PropagateAtLaunch: true
+
+  # ── Network Load Balancer — port 9000 (native protocol) ──────────────────────
+  ClickHouseNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-ch-nlb-${EnvironmentName}"
+      Type: network
+      Scheme: internal
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet3Id"
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: Component
+          Value: clickhouse
+
+  NLBTargetGroupNative:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-ch-native-tg-${EnvironmentName}"
+      Protocol: TCP
+      Port: 9000
+      TargetType: instance
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8123"
+      HealthCheckPath: /ping
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  NLBListener9000:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ClickHouseNLB
+      Protocol: TCP
+      Port: 9000
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroupNative
+
+  # ── Application Load Balancer — port 8123 (HTTP interface) ───────────────────
+  ClickHouseALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-ch-alb-${EnvironmentName}"
+      Type: application
+      Scheme: internal
+      SecurityGroups:
+        - !Ref ClickHouseSecurityGroup
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet3Id"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: data
+        - Key: Component
+          Value: clickhouse
+
+  ALBTargetGroupHTTP:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-ch-http-tg-${EnvironmentName}"
+      Protocol: HTTP
+      Port: 8123
+      TargetType: instance
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      HealthCheckPath: /ping
+      HealthCheckPort: "8123"
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+
+  ALBListener8123:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ClickHouseALB
+      Protocol: HTTP
+      Port: 8123
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupHTTP
+
+  # ── ASG Attachment to Target Groups ──────────────────────────────────────────
+  ASG1AttachNLB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode1
+      TrafficSource:
+        Identifier: !Ref NLBTargetGroupNative
+        Type: elbv2
+
+  ASG2AttachNLB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode2
+      TrafficSource:
+        Identifier: !Ref NLBTargetGroupNative
+        Type: elbv2
+
+  ASG3AttachNLB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode3
+      TrafficSource:
+        Identifier: !Ref NLBTargetGroupNative
+        Type: elbv2
+
+  ASG1AttachALB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode1
+      TrafficSource:
+        Identifier: !Ref ALBTargetGroupHTTP
+        Type: elbv2
+
+  ASG2AttachALB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode2
+      TrafficSource:
+        Identifier: !Ref ALBTargetGroupHTTP
+        Type: elbv2
+
+  ASG3AttachALB:
+    Type: AWS::AutoScaling::TrafficSourceAttachment
+    Properties:
+      AutoScalingGroupName: !Ref ASGNode3
+      TrafficSource:
+        Identifier: !Ref ALBTargetGroupHTTP
+        Type: elbv2
+
+  # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+  AlarmCPUHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-${EnvironmentName}-cpu-high"
+      AlarmDescription: "ClickHouse node CPU utilization above 80% - scale or optimise queries"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGNode1
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+
+  AlarmMemoryHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-${EnvironmentName}-memory-high"
+      AlarmDescription: "ClickHouse node memory utilization above 85%"
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGNode1
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmNLBUnhealthyHosts:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-${EnvironmentName}-nlb-unhealthy"
+      AlarmDescription: "ClickHouse NLB has unhealthy target(s) - cluster node down"
+      Namespace: AWS/NetworkELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ClickHouseNLB.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt NLBTargetGroupNative.TargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmALBUnhealthyHosts:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-${EnvironmentName}-alb-unhealthy"
+      AlarmDescription: "ClickHouse ALB has unhealthy target(s) - HTTP interface degraded"
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ClickHouseALB.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroupHTTP.TargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmALBLatencyHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-${EnvironmentName}-query-latency-high"
+      AlarmDescription: "ClickHouse HTTP query latency above 30s - check slow queries"
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ClickHouseALB.LoadBalancerFullName
+      ExtendedStatistic: p99
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 30
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  ClickHouseNLBDNS:
+    Description: NLB DNS for ClickHouse native protocol (port 9000)
+    Value: !GetAtt ClickHouseNLB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-NLBDNSName"
+
+  ClickHouseALBDNS:
+    Description: ALB DNS for ClickHouse HTTP interface (port 8123)
+    Value: !GetAtt ClickHouseALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDNSName"
+
+  ClickHouseHTTPUrl:
+    Description: Full HTTP URL for ClickHouse query API
+    Value: !Sub "http://${ClickHouseALB.DNSName}:8123"
+    Export:
+      Name: !Sub "${AWS::StackName}-HTTPUrl"
+
+  ClickHouseNativeUrl:
+    Description: NLB DNS for native ClickHouse driver connections (port 9000)
+    Value: !Sub "${ClickHouseNLB.DNSName}:9000"
+    Export:
+      Name: !Sub "${AWS::StackName}-NativeUrl"
+
+  ClickHouseInstanceRoleArn:
+    Description: IAM role ARN for ClickHouse EC2 instances
+    Value: !GetAtt ClickHouseInstanceRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceRoleArn"
+
+  ClickHouseSecurityGroupId:
+    Description: Security group ID for ClickHouse cluster nodes
+    Value: !Ref ClickHouseSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+
+  ClickHouseDatabase:
+    Description: Default ClickHouse database name for CCC
+    Value: ccc
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseName"

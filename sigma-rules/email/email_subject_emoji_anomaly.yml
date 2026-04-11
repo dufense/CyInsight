@@ -1,0 +1,62 @@
+title: Email Subject Line Emoji Anomaly - Social Engineering Tactic
+id: sigma-email-checkpoint-010
+status: stable
+description: Detects emails with unusual emoji patterns in the subject line, a known social engineering tactic used by threat actors to bypass spam filters and attract user attention in phishing campaigns.
+author: Cyber Command Center - Email Intelligence
+date: 2026-03-20
+logsource:
+  category: email
+  product: checkpoint_hec
+detection:
+  selection:
+    eventType: email
+  emoji_patterns:
+    - "\U0001F6A8"
+    - "\u26A0"
+    - "\U0001F4A5"
+    - "\U0001F525"
+    - "\U0001F4B0"
+    - "\U0001F4E7"
+    - "\u2705"
+    - "\u274C"
+    - "\u2757"
+    - "\u2753"
+    - "\U0001F44B"
+    - "\U0001F3C6"
+    - emoji subject
+    - unicode subject
+    - symbol subject
+    - special character subject
+  keywords:
+    - "🚨"
+    - "⚠️"
+    - "💥"
+    - "🔥"
+    - "💰"
+    - "📧"
+    - "✅"
+    - "❌"
+    - "❗"
+    - "❓"
+    - "👋"
+    - "🏆"
+    - "URGENT\u26A0"
+    - "ALERT\U0001F6A8"
+    - "WIN\U0001F3C6"
+  condition: selection and (emoji_patterns or keywords)
+falsepositives:
+  - Legitimate marketing emails from known vendors using emoji subject lines
+  - Internal team communications with emoji
+level: low
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - attack.reconnaissance
+  - attack.t1598.003
+  - checkpoint.hec
+  - email.social-engineering
+  - email.emoji-lure
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

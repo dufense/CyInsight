@@ -1,0 +1,42 @@
+title: Multi-Recipient Bulk Spam Campaign
+id: sigma-email-checkpoint-009
+status: stable
+description: Detects bulk spam events targeting multiple recipients from the same sender in a single event, indicative of mass phishing or spam campaigns.
+author: Cyber Command Center - Email Intelligence
+date: 2026-03-20
+logsource:
+  category: email
+  product: checkpoint_hec
+detection:
+  selection:
+    eventType: email
+  spam_type:
+    - spam
+    - bulk_spam
+    - mass_spam
+  keywords:
+    - bulk
+    - mass mail
+    - mass email
+    - broadcast
+    - newsletter
+    - campaign
+    - distribution list
+    - undisclosed recipients
+    - multiple recipients
+    - bulk deliver
+    - bulk message
+  condition: selection and (spam_type or keywords)
+falsepositives:
+  - Legitimate bulk marketing emails from trusted senders
+  - Internal company-wide announcements
+level: medium
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - checkpoint.hec
+  - email.bulk-spam
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

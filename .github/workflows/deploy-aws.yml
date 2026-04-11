@@ -1,0 +1,645 @@
+##############################################################################
+# deploy-aws.yml — Cyber Command Center: AWS ECS Fargate CI/CD Pipeline
+#
+# Triggers:
+#   • push to `main`                 → full automated deployment to production
+#   • workflow_dispatch (manual)     → deploy any tag to any environment
+#
+# Required GitHub repository secrets:
+#   AWS_ACCOUNT_ID          — 12-digit AWS account ID
+#   AWS_REGION              — e.g. ap-south-1
+#   VPC_ID                  — vpc-xxxxxxxxxxxxxxxxx
+#   PUBLIC_SUBNETS          — subnet-aaa,subnet-bbb (at least 2 AZs)
+#   PRIVATE_SUBNETS         — subnet-ccc,subnet-ddd (at least 2 AZs)
+#   CERTIFICATE_ARN         — ACM certificate ARN for HTTPS
+#
+#   For key-based auth (one of):
+#     AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#   For OIDC (recommended — no long-lived keys):
+#     AWS_ROLE_TO_ASSUME  — IAM role ARN that GitHub Actions can assume
+#
+# Optional secrets:
+#   DEPLOY_DATA_PLANES=true   Set to "true" to deploy all 5 data-plane regions
+#   DEPLOY_RECEIVER=true      Set to "true" to deploy the receiver plane
+#   SECRETS_PREFIX=ccc        Secrets Manager path prefix (default: ccc)
+#
+# Job execution order (DevSecOps-gated pipeline):
+#   build-and-push
+#     ├── validate-secrets    (parallel — checks AWS Secrets Manager)
+#     └── security-scan       (parallel — Trivy container CVE scan; CRITICAL=block)
+#           ↓ (both must pass)
+#       deploy-management
+#           ↓
+#       run-migrations
+#           ↓
+#       smoke-test
+#           ↓ (optional, on flag)
+#       deploy-data-planes / deploy-receiver
+#
+# See .github/workflows/devsecops.yml for the PR-time security gate
+# (Gitleaks, npm audit, CodeQL SAST, Checkov IaC).
+##############################################################################
+
+name: Deploy to AWS ECS Fargate
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to build and deploy'
+        required: false
+        default: ''
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+          - development
+      deploy_data_planes:
+        description: 'Deploy all 5 data-plane regions'
+        required: false
+        type: boolean
+        default: false
+      deploy_receiver:
+        description: 'Deploy the receiver plane'
+        required: false
+        type: boolean
+        default: false
+      skip_build:
+        description: 'Skip image build/push (redeploy an existing image tag without rebuilding)'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Dry run (validate only, no deploy)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  AWS_REGION:     ${{ secrets.AWS_REGION }}
+  VPC_ID:         ${{ secrets.VPC_ID }}
+  PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+  PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+  CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
+  SECRETS_PREFIX:  ${{ vars.SECRETS_PREFIX || 'ccc' }}
+
+jobs:
+  # ── Job 1: Build and push Docker images to ECR ─────────────────────────────
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
+      environment: ${{ steps.set-env.outputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set image tag
+        id: set-tag
+        run: |
+          if [[ -n "${{ github.event.inputs.image_tag }}" ]]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="${{ github.sha }}"
+          fi
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${TAG}"
+
+      - name: Set environment
+        id: set-env
+        run: |
+          if [[ -n "${{ github.event.inputs.environment }}" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          else
+            ENV="production"
+          fi
+          echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
+          echo "Environment: ${ENV}"
+
+      - name: Configure AWS credentials (OIDC)
+        # Activated when AWS_ROLE_TO_ASSUME is set as a repository secret.
+        # OIDC is recommended — no long-lived keys stored in GitHub.
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-github-actions
+
+      - name: Configure AWS credentials (access keys)
+        # Fallback when OIDC role is not configured. Add AWS_ACCESS_KEY_ID and
+        # AWS_SECRET_ACCESS_KEY as repository secrets.
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Build and push plane images to ECR
+        # Skipped when skip_build=true (manual redeploy of existing image tag)
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.skip_build != 'true' }}
+        env:
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          ./deploy/ecs/scripts/push-images.sh --tag "${IMAGE_TAG}"
+
+      - name: Build and push migration image to ECR
+        # The migration image (Dockerfile.migrate) retains devDependencies so
+        # drizzle-kit is available for one-off Fargate migration tasks.
+        # Skipped when skip_build=true (pre-existing migrate image will be used).
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.skip_build != 'true' }}
+        env:
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          MIGRATE_REPO="${ECR_REGISTRY}/ccc-migrate:${IMAGE_TAG}"
+          echo "Building migration image → ${MIGRATE_REPO}"
+          docker build \
+            --platform linux/amd64 \
+            --file Dockerfile.migrate \
+            --tag "${MIGRATE_REPO}" \
+            --cache-from "${MIGRATE_REPO}" \
+            .
+          docker push "${MIGRATE_REPO}"
+          if [[ "${IMAGE_TAG}" != "latest" ]]; then
+            docker tag "${MIGRATE_REPO}" "${ECR_REGISTRY}/ccc-migrate:latest"
+            docker push "${ECR_REGISTRY}/ccc-migrate:latest"
+          fi
+          echo "Migration image pushed: ${MIGRATE_REPO}"
+
+      - name: Skip build — using existing images in ECR
+        if: ${{ github.event.inputs.skip_build == 'true' }}
+        env:
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          echo "skip_build=true — skipping Docker build and ECR push."
+          echo "Deploying existing images with tag: ${IMAGE_TAG}"
+          echo "Ensure ccc-management-plane:${IMAGE_TAG}, ccc-data-plane:${IMAGE_TAG},"
+          echo "  ccc-receiver-plane:${IMAGE_TAG}, and ccc-migrate:${IMAGE_TAG} already exist in ECR."
+
+      - name: Dry-run — show what would be built
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        env:
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          echo "[DRY-RUN] Would build and push images with tag: ${IMAGE_TAG}"
+          echo "[DRY-RUN] Planes: management (Dockerfile), data (Dockerfile), receiver (Dockerfile)"
+          echo "[DRY-RUN] Also: ccc-migrate (Dockerfile.migrate) — retains devDeps for drizzle-kit"
+          echo "[DRY-RUN] Use skip_build=true to redeploy existing images without rebuilding."
+
+  # ── Job 2: Validate secrets in Secrets Manager ─────────────────────────────
+  validate-secrets:
+    name: Validate Secrets Manager
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-and-push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-validate-secrets
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Validate management plane secrets
+        env:
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX: ${{ env.SECRETS_PREFIX }}
+        run: |
+          ./deploy/ecs/scripts/validate-secrets.sh --plane management
+
+  # ── Job 2b: Container Vulnerability Scan (Trivy) ───────────────────────────
+  # Runs in parallel with validate-secrets after build-and-push.
+  # Pulls the freshly built ECR image and scans for OS + npm CVEs.
+  # CRITICAL findings block deployment; HIGH findings upload to Security tab.
+  security-scan:
+    name: Container Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-push
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-trivy-scan
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull management-plane image from ECR
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE="${ECR_REGISTRY}/ccc-management-plane:${IMAGE_TAG}"
+          echo "Pulling image for scan: ${IMAGE}"
+          docker pull "${IMAGE}"
+          echo "IMAGE_REF=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Run Trivy — SARIF report (CRITICAL + HIGH, no fail)
+        # Generates full SARIF report for GitHub Security tab.
+        # exit-code 0 so this step never blocks — the next step handles gating.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref:      ${{ env.IMAGE_REF }}
+          format:         sarif
+          output:         trivy-results.sarif
+          severity:       CRITICAL,HIGH
+          exit-code:      '0'
+          ignore-unfixed: true
+          trivyignores:   .trivyignore
+          vuln-type:      os,library
+
+      - name: Run Trivy — gate on CRITICAL only (blocks deployment)
+        # Separate pass: only CRITICAL severity fails the job and blocks deploy.
+        # HIGH findings are visible in the SARIF above but do NOT block.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref:      ${{ env.IMAGE_REF }}
+          format:         table
+          severity:       CRITICAL
+          exit-code:      '1'
+          ignore-unfixed: true
+          trivyignores:   .trivyignore
+          vuln-type:      os,library
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        if: always() && github.event.inputs.dry_run != 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file:    trivy-results.sarif
+          category:      trivy-container
+
+      - name: Upload Trivy SARIF as artifact
+        if: always() && github.event.inputs.dry_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-${{ needs.build-and-push.outputs.image_tag }}
+          path: trivy-results.sarif
+          retention-days: 90
+
+      - name: Dry-run — skip Trivy scan
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "[DRY-RUN] Would scan image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ccc-management-plane:${{ needs.build-and-push.outputs.image_tag }}"
+
+  # ── Job 3: Deploy management plane CloudFormation stack ────────────────────
+  deploy-management:
+    name: Deploy Management Plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-and-push, validate-secrets, security-scan]
+    environment: ${{ needs.build-and-push.outputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-deploy-management
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Deploy management plane stack
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          ./deploy/ecs/scripts/deploy-stacks.sh --stack management
+
+      - name: Dry-run — show what would be deployed
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        env:
+          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          echo "[DRY-RUN] Would deploy stack: ccc-management-plane"
+          echo "[DRY-RUN] Image tag: ${IMAGE_TAG}"
+          echo "[DRY-RUN] Environment: ${ENVIRONMENT}"
+
+  # ── Job 4: Run database migrations ─────────────────────────────────────────
+  run-migrations:
+    name: Run DB Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build-and-push, deploy-management]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-migrate
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Run migrations via ECS one-off task
+        # Uses ECS mode: launches ccc-migrate (Dockerfile.migrate, retains
+        # devDeps) as a short-lived Fargate task inside the VPC where it can
+        # reach the private RDS instance via Secrets Manager. GitHub-hosted
+        # runners have no VPC network path to RDS.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IMAGE_TAG:       ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT:     ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX:  ${{ env.SECRETS_PREFIX }}
+          PRIVATE_SUBNETS: ${{ env.PRIVATE_SUBNETS }}
+        run: |
+          ./deploy/ecs/scripts/migrate.sh --mode ecs
+
+      - name: Dry-run — show what would be migrated
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        env:
+          IMAGE_TAG:       ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT:     ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX:  ${{ env.SECRETS_PREFIX }}
+          PRIVATE_SUBNETS: ${{ env.PRIVATE_SUBNETS }}
+        run: |
+          ./deploy/ecs/scripts/migrate.sh --mode ecs --dry-run
+
+  # ── Job 5: Smoke test the management plane ─────────────────────────────────
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build-and-push, run-migrations]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-smoke-test
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Get ALB DNS name from CloudFormation
+        id: alb-dns
+        env:
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "ccc-management-plane" \
+            --query "Stacks[0].Outputs[?OutputKey=='ALBDNSName'].OutputValue" \
+            --output text)
+          echo "alb_dns=${ALB_DNS}" >> "$GITHUB_OUTPUT"
+          echo "ALB DNS: ${ALB_DNS}"
+
+      - name: Run smoke tests
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          ALB_DNS:     ${{ steps.alb-dns.outputs.alb_dns }}
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          ./deploy/ecs/scripts/smoke-test.sh \
+            --host "${ALB_DNS}" \
+            --timeout 180 \
+            --insecure
+
+      - name: Dry-run — show smoke test target
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "[DRY-RUN] Would run smoke tests against: ${{ steps.alb-dns.outputs.alb_dns }}"
+
+  # ── Job 6 (optional): Deploy data planes ───────────────────────────────────
+  deploy-data-planes:
+    name: Deploy Data Planes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [build-and-push, smoke-test]
+    if: |
+      github.event.inputs.deploy_data_planes == 'true' ||
+      vars.DEPLOY_DATA_PLANES == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-deploy-data-planes
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Validate data plane secrets
+        env:
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX: ${{ env.SECRETS_PREFIX }}
+        run: |
+          ./deploy/ecs/scripts/validate-secrets.sh --plane data
+
+      - name: Deploy all 5 data-plane regions
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          ./deploy/ecs/scripts/deploy-stacks.sh --stack data
+
+  # ── Job 7 (optional): Deploy receiver plane ────────────────────────────────
+  deploy-receiver:
+    name: Deploy Receiver Plane
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build-and-push, smoke-test]
+    if: |
+      github.event.inputs.deploy_receiver == 'true' ||
+      vars.DEPLOY_RECEIVER == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-deploy-receiver
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Deploy receiver plane stack
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+        run: |
+          ./deploy/ecs/scripts/deploy-stacks.sh --stack receiver
+
+  # ── Summary job ────────────────────────────────────────────────────────────
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-and-push, security-scan, smoke-test]
+    if: always()
+
+    steps:
+      - name: Print summary
+        env:
+          IMAGE_TAG:      ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT:    ${{ needs.build-and-push.outputs.environment }}
+          SCAN_STATUS:    ${{ needs.security-scan.result }}
+          SMOKE_STATUS:   ${{ needs.smoke-test.result }}
+        run: |
+          echo "## Cyber Command Center — Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field             | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag         | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment       | \`${ENVIRONMENT}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Region            | \`${{ env.AWS_REGION }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trivy Scan        | ${SCAN_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Smoke Test        | ${SMOKE_STATUS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by      | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit            | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${SMOKE_STATUS}" == "success" && "${SCAN_STATUS}" == "success" ]]; then
+            echo "Deployment completed successfully (security scan passed)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Deployment encountered issues. Check job logs above.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "Security Scan: ${SCAN_STATUS} | Smoke Test: ${SMOKE_STATUS}" >> "$GITHUB_STEP_SUMMARY"
+          fi

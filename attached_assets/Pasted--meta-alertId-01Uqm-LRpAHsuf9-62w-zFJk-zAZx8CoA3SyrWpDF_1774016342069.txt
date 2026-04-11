@@ -1,0 +1,148 @@
+{
+  "_meta": {
+    "alertId": "01Uqm+LRpAHsuf9/62w/zFJk/zAZx8CoA3SyrWpDF14=",
+    "filePath": null,
+    "hostName": "PKFTZ-AAH",
+    "platform": "Cynet 360",
+    "sourceIp": null,
+    "userName": null,
+    "alertType": "",
+    "epsAction": null,
+    "processName": null,
+    "destinationIp": null
+  },
+  "asset": "PKFTZ-AAH",
+  "action": "Quarantined",
+  "sender": null,
+  "target": "PKFTZ-AAH",
+  "threat": "Insertion of Storage Device Detected (Blocked)",
+  "country": null,
+  "attacker": null,
+  "protocol": null,
+  "severity": "medium",
+  "eventType": "endpoint",
+  "logSource": "Cynet 360",
+  "recipient": null,
+  "occurredAt": "2026-03-20T14:11:50.428Z",
+  "rawPayload": {
+    "File": null,
+    "Path": "",
+    "Tags": null,
+    "DateIn": "2026-02-26T10:56:43+00:00",
+    "HostId": 851,
+    "HostIp": "10.30.6.65",
+    "Sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "Status": 3,
+    "UserId": 0,
+    "AlertIp": 0,
+    "Modules": null,
+    "AlertUrl": null,
+    "DomainId": 0,
+    "HostName": "PKFTZ-AAH",
+    "LastSeen": "2026-03-20T13:47:13+00:00",
+    "ScanGuid": null,
+    "Severity": 3,
+    "UserName": null,
+    "AlertType": 5,
+    "DomainCrc": null,
+    "ProductId": null,
+    "Sha256Hex": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ClientDbId": 2063,
+    "Uniqueness": "01Uqm+LRpAHsuf9/62w/zFJk/zAZx8CoA3SyrWpDF14=",
+    "AlertDomain": null,
+    "CommandLine": null,
+    "DateChanged": "2026-03-20T14:06:37+00:00",
+    "LastSeenUtc": "2026-03-20T13:47:13.926+00:00",
+    "FirstSeenUtc": "2026-02-26T10:56:43.12+00:00",
+    "IncidentName": "Insertion of Storage Device Detected (Blocked)",
+    "MitreDetails": [],
+    "AutoRemediate": null,
+    "ScanGroupName": "PKF-TZ-DAR-EP",
+    "EpsLastSeenUtc": "2026-03-20T13:47:03.58+00:00",
+    "EpsActionStatus": 1,
+    "EpsLastSeenLocal": "2026-03-20T16:47:03.58+00:00",
+    "AlertGraphJsonRaw": null,
+    "AutoRemediationId": 0,
+    "RemediationStatus": 1,
+    "IncidentDescription": "Hostname: PKFTZ-AAH\r\nHost IP: 192.168.1.9\r\nOS Version: Windows 11 x64\r\nCynetEPS Version: 4.31.1.19465\r\nAgent Configuration Date: 2026-03-19T11:15:52\r\nIncident detected on: 03/20/2026 16:47:03 (host timezone)\r\nIncident detected on: 03/20/2026 13:47:03 (UTC)\n Incident: Device Control\r\n\r\nDevice Type: Mtp\n\r\nDevice Status: Blocked\nDevice Name: Apple iPhone\nDevice ID: USB\\VID_05AC&PID_12A8&MI_00\\6&2DB68C9E&0&0000\nVendor: 05AC\nProduct: 12A8\nIs Removable: False\nSerial Number: 6&2DB68C9E&0&0000\nLast Insert Date: 2026-03-20 16:46:58\nLast Seen Date: 2026-03-20 16:46:58\n\nExtra Details\nAlert Origin: NOT SET\nETW Alert Id: SP_Rule_Portable_Device\nDescription: Portable device (smartphone, camera, mp3 player etc.)\nConsole session Username: aabbas\nProcess PID : 4\nProcess Path : C:\\WINDOWS\\system32\\ntoskrnl.exe\nProcess SessionId : 0\nProcess SessionName : Services\nProcess UserName : pkftz-aah\\nt authority - system\nProcess TokenSid : S-1-5-18\nProcess OriginalFilename : ntkrnlmp.exe\nProcess IntegrityLevel : System\nProcess ProtectionLevel : PROTECTION_LEVEL_WINTCB\nProcess SignatureStatus: Present\nProcess VerifyStatus: Verified\nProcess ConfigSignStatus: NotSet\nProcess CertTrustResult: 0\nProcess PublisherName: Microsoft Windows\nProcess PublisherThumbprint: FACDE3D80E99AFCC15E08AC5A69BD22785287F79\nProcess RootCaName: Microsoft Root Certificate Authority 2010\nProcess RootCaThumbprint: 3B1EFD3A66EA28B16697394703A72CA340A05BD5\nProcess CreationTime : 2026-03-17 08:18:51\nProcess SHA256 : 620777F6AA7186447AE9B45CBCDDDCF0C59516B87A2F702FFC8A1D07DBFE678B\nMS running for: 1d 1h 34m 8s\nDetection Time UTC: 2026-03-20 13:47:03\nDetection Time Local: 2026-03-20 16:47:03\n",
+    "IncidentRecomendation": "- Use Cynet built-in remediation option to disconnect the host from the network. \r\n                                        - Investigate incident according to organizations policy.",
+    "AlertGraphJsonResolved": null,
+    "IncidentJsonDescription": "{\"EPS Prevention\":\"Blocked\",\"Actual EPS Prevention\":\"Blocked\",\"EPS Prevention Success\":\"Success\",\"Hostname\":\"PKFTZ-AAH\",\"Host Ip\":\"192.168.1.9\",\"OS Version\":\"Windows 11 x64\",\"CynetEPS Version\":\"4.31.1.19465\",\"Agent Configuration Date\":\"2026-03-19T11:15:52\",\"Incident detected on (UTC)\":\"2026-03-20T13:47:03.58\",\"Device Type\":\"Mtp\",\"Device Status\":\"Blocked\",\"Device Name\":\"Apple iPhone\",\"Device ID\":\"USB\\\\VID_05AC&PID_12A8&MI_00\\\\6&2DB68C9E&0&0000\",\"Vendor\":\"05AC\",\"Product\":\"12A8\",\"Is Removable\":false,\"Serial Number\":\"6&2DB68C9E&0&0000\",\"Last Insert Date\":\"2026-03-20 16:46:58\",\"Last Seen Date\":\"2026-03-20 16:46:58\",\"Incident received on\":\"2026-03-20T13:47:13.9174803+00:00\",\"Incident received on (UTC)\":\"2026-03-20T13:47:13.9174803Z\",\"Extra Info\":{\"Alert Origin\":\"NOT SET\",\"ETW Alert Id\":\"SP_Rule_Portable_Device\",\"Description\":\"Portable device (smartphone, camera, mp3 player etc.)\",\"Console session Username\":\"aabbas\",\"Process PID \":\"4\",\"Process Path \":\"C:\\\\WINDOWS\\\\system32\\\\ntoskrnl.exe\",\"Process SessionId \":\"0\",\"Process SessionName \":\"Services\",\"Process UserName \":\"pkftz-aah\\\\nt authority - system\",\"Process TokenSid \":\"S-1-5-18\",\"Process OriginalFilename \":\"ntkrnlmp.exe\",\"Process IntegrityLevel \":\"System\",\"Process ProtectionLevel \":\"PROTECTION_LEVEL_WINTCB\",\"Process SignatureStatus\":\"Present\",\"Process VerifyStatus\":\"Verified\",\"Process ConfigSignStatus\":\"NotSet\",\"Process CertTrustResult\":\"0\",\"Process PublisherName\":\"Microsoft Windows\",\"Process PublisherThumbprint\":\"FACDE3D80E99AFCC15E08AC5A69BD22785287F79\",\"Process RootCaName\":\"Microsoft Root Certificate Authority 2010\",\"Process RootCaThumbprint\":\"3B1EFD3A66EA28B16697394703A72CA340A05BD5\",\"Process CreationTime \":\"2026-03-17 08:18:51\",\"Process SHA256 \":\"620777F6AA7186447AE9B45CBCDDDCF0C59516B87A2F702FFC8A1D07DBFE678B\",\"MS running for\":\"1d 1h 34m 8s\",\"Detection Time UTC\":\"2026-03-20 13:47:03\",\"Detection Time Local\":\"2026-03-20 16:47:03\"}}",
+    "EpsRemediationActionPerformed": 32
+  },
+  "sourceType": "Cynet 360",
+  "description": "Hostname: PKFTZ-AAH\r\nHost IP: 192.168.1.9\r\nOS Version: Windows 11 x64\r\nCynetEPS Version: 4.31.1.19465\r\nAgent Configuration Date: 2026-03-19T11:15:52\r\nIncident detected on: 03/20/2026 16:47:03 (host timezone)\r\nIncident detected on: 03/20/2026 13:47:03 (UTC)\n Incident: Device Control\r\n\r\nDevice Type: Mtp\n\r\nDevice Status: Blocked\nDevice Name: Apple iPhone\nDevice ID: USB\\VID_05AC&PID_12A8&MI_00\\6&2DB68C9E&0&0000\nVendor: 05AC\nProduct: 12A8\nIs Removable: False\nSerial Number: 6&2DB68C9E&0&0000\nLast Insert Date: 2026-03-20 16:46:58\nLast Seen Date: 2026-03-20 16:46:58\n\nExtra Details\nAlert Origin: NOT SET\nETW Alert Id: SP_Rule_Portable_Device\nDescription: Portable device (smartphone, camera, mp3 player etc.)\nConsole session Username: aabbas\nProcess PID : 4\nProcess Path : C:\\WINDOWS\\system32\\ntoskrnl.exe\nProcess SessionId : 0\nProcess SessionName : Services\nProcess UserName : pkftz-aah\\nt authority - system\nProcess TokenSid : S-1-5-18\nProcess OriginalFilename : ntkrnlmp.exe\nProcess IntegrityLevel : System\nProcess ProtectionLevel : PROTECTION_LEVEL_WINTCB\nProcess SignatureStatus: Present\nProcess VerifyStatus: Verified\nProcess ConfigSignStatus: NotSet\nProcess CertTrustResult: 0\nProcess PublisherName: Microsoft Windows\nProcess PublisherThumbprint: FACDE3D80E99AFCC15E08AC5A69BD22785287F79\nProcess RootCaName: Microsoft Root Certificate Authority 2010\nProcess RootCaThumbprint: 3B1EFD3A66EA28B16697394703A72CA340A05BD5\nProcess CreationTime : 2026-03-17 08:18:51\nProcess SHA256 : 620777F6AA7186447AE9B45CBCDDDCF0C59516B87A2F702FFC8A1D07DBFE678B\nMS running for: 1d 1h 34m 8s\nDetection Time UTC: 2026-03-20 13:47:03\nDetection Time Local: 2026-03-20 16:47:03\n",
+  "mitreTactic": null,
+  "sigmaMatches": [
+    {
+      "ruleId": "45810b50-7edc-42ca-813b-bdac02fb946b",
+      "severity": "low",
+      "ruleTitle": "Steganography Hide Zip Information in Picture File",
+      "mitreTactic": "Defense-evasion",
+      "mitreTechnique": "T1027.003"
+    },
+    {
+      "ruleId": "dbe4b9c5-c254-4258-9688-d6af0b7967fd",
+      "severity": "low",
+      "ruleTitle": "Screen Capture with Import Tool",
+      "mitreTactic": "Collection",
+      "mitreTechnique": "T1113"
+    },
+    {
+      "ruleId": "1bac86ba-41aa-4f62-9d6b-405eac99b485",
+      "severity": "medium",
+      "ruleTitle": "Systemd Service Creation",
+      "mitreTactic": "Privilege-escalation",
+      "mitreTechnique": "T1543.002"
+    },
+    {
+      "ruleId": "2aa1440c-9ae9-4d92-84a7-a9e5f5e31695",
+      "severity": "high",
+      "ruleTitle": "Suspicious Activity in Shell Commands",
+      "mitreTactic": "Execution",
+      "mitreTechnique": "T1059.004"
+    },
+    {
+      "ruleId": "6d844f0f-1c18-41af-8f19-33e7654edfc3",
+      "severity": "high",
+      "ruleTitle": "Cisco Local Accounts",
+      "mitreTactic": "Privilege-escalation",
+      "mitreTechnique": "T1098"
+    },
+    {
+      "ruleId": "9db37458-4df2-46a5-95ab-307e7f29e675",
+      "severity": "high",
+      "ruleTitle": "Exchange Set OabVirtualDirectory ExternalUrl Property",
+      "mitreTactic": "Persistence",
+      "mitreTechnique": "T1505.003"
+    },
+    {
+      "ruleId": "300bac00-e041-4ee2-9c36-e262656a6ecc",
+      "severity": "high",
+      "ruleTitle": "Active Directory User Backdoors",
+      "mitreTactic": "Privilege-escalation",
+      "mitreTechnique": "T1098"
+    },
+    {
+      "ruleId": "5a105d34-05fc-401e-8553-272b45c1522d",
+      "severity": "critical",
+      "ruleTitle": "CobaltStrike Service Installations - System",
+      "mitreTactic": "Persistence",
+      "mitreTechnique": "T1569.002"
+    },
+    {
+      "ruleId": "737e618a-a410-49b5-bec3-9e55ff7fbc15",
+      "severity": "high",
+      "ruleTitle": "Suspicious Calculator Usage",
+      "mitreTactic": "Defense-evasion",
+      "mitreTechnique": "T1036"
+    },
+    {
+      "ruleId": "0ba863e6-def5-4e50-9cea-4dd8c7dc46a4",
+      "severity": "high",
+      "ruleTitle": "Control Panel Items",
+      "mitreTactic": "Privilege-escalation",
+      "mitreTechnique": "T1546"
+    }
+  ],
+  "mitreTechnique": null

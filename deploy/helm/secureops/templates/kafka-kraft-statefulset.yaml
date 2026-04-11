@@ -1,0 +1,153 @@
+{{- if and .Values.kafkaKraft.enabled .Values.kafkaKraft.builtIn }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "secureops.fullname" . }}-kafka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: kafka
+spec:
+  serviceName: {{ include "secureops.fullname" . }}-kafka-headless
+  replicas: {{ .Values.kafkaKraft.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: kafka
+  template:
+    metadata:
+      labels:
+        {{- include "secureops.selectorLabels" . | nindent 8 }}
+        component: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: "{{ .Values.kafkaKraft.image.repository }}:{{ .Values.kafkaKraft.image.tag }}"
+          imagePullPolicy: {{ .Values.kafkaKraft.image.pullPolicy }}
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: kafka-internal
+              containerPort: 9093
+          command:
+            - /bin/bash
+            - -c
+            - |
+              export KAFKA_CFG_NODE_ID=${HOSTNAME##*-}
+              /opt/bitnami/scripts/kafka/entrypoint.sh /opt/bitnami/scripts/kafka/run.sh
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_CFG_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+              value: {{ .Values.kafkaKraft.controllerQuorumVoters | quote }}
+            - name: KAFKA_CFG_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://$(POD_NAME).{{ include "secureops.fullname" . }}-kafka-headless.{{ .Release.Namespace }}.svc.cluster.local:9092"
+            - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_CFG_LOG_RETENTION_HOURS
+              value: {{ .Values.kafkaKraft.logRetentionHours | quote }}
+            - name: KAFKA_CFG_LOG_RETENTION_BYTES
+              value: {{ .Values.kafkaKraft.logRetentionBytes | quote }}
+            - name: KAFKA_CFG_NUM_PARTITIONS
+              value: {{ .Values.kafkaKraft.numPartitions | quote }}
+            - name: KAFKA_CFG_DEFAULT_REPLICATION_FACTOR
+              value: {{ .Values.kafkaKraft.defaultReplicationFactor | quote }}
+            - name: KAFKA_CFG_MIN_INSYNC_REPLICAS
+              value: {{ .Values.kafkaKraft.minInsyncReplicas | quote }}
+            - name: KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+            - name: KAFKA_KRAFT_CLUSTER_ID
+              value: {{ .Values.kafkaKraft.clusterId | quote }}
+            - name: ALLOW_PLAINTEXT_LISTENER
+              value: "yes"
+          resources:
+            {{- toYaml .Values.kafkaKraft.resources | nindent 12 }}
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /bitnami/kafka
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 15
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.global.storageClass | default "standard" }}
+        resources:
+          requests:
+            storage: {{ .Values.kafkaKraft.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-kafka-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: kafka
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+    - name: kafka-internal
+      port: 9093
+      targetPort: kafka-internal
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-kafka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: kafka
+spec:
+  type: ClusterIP
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: kafka
+---
+{{- if and .Values.kafkaKraft.builtIn .Values.kafkaKraft.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-kafka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: kafka
+spec:
+  minAvailable: {{ .Values.kafkaKraft.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: kafka
+{{- end }}
+{{- end }}

@@ -1,0 +1,130 @@
+{
+  "family": "ccc-data-plane",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-data-plane-task-role",
+  "containerDefinitions": [
+    {
+      "name": "data-plane",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/ccc-data-plane:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "hostPort": 5000,
+          "protocol": "tcp",
+          "name": "http"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",            "value": "production" },
+        { "name": "PORT",                "value": "5000" },
+        { "name": "PLANE",               "value": "data" },
+        { "name": "CLUSTER_WORKERS_MAX", "value": "4" },
+        { "name": "WORKER_MAX_RSS_MB",   "value": "1500" },
+        { "name": "APP_REPORTS_DIR",     "value": "/app/data/reports" },
+        { "name": "APP_UPLOADS_DIR",     "value": "/app/data/uploads" },
+        { "name": "PARQUET_DATA_DIR",    "value": "/app/data/events" },
+        { "name": "DB_POOL_MAX",         "value": "5" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/database-url"
+        },
+        {
+          "name": "KAFKA_BROKERS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/shared/kafka-brokers"
+        },
+        {
+          "name": "OPENSEARCH_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-url"
+        },
+        {
+          "name": "OPENSEARCH_USERNAME",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-username"
+        },
+        {
+          "name": "OPENSEARCH_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-password"
+        },
+        {
+          "name": "REGION",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/plane-region"
+        },
+        {
+          "name": "CLOUD_STORAGE_PROVIDER",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/storage/provider"
+        },
+        {
+          "name": "AWS_S3_BUCKET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/s3-bucket"
+        },
+        {
+          "name": "AWS_S3_REGION",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/storage/s3-region"
+        },
+        {
+          "name": "MANAGEMENT_PLANE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/shared/management-plane-url"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ccc-data-plane",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "data-plane-storage",
+          "containerPath": "/app/data",
+          "readOnly": false
+        }
+      ],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ],
+      "stopTimeout": 30
+    }
+  ],
+  "volumes": [
+    {
+      "name": "data-plane-storage",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "EFS_FILESYSTEM_ID",
+        "rootDirectory": "/data-plane",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "EFS_ACCESS_POINT_ID_DATA",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ],
+  "tags": [
+    { "key": "Project",   "value": "CyberCommandCenter" },
+    { "key": "Plane",     "value": "data" },
+    { "key": "ManagedBy", "value": "ecs" }
+  ]
+}

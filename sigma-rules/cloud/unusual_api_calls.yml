@@ -1,0 +1,37 @@
+title: Unusual Cloud API Calls
+id: sigma-cloud-002
+status: stable
+level: high
+description: Detects unusual or suspicious API calls in cloud environments that may indicate reconnaissance, data access, or configuration changes by an attacker.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: cloud
+  product: any
+detection:
+  selection:
+    eventType: cloud
+  keywords:
+    - unusual api
+    - suspicious api
+    - api call from unusual
+    - unusual asn
+    - createemailidentity
+    - suspicious cloud operation
+    - cloud identity performed
+    - ec2 token
+    - instance metadata
+    - imds
+    - unusual region
+    - unauthorized api
+  condition: selection AND keywords
+falsepositives:
+  - New cloud services being configured
+  - Infrastructure-as-code deployments
+tags:
+  - attack.discovery
+  - attack.t1580
+mitre:
+  tactic: Discovery
+  technique: T1580
+  technique_name: Cloud Infrastructure Discovery

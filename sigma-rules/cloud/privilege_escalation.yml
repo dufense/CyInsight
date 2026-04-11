@@ -1,0 +1,35 @@
+title: Cloud Privilege Escalation
+id: sigma-cloud-001
+status: stable
+level: critical
+description: Detects attempts to escalate privileges in cloud environments including IAM policy modifications, role assumption abuse, and permission boundary changes.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: cloud
+  product: any
+detection:
+  selection:
+    eventType: cloud
+  keywords:
+    - privilege escalation
+    - role assumption
+    - iam policy
+    - permission boundary
+    - admin role
+    - elevated privilege
+    - attach policy
+    - create role
+    - modify permissions
+    - escalation attempt
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate IAM administration
+  - Automated infrastructure provisioning
+tags:
+  - attack.privilege_escalation
+  - attack.t1078.004
+mitre:
+  tactic: Privilege Escalation
+  technique: T1078.004
+  technique_name: Cloud Accounts

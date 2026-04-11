@@ -1,0 +1,17 @@
+{{- if and .Values.management.enabled .Values.management.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "secureops.fullname" . }}-management-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: management
+spec:
+  accessModes:
+    - {{ .Values.management.persistence.accessMode }}
+  storageClassName: {{ .Values.global.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.management.persistence.size }}
+{{- end }}

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrichment
+  namespace: secureops
+  labels:
+    app: enrichment
+    component: pipeline
+    tier: processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enrichment
+  template:
+    metadata:
+      labels:
+        app: enrichment
+        component: pipeline
+        tier: processing
+    spec:
+      containers:
+        - name: enrichment
+          image: secureops/enrichment:latest
+          ports:
+            - containerPort: 5000
+              name: http
+          env:
+            - name: PORT
+              value: "5000"
+            - name: SERVICE
+              value: enrichment
+            - name: NODE_ENV
+              value: production
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: enrichment-config
+                  key: KAFKA_BROKERS
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: enrichment-config
+                  key: REDIS_URL
+            - name: BATCH_SIZE
+              value: "100"
+            - name: CONCURRENCY
+              value: "5"
+            - name: IOC_CACHE_TTL
+              value: "3600"
+            - name: CORRELATION_WINDOW_MS
+              value: "300000"
+            - name: CORRELATION_MIN_SOURCES
+              value: "2"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+      restartPolicy: Always

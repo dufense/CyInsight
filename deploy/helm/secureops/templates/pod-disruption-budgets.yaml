@@ -1,0 +1,152 @@
+{{- if and .Values.receiver.enabled (default true .Values.receiver.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: receiver
+spec:
+  minAvailable: {{ .Values.receiver.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: receiver
+---
+{{- end }}
+{{- if and .Values.collector.enabled (default true .Values.collector.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: collector
+spec:
+  minAvailable: {{ .Values.collector.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: collector
+---
+{{- end }}
+{{- if and .Values.normalizer.enabled (default true .Values.normalizer.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-normalizer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: normalizer
+spec:
+  minAvailable: {{ .Values.normalizer.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: normalizer
+---
+{{- end }}
+{{- if and .Values.detectionEngine.enabled (default true .Values.detectionEngine.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-detection-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: detection-engine
+spec:
+  minAvailable: {{ .Values.detectionEngine.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: detection-engine
+---
+{{- end }}
+{{- if and .Values.enrichment.enabled (default true .Values.enrichment.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-enrichment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: enrichment
+spec:
+  minAvailable: {{ .Values.enrichment.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: enrichment
+---
+{{- end }}
+{{- if and .Values.storage.enabled (default true .Values.storage.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-storage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: storage
+spec:
+  minAvailable: {{ .Values.storage.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: storage
+---
+{{- end }}
+{{- if and .Values.dataPlane.enabled (default true .Values.dataPlane.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-data-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: data
+spec:
+  minAvailable: {{ .Values.dataPlane.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      plane: data
+---
+{{- end }}
+{{- if and .Values.management.enabled (default true .Values.management.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: management
+spec:
+  minAvailable: {{ .Values.management.pdb.minAvailable | default 2 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      plane: management
+---
+{{- end }}
+{{- if and .Values.kafkaKraft.enabled .Values.kafkaKraft.builtIn (default true .Values.kafkaKraft.pdb.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secureops.fullname" . }}-kafka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: kafka
+spec:
+  minAvailable: {{ .Values.kafkaKraft.pdb.minAvailable | default 2 }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: kafka
+{{- end }}

@@ -1,0 +1,70 @@
+{{- if .Values.normalizer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secureops.fullname" . }}-normalizer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: normalizer
+spec:
+  replicas: {{ .Values.normalizer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "secureops.selectorLabels" . | nindent 6 }}
+      component: normalizer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 2
+  template:
+    metadata:
+      labels:
+        {{- include "secureops.selectorLabels" . | nindent 8 }}
+        component: normalizer
+    spec:
+      {{- include "secureops.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "secureops.fullname" . }}-normalizer
+      {{- end }}
+      containers:
+        - name: normalizer
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.normalizer.image.repository }}:{{ .Values.normalizer.image.tag }}"
+          imagePullPolicy: {{ .Values.normalizer.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: SERVICE_NAME
+              value: "normalizer"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5000"
+            {{- include "secureops.kafkaEnv" . | nindent 12 }}
+            - name: REDIS_URL
+              value: redis://{{ include "secureops.fullname" . }}-redis:6379
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secureops.secretName" . }}
+                  key: openai-api-key
+          envFrom:
+            - configMapRef:
+                name: {{ include "secureops.fullname" . }}-normalizer
+          resources:
+            {{- toYaml .Values.normalizer.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+{{- end }}

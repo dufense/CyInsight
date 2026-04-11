@@ -1,0 +1,14 @@
+{{- if .Values.enrichment.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-enrichment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: enrichment
+data:
+  IOC_CACHE_TTL_MS: {{ .Values.enrichment.config.iocCacheTtlMs | quote }}
+  CORRELATION_WINDOW_MS: {{ .Values.enrichment.config.correlationWindowMs | quote }}
+  LOG_LEVEL: {{ .Values.enrichment.config.logLevel | default "info" | quote }}
+{{- end }}

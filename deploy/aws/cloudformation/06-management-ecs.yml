@@ -1,0 +1,932 @@
+##############################################################################
+# Cyber Command Center -- Management Plane ECS Fargate Service
+#
+# ══════════════════════════════════════════════════════════════════════════
+# Multi-Region HA Topology (finalized 2026-Q2)
+# ══════════════════════════════════════════════════════════════════════════
+#
+#  ┌─────────────────────────────────────────────────────────────┐
+#  │                   Internet / Customers                       │
+#  └───────────────────────┬─────────────────────────────────────┘
+#                          │ HTTPS (ACM cert)
+#                          ▼
+#  ┌──────────────────────────────────────────────────────────────────────────────┐
+#  │  Management Plane  --  ap-south-1 (Mumbai)  --  VPC 10.10.0.0/16            │
+#  │                                                                              │
+#  │  ALB (internet-facing) ──► ECS Fargate (this template)                      │
+#  │         │                  ├─ Aurora Serverless v2  (02-aurora-management)  │
+#  │         │                  ├─ MSK Kafka             (03-msk-kafka)           │
+#  │         │                  ├─ OpenSearch            (04-opensearch)          │
+#  │         │                  └─ S3 + Iceberg          (05-data-lake)           │
+#  │         │                                                                    │
+#  │  NAT GW EIP-1 ─────────────────────────────────────────────────────────┐    │
+#  │  NAT GW EIP-2 ─────────────────────────────────────────────────────────┤    │
+#  └───────────────────────────────────────────────────────────────────────│─┘   │
+#                          │ VPC Peering                            │             │
+#                          ▼ (private, ap-south-1)                  │ HTTPS only  │
+#  ┌──────────────────────────────┐         ┌──────────────────────┼─────────┐   │
+#  │  Data Plane: Mumbai          │         │  Data Plane: Bahrain │me-south-1│  │
+#  │  ap-south-1 / 10.20.0.0/16  │         │  10.30.0.0/16        │         │   │
+#  │  Internal ALB (private)      │         │  Internet-facing ALB (EIP allow) │  │
+#  │  ECS 3-AZ spread             │         │  ECS 3-AZ spread     │         │   │
+#  │  (07-data-plane-ecs.yml)     │         └──────────────────────┼─────────┘   │
+#  └──────────────────────────────┘                                │             │
+#                                          ┌──────────────────────┼─────────┐   │
+#                                          │  Data Plane: Kenya   │af-south-1│  │
+#                                          │  10.40.0.0/16        │         │   │
+#                                          │  Internet-facing ALB (EIP allow) │  │
+#                                          │  ECS 3-AZ spread     │         │   │
+#                                          └──────────────────────┘         │   │
+#                                                            NAT EIP allowlist   │
+#                                                            from mgmt plane ────┘
+#
+# Cross-region connectivity:
+#   Mumbai:  VPC Peering (pcx-xxx) + private route tables  (10-data-plane-ha-vpc.yml)
+#   Bahrain: Internet-facing ALB + HTTPS + ManagementNatEip1/2 SG rule
+#   Kenya:   Internet-facing ALB + HTTPS + ManagementNatEip1/2 SG rule
+#   NAT EIPs registered in SSM by 11-cross-region-security.yml
+#
+# CloudFormation deploy order:
+#   01-vpc → 02-aurora → 03-msk → 04-opensearch → 05-data-lake → 06-management-ecs (this)
+#   → 10-data-plane-ha-vpc (x3) → 11-cross-region-security
+#   → 07-data-plane-ecs (x3) → 08-clickhouse → 09-platform-updates
+#
+# ══════════════════════════════════════════════════════════════════════════
+#
+# This template: Management Plane ECS Fargate Service
+#   - Application Load Balancer (HTTPS + HTTP redirect)
+#   - ECS Cluster + Service with FARGATE_SPOT 4:1 weight
+#   - Auto-scaling (CPU + Memory target tracking)
+#   - IAM Task Role with S3 data lake + Secrets Manager access
+#   - ECS Exec enabled for troubleshooting
+#   - RuntimePlatform: X86_64 (Apple Silicon build compat)
+#   - HealthCheckGracePeriodSeconds: 180
+#   - Optional Bedrock IAM policy (set EnableBedrock=true)
+#
+# Environment variables pulled from Secrets Manager at runtime:
+#   DATABASE_URL, SESSION_SECRET, KAFKA_BROKERS, OPENSEARCH_URL,
+#   AI_PROVIDER, AI_API_KEY
+#
+# Depends on:
+#   - 01-vpc.yml               (VPC, subnets, security groups)
+#   - 02-aurora-management.yml (DB secret ARN)
+#   - 03-msk-kafka.yml         (Kafka brokers secret)
+#   - 04-opensearch.yml        (OpenSearch secret)
+#   - 05-data-lake.yml         (S3 buckets)
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/06-management-ecs.yml \
+#     --stack-name ccc-management-ecs \
+#     --region ap-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-vpc \
+#       AuroraStackName=ccc-aurora-management \
+#       MSKStackName=ccc-msk-kafka \
+#       OpenSearchStackName=ccc-opensearch \
+#       DataLakeStackName=ccc-data-lake \
+#       CertificateArn=arn:aws:acm:... \
+#       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-management-plane:latest
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- Management Plane ECS Fargate (ALB + FARGATE_SPOT)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  VpcStackName:
+    Type: String
+    Default: ccc-vpc
+
+  AuroraStackName:
+    Type: String
+    Default: ccc-aurora-management
+
+  MSKStackName:
+    Type: String
+    Default: ccc-msk-kafka
+
+  OpenSearchStackName:
+    Type: String
+    Default: ccc-opensearch
+
+  DataLakeStackName:
+    Type: String
+    Default: ccc-data-lake
+
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI for ccc-management-plane
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for HTTPS
+
+  # ── Session Secret ARN parameter ─────────────────────────────────────────────
+  # Pass the ARN of the Secrets Manager secret that holds the Express session
+  # secret.  This externalises the ARN so the stack is fully self-contained and
+  # no hardcoded ARN patterns are needed.
+  # Create the secret first:
+  #   aws secretsmanager create-secret \
+  #     --name ccc/management/session-secret \
+  #     --secret-string "$(openssl rand -hex 32)" \
+  #     --region ap-south-1
+  SessionSecretArn:
+    Type: String
+    Description: >-
+      ARN of the Secrets Manager secret containing the Express session secret.
+      Example: arn:aws:secretsmanager:ap-south-1:123456789:secret:ccc/management/session-secret-abc123
+
+  # ── RDS / Aurora SSL enforcement ─────────────────────────────────────────────
+  # Default is "0" (SSL enforced via certificate verification in the app layer,
+  # not the DB parameter group). Set to "1" only if you want the DB engine itself
+  # to reject non-SSL connections — the app Dockerfiles embed the CA bundle so
+  # PGSSLMODE=verify-ca will work either way.
+  RdsForceSSL:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+    Description: >-
+      Value for rds.force_ssl in the Aurora PostgreSQL cluster parameter group.
+      "0" = SSL optional (verified by app via PGSSLMODE=verify-ca + CA bundle).
+      "1" = DB engine rejects non-SSL connections (requires CA bundle).
+
+  TaskCpu:
+    Type: Number
+    Default: 1024
+    AllowedValues: [512, 1024, 2048, 4096]
+
+  TaskMemory:
+    Type: Number
+    Default: 2048
+    AllowedValues: [1024, 2048, 4096, 8192]
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+
+  MinCount:
+    Type: Number
+    Default: 2
+
+  MaxCount:
+    Type: Number
+    Default: 20
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+  EnableBedrock:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to grant the ECS Task Role permission to invoke AWS Bedrock
+      foundation models (AI_PROVIDER=bedrock). IAM policy is conditionally attached
+      only when this is true so non-Bedrock deployments incur zero Bedrock surface.
+
+Conditions:
+  HasBedrock: !Equals [!Ref EnableBedrock, "true"]
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/ccc-management-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ── EFS File System (persistent storage: reports, uploads, events) ───────────
+  # Mounted at /app/data inside the container so APP_REPORTS_DIR, APP_UPLOADS_DIR,
+  # and PARQUET_DATA_DIR all land on durable EFS-backed storage. The access point
+  # root path (/data) maps to /app/data inside the container.
+  ReportsEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      BackupPolicy:
+        Status: ENABLED
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "ccc-reports-efs-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+
+  ReportsEFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ReportsEFS
+      SubnetId:
+        Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  ReportsEFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ReportsEFS
+      SubnetId:
+        Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-efs-sg-${EnvironmentName}"
+      GroupDescription: EFS - allow NFS from ECS tasks only
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+          Description: NFS from ECS tasks only
+
+  ReportsAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref ReportsEFS
+      PosixUser:
+        Uid: "1001"
+        Gid: "1001"
+      RootDirectory:
+        # /data is the EFS root exposed to the container at /app/data.
+        # Subdirs /data/reports, /data/uploads, /data/events are created at
+        # image build time (Dockerfile RUN mkdir -p …) so they are ready before
+        # the first request even if EFS is briefly unavailable.
+        Path: /data
+        CreationInfo:
+          OwnerUid: "1001"
+          OwnerGid: "1001"
+          Permissions: "755"
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub "ccc-data-access-point-${EnvironmentName}"
+
+  # ── ECS Cluster ──────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "ccc-management-${EnvironmentName}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+
+  # ── ECS Execution Role (pull image, read secrets) ────────────────────────────
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-management-execution-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+                  - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+                  # SessionSecretArn is now a parameter — reference it directly
+                  - !Ref SessionSecretArn
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
+
+  # ── RDS / Aurora Cluster Parameter Group ─────────────────────────────────────
+  # Controls SSL enforcement at the DB engine level.
+  # Default: rds.force_ssl=0 — SSL verification is handled by the app layer
+  # (PGSSLMODE=verify-ca + CA bundle in Docker image) which is safer and does
+  # not require a DB engine restart to change.
+  # Set RdsForceSSL=1 at deploy time if you need engine-level enforcement.
+  AuroraParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "CCC Aurora PostgreSQL params — ${EnvironmentName}"
+      Family: aurora-postgresql15
+      Parameters:
+        # rds.force_ssl controls whether the Aurora engine rejects non-SSL conns.
+        # 0 = app-layer SSL verification (PGSSLMODE=verify-ca) handles security.
+        # 1 = engine rejects non-SSL; requires RDS CA bundle in all clients.
+        rds.force_ssl: !Ref RdsForceSSL
+        # log_connections helps diagnose SSL/TLS handshake issues in CloudWatch.
+        log_connections: "1"
+        # Connection timeout — prevents indefinite hangs on cold starts.
+        tcp_keepalives_idle: "60"
+        tcp_keepalives_interval: "10"
+        tcp_keepalives_count: "6"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── ECS Task Role (app-level AWS access) ─────────────────────────────────────
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-management-task-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+        - PolicyName: S3DataLakeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketArn"
+                  - !Sub
+                    - "${BucketArn}/*"
+                    - BucketArn:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketArn"
+                  - Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketArn"
+                  - !Sub
+                    - "${BucketArn}/*"
+                    - BucketArn:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketArn"
+        - PolicyName: AthenaAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StopQueryExecution
+                Resource:
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/ccc-security-analytics-${EnvironmentName}"
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetDatabase
+                  - glue:GetPartitions
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/ccc_security_events_${EnvironmentName}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/ccc_security_events_${EnvironmentName}/*"
+        - PolicyName: MSKAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka:DescribeCluster
+                  - kafka:GetBootstrapBrokers
+                  - kafka:ListScramSecrets
+                Resource:
+                  - Fn::ImportValue: !Sub "${MSKStackName}-ClusterArn"
+              - Effect: Allow
+                Action:
+                  # Producer: publish incidents/alerts to event topics
+                  - kafka-cluster:Connect
+                  - kafka-cluster:DescribeTopic
+                  - kafka-cluster:WriteData
+                  # Consumer: read from enriched/alert topics for orchestration
+                  - kafka-cluster:ReadData
+                  - kafka-cluster:DescribeGroup
+                  - kafka-cluster:AlterGroup
+                # MSK IAM ARNs for topics and consumer groups:
+                # Format: arn:aws:kafka:REGION:ACCOUNT:topic/CLUSTER_NAME/UUID/TOPIC
+                # The UUID is unknown at deploy time, so we use wildcard for both
+                # UUID and resource name segments (cluster-name/*/*).
+                Resource:
+                  - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/ccc-msk-${EnvironmentName}/*/*"
+                  - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/ccc-msk-${EnvironmentName}/*/*"
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeMountTargets
+                Resource: !GetAtt ReportsEFS.Arn
+        - PolicyName: SecretsManagerRuntimeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Task role needs GetSecretValue for runtime secrets accessed by the
+              # application code (DB connection string, session secret, AI keys).
+              # The execution role covers container startup secrets; the task role
+              # covers secrets fetched at runtime via the AWS SDK.
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+                  - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+                  # Use the parameterised ARN — no hardcoded ARN construction
+                  - !Ref SessionSecretArn
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
+
+  # ── Conditional Bedrock IAM Policy ───────────────────────────────────────────
+  # Only created when EnableBedrock=true.  Grants the ECS Task Role permission to
+  # call Bedrock Converse API (streaming + non-streaming) on all foundation models
+  # in the deployment region.  No permission is granted to Bedrock management APIs
+  # (list models, create knowledge bases, etc.) — inference only.
+  BedrockPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasBedrock
+    Properties:
+      PolicyName: !Sub "ccc-management-bedrock-${EnvironmentName}"
+      Roles:
+        - !Ref ECSTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BedrockInvokeModel
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource:
+              # All foundation models in this region — scoped to foundation-model
+              # ARN prefix.  Individual model IDs are not known at deploy time since
+              # the active model is selected via environment variable at runtime.
+              # Only inference actions are granted (least-privilege); management
+              # actions such as ListFoundationModels are intentionally excluded.
+              - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+
+  # ── Task Definition ──────────────────────────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - ReportsEFSMountTarget1
+      - ReportsEFSMountTarget2
+    Properties:
+      Family: !Sub "ccc-management-plane-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      Volumes:
+        - Name: reports-efs
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref ReportsEFS
+            # RootDirectory must be omitted when AuthorizationConfig.AccessPointId
+            # is set — the EFS access point's configured path takes precedence.
+            # Specifying both causes a CFN validation error at task definition create time.
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref ReportsAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: management-plane
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: management
+            - Name: SECURE_COOKIES
+              Value: "true"
+            # AI_REGION is always injected so the Bedrock client knows which
+            # region to use for foundation model API calls, even if the
+            # AI_PROVIDER env var comes from Secrets Manager at startup.
+            - Name: AI_REGION
+              Value: !Ref AWS::Region
+            # ── RDS/Aurora SSL configuration ──────────────────────────────────
+            # DB_SSL_CA points to the RDS CA bundle embedded in the Docker image
+            # at build time. NODE_EXTRA_CA_CERTS ensures the Node.js TLS stack
+            # also trusts the RDS CA (fixes SELF_SIGNED_CERT_IN_CHAIN errors).
+            - Name: DB_SSL_CA
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: PGSSLMODE
+              Value: verify-ca
+            - Name: NODE_EXTRA_CA_CERTS
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            # ── Data Plane federation ─────────────────────────────────────────
+            # JSON map of data-plane internal ALB URLs per logical region.
+            # Values are populated AFTER the data-plane stacks are deployed.
+            # Update this env var (or override via Secrets Manager) once ALB
+            # hostnames are known from stack outputs:
+            #   ccc-data-plane-india     → InternalALBDNSName
+            #   ccc-data-plane-bahrain   → InternalALBDNSName
+            #   ccc-data-plane-kenya     → InternalALBDNSName
+            - Name: DATA_PLANE_ENDPOINTS
+              Value: '{"india":"http://REPLACE_INDIA_ALB_DNS","bahrain":"http://REPLACE_BAHRAIN_ALB_DNS","kenya":"http://REPLACE_KENYA_ALB_DNS"}'
+            - Name: MANAGEMENT_PLANE_REGION
+              Value: ap-south-1
+            # ── EFS-backed persistent directories ─────────────────────────────
+            # EFS is mounted at /app/data on the Fargate task. Subdirectories
+            # are created in the Dockerfile (RUN mkdir -p …) so they are ready
+            # before the first request even if EFS is briefly unavailable.
+            # Without these, the app falls back to ephemeral /tmp which is lost
+            # on every task restart — do NOT remove these entries.
+            - Name: CLUSTER_WORKERS_MAX
+              Value: "2"
+            - Name: APP_REPORTS_DIR
+              Value: /app/data/reports
+            - Name: APP_UPLOADS_DIR
+              Value: /app/data/uploads
+            # PARQUET_DATA_DIR: DuckDB reads local Parquet files written by the
+            # data-lake warm-storage connector. Must survive task restarts.
+            - Name: PARQUET_DATA_DIR
+              Value: /app/data/events
+            # AI_MODEL / AI_BASE_URL — optional; only needed for non-OpenAI providers.
+            # Defaults to empty so the app falls back to the AI_PROVIDER/AI_API_KEY-driven
+            # router (OpenAI-compatible default). Override these in your deployment pipeline
+            # or via aws ssm / secretsmanager if you need grok / deepseek / kimi / azure etc.
+            #   grok:       AI_MODEL=grok-2-latest,       AI_BASE_URL=https://api.x.ai/v1
+            #   deepseek:   AI_MODEL=deepseek-chat,        AI_BASE_URL=https://api.deepseek.com/v1
+            #   kimi:       AI_MODEL=moonshot-v1-32k,      AI_BASE_URL=https://api.moonshot.cn/v1
+            #   zai:        AI_MODEL=glm-4-flash,          AI_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+            #   azure:      AI_MODEL=gpt-4o,               AI_BASE_URL=https://YOUR.openai.azure.com
+            - Name: AI_MODEL
+              Value: ""
+            - Name: AI_BASE_URL
+              Value: ""
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub
+                - "${SecretArn}:DATABASE_URL::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
+            - Name: KAFKA_BROKERS
+              ValueFrom: !Sub
+                - "${SecretArn}:KAFKA_BROKERS::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+            - Name: OPENSEARCH_URL
+              ValueFrom: !Sub
+                - "${SecretArn}:OPENSEARCH_URL::"
+                - SecretArn:
+                    Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+            - Name: SESSION_SECRET
+              ValueFrom: !Ref SessionSecretArn
+            - Name: AI_PROVIDER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/provider-${EnvironmentName}"
+            - Name: AI_API_KEY
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/api-key-${EnvironmentName}"
+          MountPoints:
+            # EFS is mounted at /app/data so APP_REPORTS_DIR (/app/data/reports),
+            # APP_UPLOADS_DIR (/app/data/uploads), and PARQUET_DATA_DIR (/app/data/events)
+            # all land on durable EFS-backed storage and survive Fargate task restarts.
+            - ContainerPath: /app/data
+              SourceVolume: reports-efs
+              ReadOnly: false
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+          StopTimeout: 30
+
+  # ── Application Load Balancer ────────────────────────────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-management-alb-${EnvironmentName}"
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - Fn::ImportValue: !Sub "${VpcStackName}-ALBSecurityGroupId"
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet2Id"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: deletion_protection.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-management-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      HealthCheckPath: /health
+      HealthCheckPort: "5000"
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── ECS Service ──────────────────────────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ALBListenerHTTPS
+      - ALBListenerHTTP
+    Properties:
+      ServiceName: !Sub "ccc-management-plane-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      EnableExecuteCommand: true
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1Id"
+            - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2Id"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+      LoadBalancers:
+        - ContainerName: management-plane
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── Auto Scaling ─────────────────────────────────────────────────────────────
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: ECSService
+    Properties:
+      MinCapacity: !Ref MinCount
+      MaxCapacity: !Ref MaxCount
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-management-${EnvironmentName}-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  ScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-management-${EnvironmentName}-memory-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+
+  ALBDNSName:
+    Description: Management Plane ALB DNS (point your CNAME/A record here)
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDNSName"
+
+  ALBURL:
+    Value: !Sub "https://${ALB.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBURL"
+
+  ECSClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSClusterName"
+
+  ECSServiceName:
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSServiceName"
+
+  TaskRoleArn:
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TaskRoleArn"
+
+  ECSSecurityGroupId:
+    Description: >-
+      Security Group ID of the Management Plane ECS tasks.
+      Pass this as ManagementPlaneSecurityGroupId when deploying data-plane stacks
+      so the internal ALBs accept traffic only from the management plane.
+    Value:
+      Fn::ImportValue: !Sub "${VpcStackName}-ECSSecurityGroupId"
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSSecurityGroupId"
+
+  AuroraParameterGroupName:
+    Description: >-
+      Name of the Aurora PostgreSQL cluster parameter group created by this stack.
+      Pass this to the Aurora cluster stack (04-aurora-global.yml) as the
+      DBClusterParameterGroupName override so the cluster adopts rds.force_ssl
+      and tcp keepalive settings without requiring engine restart.
+    Value: !Ref AuroraParameterGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraParameterGroupName"
+
+  RdsForceSSLSetting:
+    Description: >-
+      The value of rds.force_ssl applied to the Aurora cluster parameter group.
+      "0" = app-layer SSL only. "1" = engine rejects non-SSL connections.
+    Value: !Ref RdsForceSSL
+    Export:
+      Name: !Sub "${AWS::StackName}-RdsForceSSLSetting"
+
+  ECSClusterArn:
+    Description: ARN of the management-plane ECS cluster.
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSClusterArn"
+
+  ECSExecutionRoleArn:
+    Description: ARN of the ECS task execution role (pulls images, injects secrets).
+    Value: !GetAtt ECSExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSExecutionRoleArn"
+
+  ECSTaskRoleArn:
+    Description: ARN of the ECS task role (app-level AWS API access).
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSTaskRoleArn"
+
+  ECSTaskRoleName:
+    Description: Name of the ECS task role (use when attaching IAM policies from other stacks).
+    Value: !Ref ECSTaskRole
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSTaskRoleName"
+
+  ReportsEFSId:
+    Description: EFS file system ID for persistent AI-generated report storage.
+    Value: !Ref ReportsEFS
+    Export:
+      Name: !Sub "${AWS::StackName}-ReportsEFSId"
+
+  ReportsAccessPointId:
+    Description: EFS access point ID scoped to /reports for the management-plane task.
+    Value: !Ref ReportsAccessPoint
+    Export:
+      Name: !Sub "${AWS::StackName}-ReportsAccessPointId"
+
+  SessionSecretArn:
+    Description: ARN of the Secrets Manager secret holding the Express session secret.
+    Value: !Ref SessionSecretArn
+    Export:
+      Name: !Sub "${AWS::StackName}-SessionSecretArn"
+
+  KafkaBrokersSecretArn:
+    Description: >-
+      ARN of the Secrets Manager secret holding KAFKA_BROKERS.
+      Re-exported from the MSK stack so downstream stacks only need one import source.
+    Value:
+      Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
+    Export:
+      Name: !Sub "${AWS::StackName}-KafkaBrokersSecretArn"
+
+  OpenSearchSecretArn:
+    Description: >-
+      ARN of the Secrets Manager secret holding OPENSEARCH_URL.
+      Re-exported from the OpenSearch stack for downstream consumption.
+    Value:
+      Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
+    Export:
+      Name: !Sub "${AWS::StackName}-OpenSearchSecretArn"
+
+  ALBTargetGroupArn:
+    Description: ARN of the ALB target group routing traffic to ECS tasks.
+    Value: !Ref ALBTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBTargetGroupArn"

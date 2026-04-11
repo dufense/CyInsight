@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-receiver
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: syslog-tcp
+      port: 1514
+      targetPort: syslog-tcp
+      protocol: TCP
+    - name: syslog-tls
+      port: 6514
+      targetPort: syslog-tls
+      protocol: TCP
+  selector:
+    app: secureops
+    plane: receiver
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-receiver-syslog-udp
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+    component: syslog
+spec:
+  type: LoadBalancer
+  ports:
+    - name: syslog-udp
+      port: 514
+      targetPort: syslog-udp
+      protocol: UDP
+  selector:
+    app: secureops
+    plane: receiver

@@ -1,0 +1,37 @@
+title: Command and Control Beaconing
+id: sigma-network-002
+status: stable
+level: critical
+description: Detects network patterns consistent with Command and Control (C2) beaconing behavior, including periodic callbacks to external infrastructure.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: network
+  product: any
+detection:
+  selection:
+    eventType:
+      - network
+      - endpoint
+  keywords:
+    - command and control
+    - c2 beacon
+    - c2 callback
+    - beaconing
+    - covert channel
+    - dns tunneling
+    - data exfiltration
+    - suspicious outbound
+    - known bad ip
+    - malicious domain
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate periodic update checks
+  - Heartbeat monitoring
+tags:
+  - attack.command_and_control
+  - attack.t1071
+mitre:
+  tactic: Command and Control
+  technique: T1071
+  technique_name: Application Layer Protocol

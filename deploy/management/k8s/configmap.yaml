@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secureops-management-config
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: management
+data:
+  kafka-brokers: "kafka-0.kafka-headless.secureops.svc.cluster.local:9092,kafka-1.kafka-headless.secureops.svc.cluster.local:9092,kafka-2.kafka-headless.secureops.svc.cluster.local:9092"
+  redis-url: "redis://redis.secureops.svc.cluster.local:6379"
+  log-level: "info"
+  data-plane-regions: "eu-west,us-east,india,kenya,bahrain,saudi"

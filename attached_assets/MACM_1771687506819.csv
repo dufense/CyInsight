@@ -1,0 +1,1061 @@
+﻿Endpoint,IP,OS,Group,Agent Version,System status,First Seen,Last Seen,Antivirus Database Version,EPP Best Practice,Open Alerts,Vulnerabilities,Misconfigurations
+rs-ws-web-1,10.20.73.110,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+rs-ws-mbl-1,10.20.74.20,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+rs-ws-kym-2,10.20.74.134,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+rs-ws-kym-1,10.20.78.252,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+rs-ws-bo-1,10.20.72.37,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+payment-prod-mysql,10.20.90.202,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+nextOptions-uat-webapp,10.40.39.177,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 00:30","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+nextOptions-uat-backend,10.40.32.218,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 00:43","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+mstock-pt-06-windows,10.40.101.59,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 09:17","21 Feb 2026, 16:05",N/A,Yes,0,9,17
+mstock-pt-05,10.40.64.182,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 08:04","20 Feb 2026, 23:00",8.20.72.202,No,0,0,0
+mstock-pt-04,10.40.64.149,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 08:04","20 Feb 2026, 23:00",8.20.72.202,No,0,0,0
+mstock-pt-03,10.40.64.198,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 08:04","20 Feb 2026, 23:00",8.20.72.202,No,0,0,0
+mstock-pt-02,10.40.64.188,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 08:04","20 Feb 2026, 23:00",8.20.72.202,No,0,0,0
+mstock-pt-01,10.40.64.48,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 08:04","20 Feb 2026, 23:00",8.20.72.202,No,0,0,0
+mpowa,192.168.101.225,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+mpofs,192.168.101.226,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+mpesg,192.168.101.224,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.212,No,0,0,0
+miraeserver2,192.168.202.119,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:31","03 Feb 2026, 18:15",8.20.70.62,Yes,0,0,0
+miraeserver,192.168.202.118,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:34","03 Feb 2026, 17:21",8.20.70.62,Yes,0,0,0
+mafeed03,192.168.101.68,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"30 Dec 2025, 17:26","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+mafeed,192.168.101.69,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+macmztnapoc,192.168.101.244,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+macmd708,172.20.30.201,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","20 Feb 2026, 17:39",8.20.72.192,Yes,0,2,57
+macmd707,172.20.30.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,56
+macmd564,172.20.110.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:02",8.20.72.186,Yes,0,1,50
+macmd562,172.20.80.158,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 06:53","21 Feb 2026, 16:02",8.20.72.186,Yes,0,10,54
+macmd395,172.20.121.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"08 Dec 2025, 09:11","20 Feb 2026, 18:29",8.20.72.186,Yes,0,3,56
+macmd390,172.20.80.241,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:15","21 Feb 2026, 12:29",8.20.72.192,Yes,0,2,56
+macmd384,172.20.70.134,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 05:35","04 Feb 2026, 12:16",8.20.71.172,Yes,0,69,55
+macmd382,172.20.80.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:00","20 Feb 2026, 19:26",8.20.72.192,Yes,0,2,54
+macmd381,172.20.80.204,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,18,54
+macmd378,172.20.110.98,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:18","21 Feb 2026, 15:58",8.20.72.192,Yes,0,3,57
+macm-ocs,192.168.101.130,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+macm-HP-Pro-Tower-280-G9-E-PCI-Desktop-PC,172.20.80.147,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ma-nxtopt-feed1-dc,192.168.152.19,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"09 Feb 2026, 17:10","16 Feb 2026, 18:03",8.20.72.48,Yes,0,0,0
+ma-nxtopt-f1,172.20.80.77,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","17 Feb 2026, 11:47",8.20.72.152,Yes,0,0,0
+ma-bxadp-06-dc,192.168.152.18,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"26 Dec 2025, 12:25","03 Feb 2026, 17:48",8.20.71.176,Yes,0,0,0
+ma-bxadp-06-dc,192.168.152.18,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"04 Feb 2026, 18:41","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+ma-bxadp-05-dc-ntt,192.168.152.17,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"13 Feb 2026, 20:05","13 Feb 2026, 20:43",8.20.72.104,Yes,2,0,0
+ma-bxadp-05-dc,192.168.152.17,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"26 Dec 2025, 12:39","13 Feb 2026, 19:22",8.20.71.176,Yes,0,0,0
+ma-bxadp-05-dc,10.222.37.146,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"13 Feb 2026, 20:07","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+ma-bxadp-04-dc-ntt,192.168.152.102,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"13 Feb 2026, 16:52","13 Feb 2026, 19:29",8.20.72.98,Yes,0,0,0
+ma-bxadp-04-dc,192.168.152.16,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"26 Dec 2025, 12:42","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ma-bxadp-03-dc,192.168.152.15,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"17 Feb 2026, 16:57","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+ma-bxadp-03-dc,192.168.152.15,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"26 Dec 2025, 12:42","17 Feb 2026, 16:05",8.20.72.108,Yes,0,0,0
+ma-bxadp-02-dc,10.222.37.146,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"26 Dec 2025, 12:35","17 Feb 2026, 16:54",8.20.72.156,Yes,0,0,0
+ma-bxadp-01-dc-ntt,192.168.152.100,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"13 Feb 2026, 16:58","13 Feb 2026, 19:29",8.20.72.98,Yes,0,0,0
+ma-bxadp-01-dc,10.222.36.130,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"26 Dec 2025, 12:31","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+ma-box-02,192.168.208.9,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","10 Feb 2026, 17:05",8.20.70.62,Yes,0,0,0
+kgisluatapp,192.168.101.199,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-51-39-82.ap-south-1.compute.internal,10.51.39.82,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 02:37","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-51-37-231.ap-south-1.compute.internal,10.51.37.231,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+ip-10-51-36-229,10.51.36.229,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 02:42","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+ip-10-51-27-202.ap-south-1.compute.internal,10.51.27.202,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 08:39","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+ip-10-51-11-9,10.51.11.9,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 03:03","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-40-97-183,10.40.97.183,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:26","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-40-83-139.ap-south-1.compute.internal,10.40.83.139,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+ip-10-40-66-47.ap-south-1.compute.internal,10.40.66.47,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:03","20 Feb 2026, 20:58",8.20.72.200,No,0,0,0
+ip-10-40-64-211,10.40.64.211,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.216,No,0,0,0
+ip-10-40-64-127.ap-south-1.compute.internal,10.40.64.127,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:18","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-40-50-171.ap-south-1.compute.internal,10.40.50.171,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-40-40-219,10.40.40.219,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 15:54","20 Feb 2026, 20:57",8.20.72.196,No,0,0,0
+ip-10-40-4-173.ap-south-1.compute.internal,10.40.4.173,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-40-38-165.ap-south-1.compute.internal,10.40.38.165,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.216,No,0,0,0
+ip-10-40-32-112.ap-south-1.compute.internal,10.40.32.112,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-40-3-112,10.40.3.112,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+ip-10-40-15-177,10.40.15.177,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.216,No,0,0,0
+ip-10-30-24-223,10.30.24.223,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+ip-10-30-15-124,10.30.15.124,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 21:00",8.20.72.200,No,0,0,0
+ip-10-30-0-16,10.30.0.16,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:56",8.20.72.196,No,0,0,0
+ip-10-23-3-215.ap-south-1.compute.internal,10.23.3.215,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+ip-10-23-2-81.ap-south-1.compute.internal,10.23.2.81,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","20 Feb 2026, 17:25",8.20.72.192,No,0,0,0
+ip-10-23-2-73.ap-south-1.compute.internal,10.23.2.73,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","20 Feb 2026, 17:25",8.20.72.192,No,0,0,0
+ip-10-23-2-245.ap-south-1.compute.internal,10.23.2.245,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-23-2-222.ap-south-1.compute.internal,10.23.2.222,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-23-0-213.ap-south-1.compute.internal,10.23.0.213,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-20-90-212.ap-south-1.compute.internal,10.20.90.212,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-90-10.ap-south-1.compute.internal,10.20.90.10,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-86-46.ap-south-1.compute.internal,10.20.86.46,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","10 Feb 2026, 09:25",8.20.71.176,Yes,0,0,0
+ip-10-20-85-74,10.20.85.74,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-85-30.ap-south-1.compute.internal,10.20.85.30,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-85-207.ap-south-1.compute.internal,10.20.85.207,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+ip-10-20-85-20,10.20.85.20,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-20-84-81.ap-south-1.compute.internal,10.20.84.81,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-20-84-68.ap-south-1.compute.internal,10.20.84.68,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.216,No,0,0,0
+ip-10-20-80-41,10.20.80.41,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.216,No,0,0,0
+ip-10-20-79-138.ap-south-1.compute.internal,10.20.79.138,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-78-209.ap-south-1.compute.internal,10.20.78.209,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"04 Feb 2026, 03:38","21 Feb 2026, 16:06",8.20.72.212,No,0,0,0
+ip-10-20-78-145.ap-south-1.compute.internal,10.20.78.145,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"04 Feb 2026, 03:38","21 Feb 2026, 16:06",8.20.72.212,No,0,0,0
+ip-10-20-76-114,10.20.76.114,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-20-75-6,10.20.75.6,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.206,No,0,0,0
+ip-10-20-75-44.ap-south-1.compute.internal,10.20.75.44,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"04 Feb 2026, 02:09","21 Feb 2026, 16:06",8.20.72.212,No,0,0,0
+ip-10-20-75-25.ap-south-1.compute.internal,10.20.75.25,Linux,AWS Linux Server,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,0,0
+ip-10-20-74-75.ap-south-1.compute.internal,10.20.74.75,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"04 Feb 2026, 01:04","21 Feb 2026, 16:06",8.20.72.212,No,0,0,0
+ip-10-20-74-117,10.20.74.117,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-73-66.ap-south-1.compute.internal,10.20.73.66,Linux,AWS Linux Server,4.31.0.16354,OK,"01 Dec 2025, 06:31","20 Feb 2026, 16:26",8.20.72.196,Yes,0,0,0
+ip-10-20-72-189,10.20.72.189,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+ip-10-20-70-244,10.20.70.244,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+ip-10-20-68-240.ap-south-1.compute.internal,10.20.68.240,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+ip-10-20-64-141.ap-south-1.compute.internal,10.20.64.141,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+insti-prod-db-1,10.55.14.102,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 03:37","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+dsm-prod-mysql,10.20.90.91,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+db.mirae-asset.co.in,10.40.35.234,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 00:47","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+classbetasrv,192.168.101.215,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.186,Yes,0,26,40
+WebPxl-Test,192.168.101.143,Windows,Windows Servers,4.31.0.19214,OK,"06 Dec 2025, 14:52","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,56
+Warrior,192.168.1.109,Windows,USB Alllowed Group,4.31.0.19139,OK,"11 Feb 2026, 10:00","13 Feb 2026, 14:34",8.20.72.98,Yes,0,4,43
+WIN-F7AUTB63SQ1,192.168.202.51,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 05:34","01 Feb 2026, 12:34",8.20.71.26,Yes,0,21,0
+WIN-CS8TAI6K70C,192.168.142.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,18,49
+Securden-PAM-Prod,10.20.93.170,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,40
+SearchModule-ESDB-Prod,10.20.90.120,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+SKDRL1GEXTW009,192.168.101.231,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,35
+RS_File_Upload,10.20.77.230,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+RS3-MF-API-2,10.23.1.200,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.204,Yes,0,8,26
+RS3-MF-API-1,10.23.0.242,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,8,26
+RS-WS-LOGIN-1,10.20.73.106,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+RS-UAT-WS-WEB-1,10.40.10.112,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:39","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+RS-UAT-WS-MBL-1,10.40.0.219,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:44","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+RS-UAT-WS-BO-1,10.40.47.191,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:48","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+RS-UAT-OMS-1,10.40.35.186,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 01:35","21 Feb 2026, 16:09",8.20.72.216,No,0,0,0
+RS-MF-API2,10.20.74.138,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.204,Yes,0,8,27
+RS-MF-API1,10.20.72.95,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,8,27
+RECO-DEV,192.168.101.125,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:06",8.20.72.186,Yes,0,13,48
+RECO-DB-PROD,192.168.101.127,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,40
+RECO-APP-PROD,192.168.101.126,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,8,40
+Prod-SearchModule2-ESDB,10.20.90.92,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+PRTG-T3,192.168.101.137,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.200,Yes,0,1,40
+PRTG-Retail,192.168.101.136,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.200,Yes,0,0,50
+PROP-RS,172.20.50.92,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:09",8.20.72.186,Yes,0,4,53
+PROD_FTP_M10,20.0.0.175,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,26
+PROD-TrackWizz,192.168.101.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,32,42
+PICUS-PROD-APP,10.20.92.99,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,40
+OpsApp-UAT-Clone,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Feb 2026, 11:15","18 Feb 2026, 17:03",8.20.72.172,Yes,0,3,57
+OpsApp-UAT,172.20.30.173,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,55
+OpenAPI-mstockAPIInteractive-Prod-2,10.20.85.244,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+OpenAPI-Web,10.20.85.167,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+OpenAPI-SubMgr,10.20.84.164,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:33","23 Jan 2026, 19:41",8.20.70.62,Yes,0,0,0
+OpenAPI-Bcast-stream-Prod-2,10.20.84.4,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+OpenAPI-Bcast-stream,10.20.84.7,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+OpenAPI-APP-3-UAT,10.40.85.4,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:56",8.20.72.196,No,0,0,0
+OpenAPI-APP-2-UAT,10.40.80.100,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+OpenAPI-APP-1-UAT,10.40.82.74,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 07:04","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+One-Audit-UAT-DB,10.40.66.172,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+One-Audit-UAT-App,10.40.96.41,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","20 Feb 2026, 20:59",8.20.72.200,No,0,0,0
+Nxtoption-SpanMargin-2,10.23.1.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Jan 2026, 16:51","20 Feb 2026, 16:56",8.20.72.192,Yes,0,9,28
+Nxtoption-SpanMargin-1,10.23.0.178,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Jan 2026, 16:56","21 Feb 2026, 16:06",8.20.72.186,Yes,0,9,28
+NXTOPT-PROD-WEBAPP2,10.23.2.15,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+NXTOPT-PROD-WEBAPP1,10.23.2.58,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.206,No,0,0,0
+NXTOPT-PROD-LM,10.23.2.238,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+NXTOPT-PROD-DATASTORE,10.23.2.163,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+NXTOPT-PROD-BACKEND,10.23.2.34,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.206,No,0,0,0
+Macmd730,172.20.131.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,28,59
+Macmd407,172.20.110.141,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:40","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,57
+Macm_Bhavna,172.20.133.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Jan 2026, 23:16","20 Feb 2026, 16:49",8.20.72.192,Yes,0,1,58
+MacmPowerApp,192.168.101.176,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Dec 2025, 17:44","21 Feb 2026, 16:07",8.20.72.186,Yes,0,0,41
+MacmBackApp,192.168.101.175,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Dec 2025, 17:44","21 Feb 2026, 16:09",8.20.72.186,Yes,0,1,41
+MStockBuybackApp,10.20.85.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","20 Feb 2026, 16:56",8.20.72.192,Yes,0,1,26
+MSTOCK-PROD-WEB-03,10.20.69.180,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,10,29
+MPOSM,192.168.101.227,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.206,No,0,0,0
+MISDB-UAT,192.168.101.159,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,45,47
+MIRAEDPDB,10.8.172.18,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:31","21 Feb 2026, 16:07",8.20.72.204,Yes,0,29,51
+MIRAE-SRV2,192.168.202.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","20 Feb 2026, 14:20",8.20.72.186,Yes,0,27,40
+MAeSignerSLAVE,10.8.172.22,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:28","21 Feb 2026, 16:08",8.20.72.186,Yes,0,28,46
+MARTECH-UAT-IIS-01,10.40.96.73,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 09:11","21 Feb 2026, 16:06",8.20.72.192,Yes,0,10,41
+MARECO-UAT,192.168.101.128,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,7,41
+MAMCD793,10.10.20.23,Mac,USB Allowed Group - MAC,4.31.0.15047,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,0,0
+MAEKYCArchive,10.8.172.15,Windows,STT instance,4.31.0.19214,OK,"12 Dec 2025, 14:02","21 Feb 2026, 16:08",8.20.72.186,Yes,0,29,47
+MADCV-EKC-DBSEC,10.8.172.19,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 23:16","21 Feb 2026, 16:08",8.20.72.186,Yes,0,30,18
+MADCV-EKC-DBPRI,10.8.172.12,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 23:13","21 Feb 2026, 16:05",8.20.72.192,Yes,0,31,24
+MADCV-EKC-APP1,192.168.152.34,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:14","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,18
+MADCV-BO-DBPRI,10.8.172.11,Windows,STT instance,4.31.0.19214,OK,"15 Dec 2025, 18:37","21 Feb 2026, 16:05",8.20.72.186,Yes,0,8,47
+MADCV-BO-APP,192.168.152.23,Windows,STT instance,4.31.0.19214,OK,"15 Dec 2025, 18:55","21 Feb 2026, 16:07",8.20.72.186,Yes,0,9,49
+MACM’s MacBook Pro (2),192.168.0.108,Mac,Manually Installed Agents - MAC,4.31.0.15047,OK,"01 Dec 2025, 07:15","21 Feb 2026, 13:33",8.20.72.186,Yes,0,0,0
+MACMl594,172.20.100.77,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:10","20 Feb 2026, 17:53",8.20.72.196,Yes,0,2,56
+MACM_VEEAM,192.168.101.35,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,29,49
+MACMWEB,192.168.101.29,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,50
+MACMVMS,192.168.101.232,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,23,45
+MACMVELOX-UAT,192.168.101.46,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,44
+MACMVELOX,192.168.101.37,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,48
+MACMTRELLIX,192.168.101.90,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.216,Yes,0,22,49
+MACMSTMDMVPN,192.168.101.131,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Jan 2026, 17:08","21 Feb 2026, 16:02",8.20.72.186,Yes,0,3,37
+MACMSTMDM,192.168.101.197,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,37
+MACMSKYHIGH,192.168.101.173,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,40
+MACMSHAREPRO,192.168.101.246,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Jan 2026, 13:12","21 Feb 2026, 16:08",8.20.72.186,Yes,0,27,40
+MACMSDNSM,192.168.101.192,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.186,Yes,0,4,49
+MACMSDNAPP1,192.168.101.191,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,37
+MACMPWOAS3,192.168.101.223,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,12,44
+MACMPWOAS2,192.168.101.222,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,19,45
+MACMPWOAS1,192.168.101.221,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,19,44
+MACMPCSSMLAGT,192.168.101.106,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,36
+MACMOTSSLAVEDB,10.8.172.21,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 09:45","21 Feb 2026, 16:06",8.20.72.186,Yes,0,29,45
+MACMOMNE1,192.168.100.105,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:09",8.20.72.186,Yes,0,4,60
+MACMMOBITRACE,192.168.101.234,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,40
+MACMMOBITDB,192.168.101.243,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,28,40
+MACMMOBITAPP,192.168.101.242,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,11,40
+MACMMDS2,192.168.101.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,12,46
+MACML99,192.168.29.132,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 16:44","20 Feb 2026, 08:11",8.20.72.192,Yes,0,2,53
+MACML98,192.168.29.188,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 20:09","20 Feb 2026, 06:54",8.20.72.192,Yes,0,3,32
+MACML96,192.168.0.105,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 08:40","07 Feb 2026, 21:55",8.20.68.142,Yes,0,4,18
+MACML95,172.20.80.77,Windows,Manually Installed Agents,4.31.0.19139,OK,"10 Dec 2025, 09:05","09 Feb 2026, 17:22",8.20.69.214,Yes,0,3,53
+MACML94,172.20.80.254,Windows,Manually Installed Agents,4.31.0.19139,OK,"31 Dec 2025, 10:14","11 Feb 2026, 12:02",8.20.70.52,Yes,0,2,53
+MACML93,192.168.29.118,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Jan 2026, 11:45","21 Feb 2026, 16:08",8.20.72.196,Yes,0,3,58
+MACML923,172.20.100.70,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Feb 2026, 17:26","20 Feb 2026, 15:22",8.20.72.186,Yes,0,1,39
+MACML922,172.20.100.124,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Feb 2026, 16:49","20 Feb 2026, 17:24",8.20.72.196,Yes,0,1,11
+MACML921,172.20.100.79,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Feb 2026, 06:15","20 Feb 2026, 17:26",8.20.72.192,Yes,0,1,52
+MACML920,172.20.100.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"30 Jan 2026, 12:14","21 Feb 2026, 00:22",8.20.72.192,Yes,0,1,55
+MACML92,192.168.0.112,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 22:38","20 Feb 2026, 12:24",8.20.72.196,Yes,0,0,47
+MACML919,172.20.131.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"29 Jan 2026, 16:12","20 Feb 2026, 16:25",8.20.72.186,Yes,0,1,54
+MACML918,192.168.104.141,Windows,USB Alllowed Group,4.31.0.19214,OK,"02 Dec 2025, 18:48","20 Feb 2026, 20:06",8.20.72.192,Yes,0,1,53
+MACML911,192.168.0.104,Windows,Manually Installed Agents,4.30.1.18852,OK,"03 Dec 2025, 13:30","31 Jan 2026, 19:34",8.20.71.196,Yes,0,3,28
+MACML910,172.20.80.8,Windows,Manually Installed Agents,4.30.1.18852,OK,"12 Dec 2025, 11:16","30 Jan 2026, 12:08",8.20.69.26,Yes,0,1,16
+MACML91,172.20.100.83,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:07","20 Feb 2026, 18:21",8.20.72.196,Yes,0,1,41
+MACML909,192.168.0.102,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Dec 2025, 14:46","16 Feb 2026, 00:17",8.20.70.14,Yes,0,1,51
+MACML908,172.20.100.104,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 14:24","20 Feb 2026, 16:01",8.20.72.196,Yes,0,1,11
+MACML907,10.202.172.230,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 11:36",8.20.72.180,Yes,0,2,53
+MACML904,172.20.100.76,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:01","18 Feb 2026, 19:44",8.20.72.170,Yes,0,2,37
+MACML903,172.20.100.85,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 16:45","20 Feb 2026, 17:05",8.20.72.196,Yes,0,3,24
+MACML902,172.20.100.95,Windows,Manually Installed Agents,4.30.1.19100,OK,"03 Dec 2025, 21:40","04 Feb 2026, 11:37",8.20.69.218,Yes,0,2,29
+MACML902,192.168.43.131,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Feb 2026, 11:49","18 Feb 2026, 23:15",8.20.72.176,Yes,0,0,11
+MACML90,10.218.3.216,Windows,T_Deploy,4.30.1.19100,OK,"01 Dec 2025, 11:42","07 Feb 2026, 19:59",8.20.70.48,Yes,0,4,16
+MACML899,172.20.100.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:55","20 Feb 2026, 17:31",8.20.72.192,Yes,0,2,53
+MACML898,172.20.131.36,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 09:31","29 Jan 2026, 16:03",8.20.70.48,Yes,0,1,54
+MACML898,172.20.100.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:15","20 Feb 2026, 18:17",8.20.72.192,Yes,0,1,51
+MACML897,192.168.104.196,Windows,Manually Installed Agents,4.31.0.19139,OK,"02 Dec 2025, 09:03","12 Feb 2026, 15:31",8.20.70.38,Yes,0,2,23
+MACML897,172.20.80.160,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Feb 2026, 15:38","20 Feb 2026, 17:02",8.20.72.196,Yes,0,2,16
+MACML895,172.20.100.55,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:35","20 Feb 2026, 18:13",8.20.72.192,Yes,0,1,53
+MACML894,192.168.23.72,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","17 Feb 2026, 18:09",8.20.72.160,Yes,0,2,54
+MACML893,172.20.100.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:44","20 Feb 2026, 18:19",8.20.72.192,Yes,0,3,53
+MACML892,192.168.31.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Feb 2026, 11:56","20 Feb 2026, 22:43",8.20.72.202,Yes,0,2,53
+MACML892,172.20.100.85,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 20:02","05 Feb 2026, 11:36",8.20.69.76,Yes,0,2,31
+MACML89,172.20.100.103,Windows,Manually Installed Agents,4.31.0.19139,OK,"10 Dec 2025, 17:12","12 Feb 2026, 16:19",8.20.69.234,Yes,0,0,47
+MACML888,172.20.133.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Jan 2026, 11:50","18 Feb 2026, 15:23",8.20.72.170,Yes,0,2,48
+MACML887,192.168.0.104,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 12:27","15 Feb 2026, 17:29",8.20.70.56,Yes,0,2,52
+MACML886,172.20.100.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:29","20 Feb 2026, 16:52",8.20.72.192,Yes,0,2,49
+MACML884,172.20.100.65,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","21 Feb 2026, 14:42",8.20.72.206,Yes,0,1,53
+MACML882,172.20.100.32,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 09:09","09 Feb 2026, 17:42",8.20.70.52,Yes,0,1,54
+MACML882,172.20.100.32,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Feb 2026, 17:55","20 Feb 2026, 20:27",8.20.72.196,Yes,0,2,54
+MACML881,172.20.100.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Feb 2026, 17:03","20 Feb 2026, 20:55",8.20.72.196,Yes,0,9,43
+MACML881,172.20.100.61,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 07:41","02 Feb 2026, 16:55",8.20.70.44,Yes,0,9,47
+MACML880,172.20.100.101,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:47","18 Feb 2026, 18:59",8.20.72.170,Yes,0,2,38
+MACML88,192.168.7.208,Windows,Manually Installed Agents,4.31.0.19214,OK,"15 Dec 2025, 09:47","20 Feb 2026, 16:24",8.20.72.192,Yes,0,1,53
+MACML879,172.20.100.50,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:16","21 Feb 2026, 00:39",8.20.72.196,Yes,0,2,53
+MACML878,10.26.49.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 16:20","20 Feb 2026, 11:12",8.20.72.192,Yes,0,2,53
+MACML877,172.20.133.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 19:21","20 Feb 2026, 17:16",8.20.72.192,Yes,0,3,53
+MACML876,192.168.0.101,Windows,Manually Installed Agents,4.30.1.19100,OK,"05 Feb 2026, 11:38","07 Feb 2026, 18:37",8.20.72.26,Yes,0,2,35
+MACML876,172.20.100.116,Windows,Manually Installed Agents,4.30.1.19100,OK,"11 Dec 2025, 10:25","05 Feb 2026, 11:31",8.20.69.204,Yes,0,2,53
+MACML875,192.168.0.198,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:01","19 Feb 2026, 23:24",8.20.72.180,Yes,0,2,53
+MACML874,172.20.100.117,Windows,Manually Installed Agents,4.30.1.19100,OK,"04 Dec 2025, 10:43","05 Feb 2026, 10:12",8.20.69.202,Yes,0,1,7
+MACML872,172.20.100.98,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","20 Feb 2026, 17:19",8.20.72.190,Yes,0,1,53
+MACML871,172.20.121.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:21","19 Feb 2026, 17:23",8.20.72.174,Yes,0,1,56
+MACML865,172.20.100.115,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","20 Feb 2026, 16:06",8.20.72.192,Yes,0,2,50
+MACML864,172.20.100.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:22","20 Feb 2026, 23:39",8.20.72.196,Yes,0,10,53
+MACML863,172.20.100.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:17","20 Feb 2026, 12:25",8.20.72.192,Yes,0,2,50
+MACML862,172.20.100.103,Windows,Manually Installed Agents,4.30.1.19100,OK,"20 Jan 2026, 12:50","03 Feb 2026, 12:08",8.20.71.64,Yes,0,3,8
+MACML860,192.168.104.72,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:27","20 Feb 2026, 17:59",8.20.72.196,Yes,0,1,56
+MACML848,192.168.104.77,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:21","19 Feb 2026, 13:04",8.20.72.180,Yes,0,2,53
+MACML84,172.20.100.122,Windows,T_Deploy,4.31.0.19139,OK,"12 Dec 2025, 11:43","11 Feb 2026, 13:20",8.20.69.218,Yes,0,3,47
+MACML838,172.20.100.75,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","21 Feb 2026, 01:11",8.20.72.192,Yes,0,2,54
+MACML837,172.20.100.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 14:35","18 Feb 2026, 13:59",8.20.72.170,Yes,0,8,28
+MACML833,172.20.100.78,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","21 Feb 2026, 02:29",8.20.72.192,Yes,0,2,52
+MACML831,172.20.50.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","20 Feb 2026, 17:05",8.20.72.186,Yes,0,3,53
+MACML83,172.20.100.109,Windows,Manually Installed Agents,4.31.0.19214,OK,"18 Dec 2025, 09:24","18 Feb 2026, 22:44",8.20.72.174,Yes,0,3,54
+MACML827,172.20.100.95,Windows,Manually Installed Agents,4.31.0.19139,OK,"09 Dec 2025, 13:37","13 Feb 2026, 18:26",8.20.69.218,Yes,0,0,54
+MACML81,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19139,OK,"18 Dec 2025, 15:23","13 Feb 2026, 18:00",8.20.71.184,Yes,0,3,51
+MACML80,172.20.100.54,Windows,Manually Installed Agents,4.30.1.18852,OK,"27 Jan 2026, 15:59","27 Jan 2026, 23:42",8.20.71.144,Yes,0,2,33
+MACML79,192.168.104.165,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 09:44","17 Feb 2026, 16:52",8.20.72.160,Yes,0,2,24
+MACML78,10.160.24.5,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 20:34","17 Feb 2026, 01:45",8.20.72.152,Yes,0,1,19
+MACML775,192.168.104.119,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 06:14","20 Feb 2026, 17:08",8.20.72.192,Yes,0,2,55
+MACML723,172.20.100.94,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:23","21 Feb 2026, 11:45",8.20.72.206,Yes,0,2,56
+MACML722,172.20.80.246,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:23","20 Feb 2026, 20:49",8.20.72.196,Yes,0,32,57
+MACML714,172.20.100.97,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","20 Feb 2026, 18:10",8.20.72.192,Yes,0,1,52
+MACML712,192.168.0.190,Windows,Manually Installed Agents,4.31.0.19139,OK,"13 Dec 2025, 18:36","14 Feb 2026, 12:45",8.20.69.168,Yes,0,3,25
+MACML70,192.168.7.209,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:27","21 Feb 2026, 13:53",8.20.72.206,Yes,0,2,53
+MACML699,192.168.29.225,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:43","21 Feb 2026, 16:01",8.20.72.216,Yes,0,3,56
+MACML698,172.20.100.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","20 Feb 2026, 17:47",8.20.72.192,Yes,0,3,56
+MACML696,192.168.31.141,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:56","21 Feb 2026, 11:05",8.20.72.206,Yes,0,3,23
+MACML695,172.20.100.69,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Jan 2026, 16:29","20 Feb 2026, 17:59",8.20.72.192,Yes,0,1,52
+MACML692,192.168.29.138,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","21 Feb 2026, 15:05",8.20.72.192,Yes,0,17,56
+MACML689,172.20.131.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:20","19 Feb 2026, 15:47",8.20.72.180,Yes,0,3,57
+MACML68,192.168.0.101,Windows,Manually Installed Agents,4.30.1.19100,OK,"09 Dec 2025, 13:17","07 Feb 2026, 15:16",8.20.69.216,Yes,0,3,3
+MACML66,10.26.49.24,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 11:33","20 Feb 2026, 17:34",8.20.72.130,Yes,0,2,31
+MACML659,172.20.100.56,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 09:58","20 Feb 2026, 20:52",8.20.72.186,Yes,0,3,50
+MACML652,172.20.100.22,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 08:37","20 Feb 2026, 17:46",8.20.72.192,Yes,0,4,56
+MACML651,192.168.1.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","20 Feb 2026, 22:40",8.20.72.192,Yes,0,3,56
+MACML65,192.168.0.165,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:19","21 Feb 2026, 16:09",8.20.72.212,Yes,0,1,53
+MACML64,192.168.1.16,Windows,Manually Installed Agents,4.31.0.19139,OK,"12 Dec 2025, 16:19","14 Feb 2026, 10:38",8.20.69.238,Yes,0,2,49
+MACML635,172.20.100.114,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:34","20 Feb 2026, 16:57",8.20.72.192,Yes,0,3,54
+MACML63,172.20.100.117,Windows,Manually Installed Agents,4.31.0.19214,OK,"13 Feb 2026, 17:02","16 Feb 2026, 23:37",8.20.72.146,Yes,0,3,38
+MACML63,172.20.80.179,Windows,Manually Installed Agents,4.31.0.19139,OK,"04 Dec 2025, 06:27","13 Feb 2026, 16:17",8.20.69.218,Yes,0,3,33
+MACML626,172.20.100.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:30","20 Feb 2026, 18:06",8.20.72.192,Yes,0,3,53
+MACML625,172.20.100.111,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","20 Feb 2026, 19:02",8.20.72.196,Yes,0,9,56
+MACML623,172.20.100.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","20 Feb 2026, 18:18",8.20.72.200,Yes,0,2,56
+MACML622,10.162.223.194,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:58","20 Feb 2026, 15:40",8.20.72.192,Yes,0,2,57
+MACML62,172.20.100.64,Windows,Manually Installed Agents,4.31.0.19139,OK,"11 Feb 2026, 15:43","11 Feb 2026, 16:22",8.20.72.70,Yes,0,0,0
+MACML618,192.168.104.45,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 09:49","20 Feb 2026, 20:53",8.20.72.196,Yes,0,3,53
+MACML613,192.168.1.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:48","21 Feb 2026, 15:25",8.20.72.216,Yes,0,2,55
+MACML612,192.168.0.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:10","21 Feb 2026, 10:45",8.20.72.186,Yes,0,5,55
+MACML61,192.168.7.210,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Feb 2026, 18:24","20 Feb 2026, 16:32",8.20.72.192,Yes,0,1,51
+MACML61,172.20.100.72,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 09:21","03 Feb 2026, 17:02",8.20.71.176,Yes,0,2,56
+MACML600,172.20.100.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:55","20 Feb 2026, 17:44",8.20.72.192,Yes,0,3,56
+MACML599,192.168.104.183,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:15","20 Feb 2026, 16:26",8.20.72.192,Yes,0,2,55
+MACML598,10.19.155.39,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 08:40","21 Feb 2026, 16:05",8.20.72.192,Yes,0,28,56
+MACML597,172.20.100.39,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:41","20 Feb 2026, 18:54",8.20.72.186,Yes,0,8,55
+MACML596,172.20.100.99,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 06:51","20 Feb 2026, 18:51",8.20.72.192,Yes,0,2,56
+MACML595,172.20.100.74,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","20 Feb 2026, 18:59",8.20.72.192,Yes,0,2,55
+MACML593,172.20.131.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:51","20 Feb 2026, 17:06",8.20.72.192,Yes,0,24,56
+MACML592,192.168.0.116,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","17 Feb 2026, 21:01",8.20.72.162,Yes,0,2,10
+MACML590,172.20.80.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:18","20 Feb 2026, 18:08",8.20.72.192,Yes,0,4,57
+MACML589,172.20.100.84,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 09:05","20 Feb 2026, 18:08",8.20.72.192,Yes,0,3,56
+MACML588,172.20.100.80,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:37","20 Feb 2026, 18:04",8.20.72.192,Yes,0,3,53
+MACML587,172.20.100.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Jan 2026, 09:26","20 Feb 2026, 16:27",8.20.72.192,Yes,0,9,56
+MACML586,172.20.80.237,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 12:20","20 Feb 2026, 16:55",8.20.72.192,Yes,0,11,56
+MACML585,192.168.29.225,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:07","20 Feb 2026, 04:56",8.20.72.190,Yes,0,2,53
+MACML584,172.20.100.81,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:33","20 Feb 2026, 18:44",8.20.72.192,Yes,0,17,56
+MACML583,192.168.29.81,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","21 Feb 2026, 11:27",8.20.72.192,Yes,0,3,56
+MACML58,172.20.100.82,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:59","18 Feb 2026, 17:39",8.20.72.168,Yes,0,2,25
+MACML52,10.109.25.211,Windows,Manually Installed Agents,4.31.0.19139,OK,"06 Dec 2025, 17:20","15 Feb 2026, 05:31",8.20.68.186,Yes,0,1,10
+MACML365,192.168.104.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 08:49","20 Feb 2026, 17:28",8.20.72.192,Yes,0,11,56
+MACML30,192.168.0.105,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Dec 2025, 14:52","19 Feb 2026, 15:52",8.20.72.180,Yes,0,2,56
+MACML27,172.20.100.92,Windows,Manually Installed Agents,4.30.1.19100,OK,"24 Dec 2025, 14:26","07 Feb 2026, 14:51",8.20.70.54,Yes,0,1,48
+MACML250,172.20.50.109,Windows,CEO_CFO,4.31.0.19214,OK,"01 Dec 2025, 08:55","17 Feb 2026, 17:54",8.20.72.152,Yes,0,3,54
+MACML25,172.20.100.86,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 13:41","21 Feb 2026, 13:45",8.20.72.206,Yes,0,1,55
+MACML18,192.168.29.159,Windows,Manually Installed Agents,4.31.0.19214,OK,"24 Dec 2025, 23:42","21 Feb 2026, 14:15",8.20.72.212,Yes,0,7,14
+MACML145,192.168.0.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:22","20 Feb 2026, 20:33",8.20.72.200,Yes,0,1,10
+MACML137,192.168.29.219,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 14:37","21 Feb 2026, 10:13",8.20.72.204,Yes,0,2,58
+MACML132,172.20.100.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","20 Feb 2026, 17:54",8.20.72.192,Yes,0,2,56
+MACML131,172.20.100.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:48","20 Feb 2026, 18:06",8.20.72.192,Yes,0,3,57
+MACML130,192.168.1.55,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 08:49","21 Feb 2026, 14:15",8.20.72.206,Yes,0,3,44
+MACML129,192.168.0.206,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:29","21 Feb 2026, 14:04",8.20.72.192,Yes,0,4,48
+MACML127,172.20.100.29,Windows,Manually Installed Agents,4.30.1.18852,OK,"08 Dec 2025, 12:36","22 Jan 2026, 13:37",8.20.68.224,Yes,0,6,0
+MACML125,10.211.245.146,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Dec 2025, 10:08","18 Feb 2026, 23:17",8.20.72.174,Yes,0,0,18
+MACML124,192.168.196.197,Windows,Manually Installed Agents,4.31.0.19139,OK,"03 Dec 2025, 12:39","15 Feb 2026, 11:20",8.20.71.194,Yes,0,3,31
+MACML123,172.20.100.19,Windows,Manually Installed Agents,4.31.0.19139,OK,"02 Dec 2025, 08:12","09 Feb 2026, 14:59",8.20.70.52,Yes,0,1,31
+MACML121,172.20.100.110,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 18:56","19 Feb 2026, 16:46",8.20.72.186,Yes,0,2,55
+MACML120,172.20.100.90,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:27","20 Feb 2026, 18:07",8.20.72.192,Yes,0,2,60
+MACML118,172.20.100.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"18 Feb 2026, 13:19","18 Feb 2026, 20:15",8.20.72.174,Yes,0,0,41
+MACML114,172.20.50.108,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","20 Feb 2026, 19:23",8.20.72.174,Yes,0,4,56
+MACML113,172.20.100.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","20 Feb 2026, 17:56",8.20.72.192,Yes,0,3,50
+MACML112,172.20.100.123,Windows,Manually Installed Agents,4.31.0.19139,OK,"11 Dec 2025, 15:40","09 Feb 2026, 16:56",8.20.69.94,Yes,0,3,46
+MACML108,172.20.100.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:04","20 Feb 2026, 17:07",8.20.72.192,Yes,0,3,56
+MACML105,10.26.49.127,Windows,Manually Installed Agents,4.31.0.19214,OK,"11 Dec 2025, 09:51","16 Feb 2026, 16:46",8.20.70.44,Yes,0,2,10
+MACML104,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 13:16","19 Feb 2026, 14:42",8.20.72.174,Yes,0,6,35
+MACMKAMBALA,192.168.101.236,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,55
+MACMINI02,192.168.101.152,Mac,Manually Installed Agents - MAC,4.31.0.15047,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:06",8.20.72.196,Yes,0,0,0
+MACMINI01,192.168.101.151,Mac,Manually Installed Agents - MAC,4.31.0.15047,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,0,0
+MACMINFOSECMGMT,192.168.101.230,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.192,Yes,0,1,40
+MACMINFOSECDB,192.168.101.228,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,40
+MACMINFOSECAPP,192.168.101.229,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.192,Yes,0,1,40
+MACMHYPVINFOS,192.168.101.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"17 Jan 2026, 19:14","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,40
+MACMGRCTOOL,192.168.101.233,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,40
+MACMETRSTN1,192.168.101.196,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,38
+MACMESPCDB,192.168.101.219,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,40,41
+MACMDC03,172.20.110.10,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.200,Yes,0,1,41
+MACMDC01,192.168.101.20,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,51
+MACMD916,172.20.80.59,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:43","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,57
+MACMD915,172.20.50.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:43","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,56
+MACMD913,172.20.80.77,Windows,Manually Installed Agents,4.31.0.19214,OK,"27 Dec 2025, 12:15","20 Feb 2026, 17:42",8.20.72.192,Yes,0,1,55
+MACMD912,172.20.80.93,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:18","21 Feb 2026, 16:09",8.20.72.186,Yes,0,1,56
+MACMD911,172.20.80.104,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 18:32",8.20.72.192,Yes,0,1,53
+MACMD910,172.20.80.80,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:03","20 Feb 2026, 13:13",8.20.72.192,Yes,0,1,57
+MACMD894,172.20.30.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:13","20 Feb 2026, 16:41",8.20.72.192,Yes,0,2,53
+MACMD869,172.20.80.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 13:24","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,56
+MACMD868,172.20.80.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"29 Dec 2025, 18:29","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,50
+MACMD866,172.20.80.159,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:48","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,56
+MACMD859,172.20.80.89,Windows,Manually Installed Agents,4.31.0.19214,OK,"29 Dec 2025, 21:03","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,60
+MACMD858,172.20.80.88,Windows,Manually Installed Agents,4.31.0.19214,OK,"27 Dec 2025, 15:45","21 Feb 2026, 15:53",8.20.72.186,Yes,0,1,56
+MACMD857,172.20.80.179,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Dec 2025, 14:41","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,54
+MACMD856,172.20.121.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","20 Feb 2026, 18:16",8.20.72.192,Yes,0,2,55
+MACMD855,172.20.50.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,54
+MACMD854,172.20.50.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,54
+MACMD853,172.20.110.104,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:36","21 Feb 2026, 16:04",8.20.72.190,Yes,0,2,53
+MACMD852,172.20.110.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:54","21 Feb 2026, 15:56",8.20.72.192,Yes,0,2,56
+MACMD851,172.20.110.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Dec 2025, 12:38","21 Feb 2026, 16:07",8.20.72.192,Yes,0,1,56
+MACMD850,172.20.110.137,Windows,Manually Installed Agents,4.31.0.19214,OK,"29 Jan 2026, 11:32","21 Feb 2026, 15:36",8.20.72.192,Yes,0,1,53
+MACMD85,172.20.50.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,5,59
+MACMD849,172.20.30.68,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,57
+MACMD846,172.20.80.19,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.192,Yes,0,2,58
+MACMD845,172.20.110.82,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:55","21 Feb 2026, 16:02",8.20.72.192,Yes,0,2,54
+MACMD844,172.20.110.190,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:52","21 Feb 2026, 16:05",8.20.72.216,Yes,0,2,54
+MACMD842,172.20.80.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,56
+MACMD840,172.20.80.9,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,54
+MACMD839,172.20.80.165,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:49","21 Feb 2026, 16:07",8.20.72.186,Yes,0,15,57
+MACMD836,172.20.80.144,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:43","21 Feb 2026, 16:08",8.20.72.212,Yes,0,4,53
+MACMD830,172.20.80.239,Windows,Manually Installed Agents,4.31.0.19214,OK,"30 Dec 2025, 17:05","21 Feb 2026, 16:05",8.20.72.186,Yes,0,1,54
+MACMD829,172.20.80.145,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,57
+MACMD826,172.20.50.97,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","20 Feb 2026, 16:07",8.20.72.186,Yes,0,1,53
+MACMD825,172.20.30.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","17 Feb 2026, 12:08",8.20.72.156,Yes,0,2,54
+MACMD824,172.20.30.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Dec 2025, 19:07","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,54
+MACMD823,172.20.90.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.192,Yes,0,2,53
+MACMD822,172.20.80.247,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:18","20 Feb 2026, 17:23",8.20.72.192,Yes,0,2,56
+MACMD821,172.20.121.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:09","21 Feb 2026, 16:05",8.20.72.192,Yes,0,2,54
+MACMD820,172.20.80.90,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,8,55
+MACMD819,172.20.30.62,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,53
+MACMD818,172.20.80.102,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:03","20 Feb 2026, 18:05",8.20.72.192,Yes,0,12,53
+MACMD817,172.20.30.92,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:52","20 Feb 2026, 18:54",8.20.72.186,Yes,0,5,56
+MACMD816,172.20.70.19,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,55
+MACMD815,172.20.80.118,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,49
+MACMD814,172.20.80.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","20 Feb 2026, 18:06",8.20.72.186,Yes,0,2,61
+MACMD813,172.20.80.195,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:17","20 Feb 2026, 19:04",8.20.72.192,Yes,0,2,57
+MACMD812,172.20.70.29,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 15:58",8.20.72.186,Yes,0,3,50
+MACMD811,172.20.121.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,56
+MACMD810,172.20.80.126,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.192,Yes,0,3,52
+MACMD809,172.20.80.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.196,Yes,0,3,54
+MACMD808,172.20.131.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:37","21 Feb 2026, 16:09",8.20.72.200,Yes,0,2,57
+MACMD807,172.20.80.244,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.190,Yes,0,5,56
+MACMD806,172.20.120.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"31 Dec 2025, 09:44","21 Feb 2026, 15:47",8.20.72.186,Yes,0,1,53
+MACMD805,172.20.110.122,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:51","21 Feb 2026, 16:06",8.20.72.192,Yes,0,1,53
+MACMD804,172.20.80.161,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","20 Feb 2026, 18:07",8.20.72.192,Yes,0,3,54
+MACMD803,172.20.110.80,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:44","20 Feb 2026, 17:58",8.20.72.192,Yes,0,2,53
+MACMD801,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.174,Yes,0,2,53
+MACMD799,172.20.120.10,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,56
+MACMD798,172.20.120.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,56
+MACMD797,172.20.80.142,Windows,Manually Installed Agents,4.31.0.19214,OK,"27 Dec 2025, 14:31","20 Feb 2026, 18:24",8.20.72.192,Yes,0,1,53
+MACMD796,172.20.120.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,56
+MACMD795,172.20.120.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","21 Feb 2026, 15:59",8.20.72.186,Yes,0,3,56
+MACMD794,100.63.27.13,Mac,USB Allowed Group - MAC,4.31.0.15047,OK,"01 Dec 2025, 08:00","20 Feb 2026, 17:18",8.20.72.196,Yes,0,0,0
+MACMD791,172.20.120.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 15:59",8.20.72.174,Yes,0,3,52
+MACMD790,172.20.80.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,7,54
+MACMD789,172.20.80.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,11,57
+MACMD787,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:36","21 Feb 2026, 16:02",8.20.72.192,Yes,0,4,57
+MACMD786,172.20.70.22,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,56
+MACMD785,172.20.70.32,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:25","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,54
+MACMD784,172.20.80.16,Mac,USB Allowed Group - MAC,4.31.0.15047,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.206,Yes,0,0,0
+MACMD783,172.20.80.155,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.216,No,0,0,0
+MACMD782,172.20.80.226,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,6,57
+MACMD781,172.20.80.232,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,57
+MACMD780,172.20.80.150,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:01",8.20.72.190,Yes,0,17,59
+MACMD779,172.20.80.152,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,13,51
+MACMD777,172.20.80.182,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Dec 2025, 13:44","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,54
+MACMD776,172.20.30.190,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,54
+MACMD773,172.20.30.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:16","17 Feb 2026, 15:45",8.20.72.152,Yes,0,1,53
+MACMD773,172.20.30.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"17 Feb 2026, 17:52","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,53
+MACMD772,172.20.30.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","20 Feb 2026, 18:05",8.20.72.200,Yes,0,3,57
+MACMD771,172.20.70.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:34","20 Feb 2026, 17:41",8.20.72.192,Yes,0,2,57
+MACMD770,172.20.131.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,54
+MACMD769,172.20.80.185,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.192,Yes,0,3,56
+MACMD768,172.20.80.56,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,60
+MACMD767,172.20.120.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:09",8.20.72.186,Yes,0,2,53
+MACMD766,172.20.120.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,50
+MACMD765,172.20.110.24,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:57","21 Feb 2026, 16:02",8.20.72.206,Yes,0,2,53
+MACMD764,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Dec 2025, 15:04","21 Feb 2026, 16:02",8.20.72.174,Yes,0,1,53
+MACMD763,172.20.121.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Jan 2026, 12:43","21 Feb 2026, 15:50",8.20.72.192,Yes,0,2,52
+MACMD762,172.20.80.153,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,57
+MACMD760,172.20.80.5,Windows,Manually Installed Agents,4.31.0.19139,OK,"04 Dec 2025, 06:35","13 Feb 2026, 15:30",8.20.71.184,Yes,0,2,56
+MACMD759,172.20.110.93,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:37","21 Feb 2026, 16:05",8.20.72.192,Yes,0,2,57
+MACMD758,172.20.80.149,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,56
+MACMD757,172.20.80.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,57
+MACMD756,172.20.120.56,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","21 Feb 2026, 16:05",8.20.72.192,Yes,0,2,56
+MACMD755,172.20.120.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:06","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,56
+MACMD754,169.254.161.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:00",8.20.72.186,Yes,0,1,56
+MACMD753,172.20.131.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:05",8.20.72.186,Yes,0,14,57
+MACMD752,172.20.80.58,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,0
+MACMD751,172.20.70.17,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 09:05","10 Feb 2026, 21:24",8.20.71.172,Yes,0,9,55
+MACMD751,172.20.70.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"10 Feb 2026, 23:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,52
+MACMD750,172.20.80.168,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,17,59
+MACMD749,172.20.80.205,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 09:03","20 Feb 2026, 17:51",8.20.72.192,Yes,0,2,57
+MACMD748,172.20.110.105,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Feb 2026, 12:59","21 Feb 2026, 15:55",8.20.72.170,Yes,0,1,53
+MACMD747,172.20.110.133,Windows,Manually Installed Agents,4.31.0.19214,OK,"11 Feb 2026, 13:02","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,53
+MACMD746,172.20.80.218,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:09","20 Feb 2026, 20:06",8.20.72.186,Yes,0,4,65
+MACMD745,172.20.110.120,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:42","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,56
+MACMD744,172.20.90.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:17","20 Feb 2026, 17:38",8.20.72.186,Yes,0,2,56
+MACMD743,172.20.80.112,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.200,Yes,0,9,56
+MACMD742,172.20.110.65,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:54","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,56
+MACMD739,172.20.80.73,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.186,Yes,0,4,57
+MACMD738,172.20.131.43,Windows,test av scan,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,25,59
+MACMD737,172.20.80.191,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:37","21 Feb 2026, 16:06",8.20.72.190,Yes,0,28,57
+MACMD735,172.20.80.176,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,25,57
+MACMD734,172.20.70.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"24 Dec 2025, 16:01","21 Feb 2026, 15:58",8.20.72.186,Yes,0,4,54
+MACMD733,172.20.50.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 11:42",8.20.72.186,Yes,0,2,54
+MACMD732,172.20.80.186,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 15:38",8.20.72.186,Yes,0,4,51
+MACMD731,172.20.80.151,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 09:09","28 Jan 2026, 05:50",8.20.70.52,Yes,0,3,54
+MACMD729,172.20.80.75,Windows,Manually Installed Agents,4.31.0.19214,OK,"26 Dec 2025, 12:23","20 Feb 2026, 17:44",8.20.72.192,Yes,0,8,54
+MACMD728,172.20.131.26,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.204,Yes,0,5,54
+MACMD726,172.20.90.15,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.190,Yes,0,4,54
+MACMD725,172.20.131.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,57
+MACMD724,172.20.90.16,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,53
+MACMD721,172.20.30.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:08","20 Feb 2026, 17:13",8.20.72.192,Yes,0,2,57
+MACMD718,172.20.80.197,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,57
+MACMD717,172.20.80.242,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:36","20 Feb 2026, 17:32",8.20.72.192,Yes,0,1,55
+MACMD716,172.20.30.199,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","20 Feb 2026, 16:11",8.20.72.186,Yes,0,3,56
+MACMD715,172.20.30.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:01","20 Feb 2026, 17:05",8.20.72.192,Yes,0,3,57
+MACMD713,172.20.30.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:09",8.20.72.186,Yes,0,2,57
+MACMD710,172.20.30.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,57
+MACMD709,172.20.30.12,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:02","21 Feb 2026, 16:07",8.20.72.192,Yes,0,3,56
+MACMD706,172.20.121.50,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 08:42","20 Feb 2026, 18:28",8.20.72.192,Yes,0,3,53
+MACMD705,172.20.121.66,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:45","20 Feb 2026, 18:27",8.20.72.192,Yes,0,2,55
+MACMD704,172.20.120.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:29","21 Feb 2026, 15:59",8.20.72.186,Yes,0,2,56
+MACMD703,172.20.80.101,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.196,Yes,0,5,54
+MACMD702,172.20.30.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,56
+MACMD701,172.20.50.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,8,57
+MACMD694,172.20.110.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","21 Feb 2026, 15:58",8.20.72.192,Yes,0,1,56
+MACMD691,172.20.80.177,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,7,56
+MACMD690,172.20.80.228,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 15:57",8.20.72.186,Yes,0,38,59
+MACMD688,172.20.110.70,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Jan 2026, 11:37","21 Feb 2026, 16:05",8.20.72.186,Yes,0,1,53
+MACMD687,172.20.80.108,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","21 Feb 2026, 16:08",8.20.72.212,Yes,0,3,52
+MACMD686,172.20.110.75,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:51","20 Feb 2026, 16:36",8.20.72.192,Yes,0,2,56
+MACMD685,172.20.110.186,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:37","20 Feb 2026, 16:01",8.20.72.192,Yes,0,2,56
+MACMD684,172.20.110.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","20 Feb 2026, 17:59",8.20.72.192,Yes,0,2,56
+MACMD683,172.20.120.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,56
+MACMD682,172.20.120.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:04","21 Feb 2026, 16:08",8.20.72.174,Yes,0,1,56
+MACMD681,172.20.131.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:47","20 Feb 2026, 17:22",8.20.72.192,Yes,0,2,0
+MACMD680,172.20.80.250,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:53","21 Feb 2026, 16:01",8.20.72.192,Yes,0,1,56
+MACMD679,172.20.80.183,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,24,59
+MACMD678,172.20.80.110,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,33,59
+MACMD677,172.20.80.163,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:24","20 Feb 2026, 07:54",8.20.72.186,Yes,0,4,57
+MACMD676,172.20.80.156,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","19 Feb 2026, 21:05",8.20.72.186,Yes,0,16,53
+MACMD675,172.20.110.150,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:12","19 Feb 2026, 18:13",8.20.72.174,Yes,0,2,56
+MACMD674,172.20.80.235,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:42","20 Feb 2026, 17:17",8.20.72.192,Yes,0,1,56
+MACMD673,172.20.110.151,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","18 Feb 2026, 18:08",8.20.72.174,Yes,0,3,56
+MACMD672,172.20.70.24,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,57
+MACMD671,172.20.110.144,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","20 Feb 2026, 18:27",8.20.72.186,Yes,0,2,54
+MACMD670,172.20.110.72,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","21 Feb 2026, 16:03",8.20.72.186,Yes,0,2,50
+MACMD658,172.20.121.25,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 05:31","22 Jan 2026, 16:49",8.20.70.46,Yes,0,3,57
+MACMD657,172.20.80.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,11,57
+MACMD655,172.20.70.139,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,5,57
+MACMD654,172.20.80.121,Windows,Manually Installed Agents,4.31.0.19214,OK,"29 Dec 2025, 15:04","21 Feb 2026, 16:09",8.20.72.192,Yes,0,1,54
+MACMD653,172.20.80.129,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,1,49
+MACMD650,172.20.70.26,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 05:32","12 Feb 2026, 18:01",8.20.71.172,Yes,0,11,59
+MACMD647,172.20.50.84,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,56
+MACMD646,172.20.50.74,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:06","21 Feb 2026, 16:04",8.20.72.206,Yes,0,4,56
+MACMD645,172.20.121.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,56
+MACMD644,172.20.80.87,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:58","21 Feb 2026, 16:09",8.20.72.186,Yes,0,2,51
+MACMD643,172.20.80.189,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.192,Yes,0,8,57
+MACMD642,172.20.70.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,7,57
+MACMD641,172.20.120.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","21 Feb 2026, 13:52",8.20.72.186,Yes,0,1,56
+MACMD640,172.20.80.243,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Jan 2026, 10:43","20 Feb 2026, 18:15",8.20.72.192,Yes,0,1,50
+MACMD639,172.20.110.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:12","19 Feb 2026, 18:11",8.20.72.174,Yes,0,2,54
+MACMD638,172.20.90.25,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 05:34","06 Feb 2026, 15:17",8.20.68.222,Yes,0,4,57
+MACMD638,172.20.90.24,Windows,Manually Installed Agents,4.31.0.19214,OK,"11 Feb 2026, 11:18","20 Feb 2026, 18:17",8.20.72.192,Yes,0,1,53
+MACMD636,172.20.120.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,54
+MACMD634,172.20.80.222,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.192,Yes,0,34,57
+MACMD633,172.20.80.213,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,19,55
+MACMD632,172.20.110.103,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:48","21 Feb 2026, 16:09",8.20.72.192,Yes,0,1,50
+MACMD631,172.20.110.108,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,56
+MACMD628,172.20.80.166,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,57
+MACMD626,172.20.110.106,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","21 Feb 2026, 16:00",8.20.72.192,Yes,0,2,54
+MACMD625,172.20.80.230,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 08:28",8.20.72.186,Yes,0,6,57
+MACMD624,172.20.70.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","21 Feb 2026, 15:48",8.20.72.186,Yes,0,6,53
+MACMD621,172.20.80.140,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:52","21 Feb 2026, 16:07",8.20.72.186,Yes,0,37,54
+MACMD620,172.20.80.2,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","21 Feb 2026, 12:10",8.20.72.212,Yes,0,28,54
+MACMD619,172.20.110.20,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 08:50","21 Feb 2026, 16:08",8.20.72.192,Yes,0,3,53
+MACMD617,172.20.70.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,27,57
+MACMD616,172.20.80.119,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,5,55
+MACMD615,172.20.80.116,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:55","20 Feb 2026, 17:47",8.20.72.192,Yes,0,2,54
+MACMD614,172.20.110.154,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,11,55
+MACMD611,172.20.131.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 17:36",8.20.72.196,Yes,0,30,54
+MACMD609,172.20.110.56,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:54","21 Feb 2026, 16:05",8.20.72.192,Yes,0,3,51
+MACMD608,172.20.110.159,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:39","21 Feb 2026, 16:04",8.20.72.192,Yes,0,1,53
+MACMD607,172.20.110.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,54
+MACMD606,172.20.121.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","20 Feb 2026, 18:00",8.20.72.186,Yes,0,3,52
+MACMD605,172.20.80.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:02","21 Feb 2026, 16:07",8.20.72.192,Yes,0,2,53
+MACMD604,172.20.30.177,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,57
+MACMD603,172.20.110.129,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:26","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,54
+MACMD602,172.20.80.55,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:55","20 Feb 2026, 13:53",8.20.72.192,Yes,0,6,54
+MACMD601,172.20.110.50,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:04","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,50
+MACMD591,172.20.80.220,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Dec 2025, 13:44","19 Feb 2026, 18:24",8.20.72.176,Yes,0,3,54
+MACMD582,172.20.80.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:29","21 Feb 2026, 10:40",8.20.72.192,Yes,0,5,53
+MACMD580,172.20.121.69,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:38","20 Feb 2026, 17:57",8.20.72.192,Yes,0,3,54
+MACMD579,172.20.110.91,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,53
+MACMD578,172.20.110.147,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:38","21 Feb 2026, 14:01",8.20.72.192,Yes,0,1,51
+MACMD577,172.20.120.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:22","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,53
+MACMD576,172.20.80.198,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","21 Feb 2026, 16:09",8.20.72.186,Yes,0,9,55
+MACMD575,172.20.110.189,Windows,Manually Installed Agents,4.30.1.19100,OK,"01 Dec 2025, 05:45","09 Feb 2026, 01:53",8.20.71.172,Yes,0,3,44
+MACMD574,172.20.70.121,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,9,56
+MACMD573,172.20.80.124,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,53
+MACMD572,172.20.80.8,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,5,54
+MACMD571,172.20.80.192,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Feb 2026, 11:27","20 Feb 2026, 16:00",8.20.72.192,Yes,0,3,53
+MACMD570,172.20.110.118,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,50
+MACMD569,172.20.90.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,53
+MACMD568,172.20.110.162,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,53
+MACMD567,172.20.120.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","21 Feb 2026, 15:36",8.20.72.192,Yes,0,1,50
+MACMD566,172.20.80.234,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:05","20 Feb 2026, 16:58",8.20.72.192,Yes,0,2,53
+MACMD565,172.20.110.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 13:45","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,51
+MACMD563,172.20.80.181,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:20","21 Feb 2026, 16:05",8.20.72.186,Yes,0,8,55
+MACMD561,172.20.80.111,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,54
+MACMD560,172.20.70.165,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.200,Yes,0,4,51
+MACMD559,172.20.131.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,17,56
+MACMD558,172.20.121.70,Windows,CEO_CFO,4.31.0.19214,OK,"01 Dec 2025, 14:57","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,53
+MACMD557,172.20.80.194,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Dec 2025, 14:42","20 Feb 2026, 18:05",8.20.72.186,Yes,0,28,54
+MACMD554,172.20.50.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Dec 2025, 14:16","20 Feb 2026, 18:26",8.20.72.192,Yes,0,3,52
+MACMD553,172.20.70.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:54","21 Feb 2026, 15:41",8.20.72.192,Yes,0,3,51
+MACMD552,172.20.110.130,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 18:00",8.20.72.192,Yes,0,1,53
+MACMD551,172.20.80.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,38,57
+MACMD550,172.20.110.63,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,53
+MACMD548,172.20.70.142,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,54
+MACMD547,172.20.110.114,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,54
+MACMD546,172.20.70.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:05",8.20.72.186,Yes,0,32,59
+MACMD545,172.20.110.88,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 18:12",8.20.72.192,Yes,0,1,53
+MACMD544,172.20.110.89,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 09:12","10 Feb 2026, 09:46",8.20.70.52,Yes,0,1,50
+MACMD543,172.20.110.92,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:58","21 Feb 2026, 16:06",8.20.72.192,Yes,0,2,50
+MACMD542,172.20.110.57,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,50
+MACMD541,172.20.110.77,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:49","21 Feb 2026, 16:04",8.20.72.192,Yes,0,1,53
+MACMD540,172.20.110.107,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:57","20 Feb 2026, 17:24",8.20.72.192,Yes,0,3,53
+MACMD539,172.20.50.56,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Jan 2026, 08:35","21 Feb 2026, 16:08",8.20.72.186,Yes,0,25,49
+MACMD538,172.20.80.136,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:17","21 Feb 2026, 16:08",8.20.72.186,Yes,0,5,54
+MACMD537,172.20.110.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:36","20 Feb 2026, 17:34",8.20.72.192,Yes,0,2,54
+MACMD536,172.20.110.66,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","20 Feb 2026, 17:59",8.20.72.192,Yes,0,1,51
+MACMD535,172.20.110.69,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","20 Feb 2026, 17:55",8.20.72.192,Yes,0,3,51
+MACMD534,172.20.80.162,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:21","21 Feb 2026, 02:20",8.20.72.192,Yes,0,2,56
+MACMD533,172.20.70.158,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:25","21 Feb 2026, 16:04",8.20.72.186,Yes,0,10,57
+MACMD531,172.20.90.19,Windows,Manually Installed Agents,4.31.0.19139,OK,"22 Dec 2025, 16:02","11 Feb 2026, 20:13",8.20.70.46,Yes,0,2,53
+MACMD530,172.20.110.68,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:42","21 Feb 2026, 14:33",8.20.72.206,Yes,0,1,53
+MACMD529,172.20.80.50,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,57
+MACMD528,172.20.120.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,54
+MACMD527,172.20.110.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:04","21 Feb 2026, 16:08",8.20.72.192,Yes,0,3,50
+MACMD526,172.20.110.113,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:35","21 Feb 2026, 15:56",8.20.72.192,Yes,0,1,53
+MACMD525,172.20.120.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,51
+MACMD524,172.20.80.103,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","20 Feb 2026, 17:48",8.20.72.192,Yes,0,4,54
+MACMD523,172.20.110.121,Windows,Manually Installed Agents,4.30.1.19100,OK,"05 Feb 2026, 12:26","05 Feb 2026, 14:00",8.20.72.8,Yes,0,0,9
+MACMD522,172.20.110.22,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","21 Feb 2026, 16:07",8.20.72.192,Yes,0,1,53
+MACMD521,172.20.120.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:03","20 Feb 2026, 18:43",8.20.72.192,Yes,0,4,53
+MACMD520,172.20.80.193,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 15:10","20 Feb 2026, 17:56",8.20.72.192,Yes,0,1,55
+MACMD519,172.20.110.78,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","20 Feb 2026, 17:56",8.20.72.186,Yes,0,1,53
+MACMD517,172.20.120.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,50
+MACMD516,172.20.121.62,Windows,Manually Installed Agents,4.30.1.19100,OK,"19 Dec 2025, 18:38","05 Feb 2026, 19:38",8.20.70.46,Yes,0,2,53
+MACMD515,172.20.80.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,26,57
+MACMD514,172.20.30.194,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,56
+MACMD513,172.20.80.212,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:38","21 Feb 2026, 16:06",8.20.72.192,Yes,0,3,54
+MACMD512,172.20.80.190,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,9,54
+MACMD511,172.20.80.115,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,9,57
+MACMD510,172.20.110.152,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:45","21 Feb 2026, 16:01",8.20.72.192,Yes,0,2,53
+MACMD509,172.20.110.100,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 09:04","30 Jan 2026, 17:58",8.20.70.52,Yes,0,2,52
+MACMD509,172.20.110.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Feb 2026, 14:30","21 Feb 2026, 15:19",8.20.72.190,Yes,0,1,51
+MACMD508,172.20.80.151,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","20 Feb 2026, 18:18",8.20.72.192,Yes,0,3,56
+MACMD507,172.20.110.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.192,Yes,0,2,53
+MACMD506,172.20.80.7,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:47","21 Feb 2026, 16:02",8.20.72.206,Yes,0,3,55
+MACMD505,172.20.110.181,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 06:03","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,55
+MACMD503,172.20.80.229,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","19 Feb 2026, 19:22",8.20.72.174,Yes,0,10,59
+MACMD502,172.20.50.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 19:56","21 Feb 2026, 16:05",8.20.72.186,Yes,0,30,56
+MACMD501,172.20.110.112,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:09","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,53
+MACMD500,172.20.110.143,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 09:00","21 Feb 2026, 15:58",8.20.72.192,Yes,0,1,53
+MACMD499,172.20.110.58,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:12","21 Feb 2026, 16:01",8.20.72.192,Yes,0,2,53
+MACMD498,172.20.110.185,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:43","19 Feb 2026, 18:03",8.20.72.174,Yes,0,1,57
+MACMD497,172.20.110.127,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Dec 2025, 10:38","20 Feb 2026, 16:59",8.20.72.186,Yes,0,2,53
+MACMD496,172.20.110.53,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 10:51","20 Feb 2026, 17:07",8.20.72.192,Yes,0,2,54
+MACMD495,172.20.80.95,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.192,Yes,0,37,55
+MACMD494,172.20.50.79,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:24","20 Feb 2026, 15:59",8.20.72.192,Yes,0,4,56
+MACMD493,172.20.50.137,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:56","20 Feb 2026, 17:25",8.20.72.192,Yes,0,30,56
+MACMD492,172.20.30.191,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","20 Feb 2026, 16:44",8.20.72.192,Yes,0,32,56
+MACMD491,172.20.80.78,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,10,54
+MACMD490,172.20.80.209,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 14:52",8.20.72.186,Yes,0,10,54
+MACMD489,172.20.30.175,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 08:25","20 Feb 2026, 17:50",8.20.72.192,Yes,0,4,57
+MACMD488,172.20.80.154,Windows,Manually Installed Agents,4.30.1.18852,OK,"24 Jan 2026, 16:00","24 Jan 2026, 17:04",8.20.71.102,Yes,0,1,8
+MACMD486,172.20.110.84,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:26","20 Feb 2026, 17:56",8.20.72.192,Yes,0,1,55
+MACMD485,172.20.80.39,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,5,59
+MACMD484,172.20.110.28,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:53","20 Feb 2026, 18:28",8.20.72.192,Yes,0,2,50
+MACMD483,172.20.80.79,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,28,56
+MACMD482,172.20.80.207,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:29","20 Feb 2026, 17:50",8.20.72.192,Yes,0,12,56
+MACMD481,172.20.110.101,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,51
+MACMD480,172.20.110.165,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:19","21 Feb 2026, 15:59",8.20.72.192,Yes,0,2,53
+MACMD48,172.20.50.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:50","21 Feb 2026, 16:05",8.20.72.192,Yes,0,6,57
+MACMD479,172.20.50.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,24,57
+MACMD478,172.20.50.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Jan 2026, 08:34","17 Feb 2026, 14:34",8.20.72.156,Yes,0,12,57
+MACMD478,172.20.50.174,Windows,Manually Installed Agents,4.31.0.19214,OK,"17 Feb 2026, 16:31","21 Feb 2026, 16:07",8.20.72.192,Yes,0,25,53
+MACMD477,172.20.80.199,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,10,51
+MACMD476,172.20.120.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","20 Feb 2026, 17:41",8.20.72.192,Yes,0,1,54
+MACMD475,172.20.80.131,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:58","21 Feb 2026, 16:07",8.20.72.192,Yes,0,5,53
+MACMD474,172.20.110.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"17 Dec 2025, 11:52","21 Feb 2026, 16:09",8.20.72.192,Yes,0,1,53
+MACMD473,172.20.80.92,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","17 Feb 2026, 17:56",8.20.72.160,Yes,0,10,58
+MACMD472,172.20.50.144,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","20 Feb 2026, 19:03",8.20.72.200,Yes,0,30,57
+MACMD471,172.20.50.50,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,52
+MACMD470,172.20.120.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,56
+MACMD469,172.20.120.59,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:01","21 Feb 2026, 16:07",8.20.72.186,Yes,0,0,56
+MACMD468,172.20.110.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:33","17 Feb 2026, 17:56",8.20.72.160,Yes,0,4,50
+MACMD467,172.20.50.53,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,30,57
+MACMD464,172.20.80.99,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,36,48
+MACMD463,172.20.110.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 13:53","21 Feb 2026, 15:59",8.20.72.192,Yes,0,1,53
+MACMD463,172.20.50.76,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:28","20 Feb 2026, 15:57",8.20.72.192,Yes,0,3,58
+MACMD461,172.20.80.76,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,10,55
+MACMD460,172.20.120.68,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:02","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,54
+MACMD459,172.20.120.32,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:19","21 Feb 2026, 16:06",8.20.72.192,Yes,0,2,54
+MACMD458,172.20.110.145,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","20 Feb 2026, 17:38",8.20.72.196,Yes,0,1,53
+MACMD457,172.20.80.171,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,13,54
+MACMD456,172.20.80.223,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,11,58
+MACMD455,172.20.110.136,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:48","21 Feb 2026, 16:06",8.20.72.206,Yes,0,2,54
+MACMD454,172.20.80.215,Windows,Manually Installed Agents,4.31.0.19214,OK,"26 Dec 2025, 13:41","21 Feb 2026, 15:03",8.20.72.186,Yes,0,2,54
+MACMD453,172.20.120.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:56","20 Feb 2026, 18:40",8.20.72.192,Yes,0,1,53
+MACMD452,172.20.80.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 08:40","21 Feb 2026, 15:13",8.20.72.186,Yes,0,2,53
+MACMD450,172.20.80.252,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:04","20 Feb 2026, 17:06",8.20.72.192,Yes,0,3,54
+MACMD449,172.20.131.32,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:28","20 Feb 2026, 17:41",8.20.72.192,Yes,0,11,59
+MACMD448,172.20.110.59,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,53
+MACMD447,172.20.110.16,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","20 Feb 2026, 17:00",8.20.72.192,Yes,0,3,54
+MACMD446,172.20.70.163,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.200,Yes,0,10,56
+MACMD445,172.20.110.74,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Jan 2026, 11:18","20 Feb 2026, 18:44",8.20.72.192,Yes,0,1,53
+MACMD444,172.20.80.200,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 22:05","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,55
+MACMD443,172.20.80.117,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:59","21 Feb 2026, 16:04",8.20.72.206,Yes,0,6,54
+MACMD442,172.20.80.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:59","21 Feb 2026, 12:30",8.20.72.192,Yes,0,4,54
+MACMD440,172.20.70.16,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 10:31",8.20.72.186,Yes,0,16,60
+MACMD439,172.20.110.135,Windows,Manually Installed Agents,4.31.0.19214,OK,"15 Dec 2025, 12:49","21 Feb 2026, 16:08",8.20.72.192,Yes,0,1,56
+MACMD438,172.20.120.20,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","20 Feb 2026, 18:54",8.20.72.192,Yes,0,3,55
+MACMD437,172.20.80.86,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,31,55
+MACMD435,172.20.80.245,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 09:10","20 Feb 2026, 15:08",8.20.72.192,Yes,0,6,58
+MACMD434,172.20.120.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:38","21 Feb 2026, 15:56",8.20.72.192,Yes,0,1,57
+MACMD433,172.20.90.10,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:07","21 Feb 2026, 15:22",8.20.72.192,Yes,0,2,53
+MACMD431,172.20.120.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,53
+MACMD430,172.20.80.154,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.192,Yes,0,2,53
+MACMD429,172.20.80.196,Windows,Manually Installed Agents,4.31.0.19214,OK,"22 Jan 2026, 07:18","21 Feb 2026, 16:02",8.20.72.186,Yes,0,1,54
+MACMD429,172.20.80.196,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 07:59","22 Jan 2026, 06:23",8.20.70.52,Yes,0,14,57
+MACMD428,172.20.70.20,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,12,57
+MACMD427,172.20.80.42,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,29,58
+MACMD426,172.20.70.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 12:28",8.20.72.192,Yes,0,3,53
+MACMD425,172.20.80.97,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,38,55
+MACMD424,172.20.80.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,39,59
+MACMD422,172.20.70.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,53
+MACMD421,172.20.70.15,Windows,USB Alllowed Group,4.31.0.19214,OK,"22 Dec 2025, 11:53","21 Feb 2026, 16:07",8.20.72.192,Yes,0,2,54
+MACMD420,172.20.80.98,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","20 Feb 2026, 17:39",8.20.72.186,Yes,0,25,60
+MACMD419,172.20.80.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:39","21 Feb 2026, 16:07",8.20.72.186,Yes,0,6,51
+MACMD418,172.20.80.24,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 10:38",8.20.72.186,Yes,0,25,59
+MACMD417,172.20.110.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:08","20 Feb 2026, 18:51",8.20.72.192,Yes,0,4,53
+MACMD416,172.20.80.139,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,8,59
+MACMD415,100.63.27.13,Windows,USB Alllowed Group,4.31.0.19214,OK,"19 Jan 2026, 15:38","21 Feb 2026, 15:42",8.20.72.186,Yes,0,1,53
+MACMD414,172.20.80.208,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:52","20 Feb 2026, 17:00",8.20.72.192,Yes,0,2,54
+MACMD413,172.20.80.249,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,53
+MACMD412,172.20.70.111,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,33,59
+MACMD411,172.20.131.39,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:39","20 Feb 2026, 18:06",8.20.72.192,Yes,0,37,59
+MACMD410,172.20.70.128,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 09:17","19 Feb 2026, 17:42",8.20.72.174,Yes,0,21,57
+MACMD409,172.20.110.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Jan 2026, 14:42","21 Feb 2026, 16:04",8.20.72.192,Yes,0,1,53
+MACMD408,172.20.80.20,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,9,59
+MACMD406,172.20.110.139,Windows,Manually Installed Agents,4.31.0.19214,OK,"30 Dec 2025, 12:00","21 Feb 2026, 16:07",8.20.72.192,Yes,0,1,53
+MACMD404,172.20.80.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,37,59
+MACMD403,172.20.80.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:20","21 Feb 2026, 16:07",8.20.72.186,Yes,0,35,60
+MACMD402,172.20.110.94,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:14","21 Feb 2026, 16:08",8.20.72.186,Yes,0,5,54
+MACMD401,172.20.120.50,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:01","21 Feb 2026, 16:07",8.20.72.192,Yes,0,1,50
+MACMD400,172.20.110.132,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,54
+MACMD399,172.20.30.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.196,Yes,0,3,57
+MACMD397,172.20.120.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","20 Feb 2026, 18:24",8.20.72.192,Yes,0,2,54
+MACMD396,172.20.30.158,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","20 Feb 2026, 15:32",8.20.72.192,Yes,0,4,57
+MACMD394,172.20.121.56,Windows,Manually Installed Agents,4.30.1.19100,OK,"18 Dec 2025, 16:18","05 Feb 2026, 18:19",8.20.70.54,Yes,0,2,52
+MACMD393,172.20.30.142,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,56
+MACMD391,172.20.80.12,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 10:42","20 Feb 2026, 17:59",8.20.72.186,Yes,0,2,53
+MACMD39,172.20.70.93,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,58
+MACMD389,172.20.110.89,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.206,Yes,0,2,53
+MACMD387,172.20.131.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,51
+MACMD386,172.20.30.10,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:49","21 Feb 2026, 16:07",8.20.72.186,Yes,0,5,56
+MACMD385,172.20.110.116,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.186,Yes,0,3,51
+MACMD383,172.20.121.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,54
+MACMD380,172.20.110.123,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:42","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,50
+MACMD379,172.20.80.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,53
+MACMD377,172.20.80.251,Windows,Manually Installed Agents,4.31.0.19214,OK,"17 Feb 2026, 12:32","17 Feb 2026, 16:00",N/A,Yes,0,0,0
+MACMD376,172.20.80.178,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,57
+MACMD375,172.20.80.125,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:09",8.20.72.186,Yes,0,7,54
+MACMD374,172.20.80.164,Windows,USB Allow to Test DLP Policy,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:09",8.20.72.186,Yes,0,4,56
+MACMD373,172.20.90.20,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,56
+MACMD372,172.20.121.59,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Dec 2025, 11:56","21 Feb 2026, 14:36",8.20.72.174,Yes,0,1,53
+MACMD371,172.20.80.210,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.196,Yes,0,30,54
+MACMD370,172.20.80.219,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,27,55
+MACMD369,172.20.50.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","20 Feb 2026, 17:47",8.20.72.192,Yes,0,3,56
+MACMD368,172.20.110.97,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:40","21 Feb 2026, 15:59",8.20.72.206,Yes,0,2,53
+MACMD367,172.20.110.153,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","20 Feb 2026, 18:15",8.20.72.192,Yes,0,2,58
+MACMD366,172.20.30.183,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,56
+MACMD364,172.20.80.225,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,55
+MACMD363,172.20.30.136,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 01:44",8.20.72.186,Yes,0,4,56
+MACMD362,172.20.110.109,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:53","21 Feb 2026, 16:00",8.20.72.192,Yes,0,3,54
+MACMD361,172.20.80.70,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,28,52
+MACMD360,172.20.110.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","20 Feb 2026, 16:33",8.20.72.192,Yes,0,3,56
+MACMD359,172.20.110.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","21 Feb 2026, 16:04",8.20.72.192,Yes,0,2,51
+MACMD358,172.20.80.3,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:01",8.20.72.186,Yes,0,2,51
+MACMD357,172.20.131.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,19,59
+MACMD356,172.20.50.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:28","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,54
+MACMD355,172.20.80.214,Windows,Manually Installed Agents,4.31.0.19214,OK,"31 Dec 2025, 17:01","21 Feb 2026, 16:05",8.20.72.174,Yes,0,3,54
+MACMD354,172.20.131.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,44,58
+MACMD353,172.20.80.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:57","21 Feb 2026, 16:06",8.20.72.186,Yes,0,7,59
+MACMD352,172.20.110.12,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:59","21 Feb 2026, 16:01",8.20.72.192,Yes,0,2,54
+MACMD351,172.20.80.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,5,55
+MACMD350,172.20.80.5,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:04","20 Feb 2026, 18:16",8.20.72.192,Yes,0,2,50
+MACMD35,172.20.50.66,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,4,62
+MACMD349,172.20.50.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.192,Yes,0,3,55
+MACMD348,172.20.121.57,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:40","21 Feb 2026, 11:01",8.20.72.192,Yes,0,2,54
+MACMD347,172.20.110.158,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 09:31","21 Feb 2026, 16:06",8.20.72.192,Yes,0,1,52
+MACMD346,172.20.80.107,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 15:52",8.20.72.192,Yes,0,20,56
+MACMD345,172.20.80.201,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,54
+MACMD344,172.20.110.73,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:47","21 Feb 2026, 15:57",8.20.72.192,Yes,0,3,52
+MACMD343,172.20.90.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","21 Feb 2026, 16:04",8.20.72.192,Yes,0,2,54
+MACMD342,172.20.80.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","20 Feb 2026, 20:17",8.20.72.192,Yes,0,28,54
+MACMD340,172.20.110.155,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","20 Feb 2026, 16:27",8.20.72.192,Yes,0,2,56
+MACMD339,172.20.110.87,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","19 Feb 2026, 18:00",8.20.72.174,Yes,0,4,50
+MACMD338,172.20.110.95,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 09:03","29 Jan 2026, 15:26",8.20.69.216,Yes,0,3,10
+MACMD338,172.20.110.95,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Feb 2026, 16:45","21 Feb 2026, 16:07",8.20.72.192,Yes,0,1,51
+MACMD337,172.20.110.64,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:03","21 Feb 2026, 15:59",8.20.72.192,Yes,0,1,54
+MACMD336,172.20.120.12,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","21 Feb 2026, 15:36",8.20.72.192,Yes,0,1,53
+MACMD335,172.20.80.132,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.186,Yes,0,47,58
+MACMD334,172.20.121.51,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:20","20 Feb 2026, 18:23",8.20.72.192,Yes,0,1,57
+MACMD333,172.20.110.161,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:40","21 Feb 2026, 14:48",8.20.72.206,Yes,0,2,52
+MACMD332,172.20.110.96,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:30","21 Feb 2026, 15:59",8.20.72.192,Yes,0,4,50
+MACMD331,172.20.90.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 23:55","20 Feb 2026, 12:19",8.20.72.192,Yes,0,2,56
+MACMD330,172.20.110.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,55
+MACMD329,172.20.50.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,5,58
+MACMD328,172.20.121.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","20 Feb 2026, 18:15",8.20.72.192,Yes,0,4,55
+MACMD327,172.20.80.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,48,59
+MACMD326,172.20.121.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:11","20 Feb 2026, 18:33",8.20.72.186,Yes,0,5,57
+MACMD3255,172.20.30.163,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:38","21 Feb 2026, 10:42",8.20.72.192,Yes,0,4,56
+MACMD323,172.20.80.240,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:53","21 Feb 2026, 16:05",8.20.72.186,Yes,0,16,54
+MACMD322,172.20.80.211,Windows,IT Applications,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,26,61
+MACMD321,172.20.80.133,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.192,Yes,0,19,58
+MACMD320,172.20.50.27,Windows,T_Deploy,4.31.0.19214,OK,"01 Dec 2025, 08:04","20 Feb 2026, 17:21",8.20.72.192,Yes,0,4,53
+MACMD319,172.20.80.206,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:17","20 Feb 2026, 18:13",8.20.72.192,Yes,0,2,56
+MACMD318,172.20.120.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","21 Feb 2026, 08:51",8.20.72.192,Yes,0,2,54
+MACMD317,172.20.120.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:51","21 Feb 2026, 15:55",8.20.72.192,Yes,0,1,50
+MACMD316,172.20.110.62,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:01","20 Feb 2026, 17:57",8.20.72.192,Yes,0,2,54
+MACMD315,172.20.121.68,Windows,Manually Installed Agents,4.31.0.19214,OK,"18 Dec 2025, 10:27","21 Feb 2026, 15:36",8.20.72.186,Yes,0,1,53
+MACMD314,172.20.110.19,Windows,Manually Installed Agents,4.31.0.19214,OK,"13 Dec 2025, 16:02","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,53
+MACMD313,172.20.120.69,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:57","17 Feb 2026, 12:01",8.20.72.156,Yes,0,1,50
+MACMD312,172.20.110.126,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:05","21 Feb 2026, 14:27",8.20.72.186,Yes,0,2,54
+MACMD311,172.20.110.81,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 09:17","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,55
+MACMD310,172.20.80.175,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.200,Yes,0,7,55
+MACMD309,172.20.120.66,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,54
+MACMD308,172.20.110.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,53
+MACMD307,172.20.80.134,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.186,Yes,0,5,54
+MACMD306,172.20.110.125,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,1,50
+MACMD305,172.20.80.167,Windows,IT Infra - SOC,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,51
+MACMD304,172.20.80.233,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 09:10","20 Feb 2026, 18:10",8.20.72.192,Yes,0,5,54
+MACMD303,172.20.80.148,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,31,59
+MACMD302,172.20.80.188,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:14","20 Feb 2026, 18:11",8.20.72.192,Yes,0,13,51
+MACMD301,172.20.110.163,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:50","21 Feb 2026, 15:04",8.20.72.192,Yes,0,1,51
+MACMD300,172.20.80.62,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,56
+MACMD299,172.20.110.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,53
+MACMD298,172.20.30.178,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:38","20 Feb 2026, 17:46",8.20.72.200,Yes,0,4,58
+MACMD297,172.20.120.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:09",8.20.72.186,Yes,0,1,50
+MACMD296,172.20.110.102,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:29","21 Feb 2026, 11:22",8.20.72.192,Yes,0,2,54
+MACMD295,172.20.90.12,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:07","21 Feb 2026, 16:02",8.20.72.202,Yes,0,9,53
+MACMD294,172.20.110.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"14 Jan 2026, 19:11","21 Feb 2026, 16:06",8.20.72.192,Yes,0,1,54
+MACMD293,172.20.120.62,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","20 Feb 2026, 18:25",8.20.72.192,Yes,0,2,53
+MACMD292,172.20.110.138,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 08:51","20 Feb 2026, 18:10",8.20.72.192,Yes,0,1,56
+MACMD291,172.20.110.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,54
+MACMD290,172.20.80.169,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Dec 2025, 21:19","21 Feb 2026, 16:08",8.20.72.186,Yes,0,9,57
+MACMD288,172.20.120.70,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:22","20 Feb 2026, 18:40",8.20.72.192,Yes,0,3,51
+MACMD287,172.20.121.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,6,57
+MACMD286,172.20.90.21,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:09",8.20.72.186,Yes,0,1,53
+MACMD285,172.20.110.17,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:15","20 Feb 2026, 16:52",8.20.72.192,Yes,0,2,53
+MACMD284,172.20.121.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:27","20 Feb 2026, 18:33",8.20.72.192,Yes,0,2,56
+MACMD283,172.20.80.63,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,30,57
+MACMD282,172.20.120.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:29","21 Feb 2026, 16:08",8.20.72.196,Yes,0,5,57
+MACMD281,172.20.120.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:02","21 Feb 2026, 15:35",8.20.72.192,Yes,0,1,54
+MACMD280,172.20.120.22,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,53
+MACMD279,172.20.80.105,Windows,Manually Installed Agents,4.31.0.19139,OK,"24 Dec 2025, 18:19","12 Feb 2026, 17:19",8.20.71.172,Yes,0,10,60
+MACMD278,172.20.80.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 07:39","21 Feb 2026, 16:09",8.20.72.186,Yes,0,9,57
+MACMD277,172.20.80.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 15:13","18 Feb 2026, 11:45",8.20.72.170,Yes,0,2,32
+MACMD276,172.20.120.16,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,51
+MACMD274,172.20.121.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:38","20 Feb 2026, 17:30",8.20.72.192,Yes,0,5,54
+MACMD273,172.20.80.187,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 13:01","20 Feb 2026, 21:59",8.20.72.186,Yes,0,3,53
+MACMD271,172.20.110.32,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:02","21 Feb 2026, 16:04",8.20.72.186,Yes,0,5,57
+MACMD270,172.20.110.72,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 09:11","10 Feb 2026, 10:30",8.20.70.52,Yes,0,5,51
+MACMD269,172.20.80.57,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:09","21 Feb 2026, 16:03",8.20.72.192,Yes,0,2,57
+MACMD268,172.20.90.22,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,53
+MACMD267,172.20.80.30,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","20 Feb 2026, 18:45",8.20.72.192,Yes,0,5,53
+MACMD266,172.20.80.53,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:01","20 Feb 2026, 19:54",8.20.72.192,Yes,0,5,54
+MACMD265,172.20.70.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"24 Dec 2025, 15:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,54
+MACMD264,172.20.80.94,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","20 Feb 2026, 18:42",8.20.72.186,Yes,0,6,51
+MACMD263,172.20.80.120,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,6,57
+MACMD262,172.20.120.15,Windows,Manually Installed Agents,4.31.0.19214,OK,"04 Dec 2025, 16:12","21 Feb 2026, 16:05",8.20.72.186,Yes,0,1,53
+MACMD261,172.20.80.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,5,57
+MACMD260,172.20.80.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","20 Feb 2026, 18:09",8.20.72.186,Yes,0,5,53
+MACMD259,172.20.80.146,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:36","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,57
+MACMD257,172.20.80.203,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Dec 2025, 13:07","21 Feb 2026, 12:27",8.20.72.192,Yes,0,3,53
+MACMD256,172.20.80.157,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:44","20 Feb 2026, 17:55",8.20.72.192,Yes,0,3,53
+MACMD255,172.20.110.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"15 Dec 2025, 14:53","21 Feb 2026, 15:58",8.20.72.192,Yes,0,1,57
+MACMD254,172.20.110.117,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:40","20 Feb 2026, 18:37",8.20.72.192,Yes,0,5,51
+MACMD253,172.20.121.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","20 Feb 2026, 18:02",8.20.72.192,Yes,0,6,57
+MACMD252,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Dec 2025, 13:48","20 Feb 2026, 12:42",8.20.72.6,Yes,0,1,56
+MACMD251,172.20.110.131,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 08:20","13 Feb 2026, 18:00",8.20.70.38,Yes,0,1,57
+MACMD250,172.20.80.180,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:09","20 Feb 2026, 19:37",8.20.72.186,Yes,0,4,54
+MACMD249,172.20.80.100,Windows,Manually Installed Agents,4.31.0.19214,OK,"15 Jan 2026, 01:43","21 Feb 2026, 05:08",8.20.72.186,Yes,0,1,54
+MACMD248,172.20.30.124,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 06:56","20 Feb 2026, 16:29",8.20.72.192,Yes,0,4,57
+MACMD247,172.20.121.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.186,Yes,0,4,57
+MACMD246,172.20.121.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:39","20 Feb 2026, 18:25",8.20.72.192,Yes,0,4,53
+MACMD245,172.20.121.47,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,57
+MACMD243,172.20.110.128,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,14,53
+MACMD242,172.20.80.74,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:39","20 Feb 2026, 17:28",8.20.72.192,Yes,0,2,51
+MACMD241,172.20.80.29,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.200,Yes,0,4,54
+MACMD240,172.20.121.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","20 Feb 2026, 15:53",8.20.72.186,Yes,0,4,54
+MACMD24,172.20.30.67,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.196,Yes,0,5,58
+MACMD239,172.20.110.99,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","19 Feb 2026, 18:45",8.20.72.180,Yes,0,4,54
+MACMD238,172.20.121.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:56","20 Feb 2026, 16:52",8.20.72.186,Yes,0,2,55
+MACMD237,172.20.80.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,10,59
+MACMD236,172.20.80.65,Windows,IT Support,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,28,56
+MACMD235,172.20.80.113,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","21 Feb 2026, 16:08",8.20.72.186,Yes,0,5,57
+MACMD234,172.20.80.231,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,4,57
+MACMD233,172.20.80.135,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:15","20 Feb 2026, 17:14",8.20.72.192,Yes,0,2,53
+MACMD232,172.20.80.170,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,56
+MACMD231,172.20.110.140,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:03","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,53
+MACMD23,172.20.120.64,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,61
+MACMD229,172.20.80.109,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:14","16 Feb 2026, 23:39",8.20.72.148,Yes,0,24,57
+MACMD227,172.20.90.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:10","21 Feb 2026, 12:11",8.20.72.192,Yes,0,4,52
+MACMD226,172.20.80.106,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:50","20 Feb 2026, 17:51",8.20.72.186,Yes,0,1,53
+MACMD225,172.20.80.217,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.186,Yes,0,14,50
+MACMD224,172.20.120.53,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:22","20 Feb 2026, 18:46",8.20.72.192,Yes,0,3,51
+MACMD223,172.20.120.38,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,50
+MACMD222,172.20.70.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,14,56
+MACMD221,172.20.110.31,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,55
+MACMD220,172.20.120.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,54
+MACMD218,172.20.30.61,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","20 Feb 2026, 17:13",8.20.72.186,Yes,0,3,57
+MACMD217,172.20.110.25,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.174,Yes,0,1,53
+MACMD216,172.20.80.85,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:02","20 Feb 2026, 17:57",8.20.72.192,Yes,0,4,52
+MACMD215,172.20.80.72,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,6,57
+MACMD214,172.20.50.65,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,24,56
+MACMD213,172.20.110.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:21","20 Feb 2026, 18:09",8.20.72.192,Yes,0,4,51
+MACMD211,172.20.110.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:22","20 Feb 2026, 18:18",8.20.72.186,Yes,0,2,50
+MACMD208,172.20.121.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","21 Feb 2026, 07:12",8.20.72.192,Yes,0,3,53
+MACMD206,172.20.80.113,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Dec 2025, 08:50","22 Jan 2026, 18:10",8.20.70.52,Yes,0,3,54
+MACMD205,172.20.80.172,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:36","21 Feb 2026, 16:07",8.20.72.192,Yes,0,4,54
+MACMD203,172.20.50.86,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:31","21 Feb 2026, 13:50",8.20.72.186,Yes,0,3,53
+MACMD202,172.20.110.52,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 16:41","21 Feb 2026, 16:08",8.20.72.192,Yes,0,2,50
+MACMD201,172.20.80.141,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","21 Feb 2026, 14:48",8.20.72.186,Yes,0,10,57
+MACMD200,172.20.110.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","21 Feb 2026, 16:05",8.20.72.192,Yes,0,2,53
+MACMD20,10.223.67.18,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.192,Yes,0,6,60
+MACMD199,172.20.121.40,Windows,Manually Installed Agents,4.31.0.19214,OK,"18 Dec 2025, 12:39","20 Feb 2026, 18:02",8.20.72.192,Yes,0,1,53
+MACMD198,172.20.121.53,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:45","20 Feb 2026, 18:22",8.20.72.192,Yes,0,4,55
+MACMD197,172.20.110.148,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 10:53","21 Feb 2026, 16:04",8.20.72.192,Yes,0,2,55
+MACMD196,172.20.121.37,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.186,Yes,0,3,57
+MACMD194,172.20.70.35,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:43","21 Feb 2026, 16:05",8.20.72.186,Yes,0,5,54
+MACMD193,172.20.80.138,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:35","20 Feb 2026, 19:44",8.20.72.192,Yes,0,3,51
+MACMD192,172.20.110.26,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:00","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,52
+MACMD19,172.20.80.224,Windows,Manually Installed Agents,4.31.0.19214,OK,"06 Jan 2026, 15:16","21 Feb 2026, 16:05",8.20.72.196,Yes,0,4,53
+MACMD189,172.20.110.39,Windows,Manually Installed Agents,4.31.0.19214,OK,"19 Dec 2025, 12:30","20 Feb 2026, 18:09",8.20.72.192,Yes,0,1,53
+MACMD188,172.20.120.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"05 Jan 2026, 17:52","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,50
+MACMD187,172.20.80.10,Windows,Manually Installed Agents,4.31.0.19214,OK,"10 Dec 2025, 10:56","20 Feb 2026, 18:57",8.20.72.200,Yes,0,2,53
+MACMD186,172.20.30.193,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:44","20 Feb 2026, 17:15",8.20.72.186,Yes,0,3,56
+MACMD185,172.20.50.75,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 11:47","21 Feb 2026, 15:55",8.20.72.196,Yes,0,2,56
+MACMD184,172.20.80.123,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:24","21 Feb 2026, 12:28",8.20.72.192,Yes,0,3,51
+MACMD183,172.20.110.83,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:01","21 Feb 2026, 14:23",8.20.72.192,Yes,0,2,54
+MACMD182,172.20.80.227,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:19","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,51
+MACMD181,172.20.80.22,Windows,USB Alllowed Group,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:08",8.20.72.186,Yes,0,8,56
+MACMD180,172.20.110.15,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Jan 2026, 10:29","20 Feb 2026, 17:55",8.20.72.192,Yes,0,1,54
+MACMD179,172.20.80.216,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,26,54
+MACMD178,172.20.70.155,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:43","20 Feb 2026, 17:16",8.20.72.186,Yes,0,8,51
+MACMD176,172.20.80.81,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 14:32","20 Feb 2026, 16:55",8.20.72.192,Yes,0,1,53
+MACMD175,172.20.121.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:20","21 Feb 2026, 11:10",8.20.72.206,Yes,0,7,55
+MACMD173,172.20.110.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:59","21 Feb 2026, 16:05",8.20.72.192,Yes,0,1,50
+MACMD172,172.20.80.68,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.186,Yes,0,8,59
+MACMD171,172.20.80.43,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,54
+MACMD170,172.20.30.192,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:09",8.20.72.186,Yes,0,6,58
+MACMD169,172.20.70.33,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,32,57
+MACMD168,172.20.80.143,Windows,Manually Installed Agents,4.31.0.19214,OK,"02 Dec 2025, 09:14","20 Feb 2026, 18:05",8.20.72.186,Yes,0,2,53
+MACMD167,172.20.30.188,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:59","21 Feb 2026, 01:46",8.20.72.186,Yes,0,6,53
+MACMD166,172.20.110.76,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:46","20 Feb 2026, 18:14",8.20.72.192,Yes,0,1,50
+MACMD165,172.20.110.192,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:41","20 Feb 2026, 17:37",8.20.72.192,Yes,0,3,53
+MACMD162,172.20.80.130,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:12","20 Feb 2026, 19:08",8.20.72.200,Yes,0,3,51
+MACMD161,172.20.110.187,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:24","20 Feb 2026, 17:58",8.20.72.192,Yes,0,1,54
+MACMD159,172.20.121.34,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 12:09","20 Feb 2026, 18:20",8.20.72.192,Yes,0,4,57
+MACMD158,172.20.90.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:45","21 Feb 2026, 15:48",8.20.72.192,Yes,0,3,50
+MACMD157,172.20.80.236,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:45","21 Feb 2026, 16:05",8.20.72.186,Yes,0,23,51
+MACMD156,172.20.70.34,Windows,Manually Installed Agents,4.31.0.19139,OK,"24 Dec 2025, 19:24","11 Feb 2026, 12:40",8.20.69.218,Yes,0,0,6
+MACMD155,172.20.110.44,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:07","20 Feb 2026, 18:01",8.20.72.192,Yes,0,2,53
+MACMD154,172.20.80.122,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:08",8.20.72.196,Yes,0,5,59
+MACMD153,172.20.120.19,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Feb 2026, 15:07","21 Feb 2026, 16:06",8.20.72.164,Yes,0,1,51
+MACMD149,172.20.110.167,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:16","20 Feb 2026, 18:04",8.20.72.192,Yes,0,2,54
+MACMD148,172.20.110.48,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:13","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,51
+MACMD147,172.20.110.176,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:06","21 Feb 2026, 16:07",8.20.72.186,Yes,0,3,52
+MACMD144,172.20.80.173,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 22:24","20 Feb 2026, 21:59",8.20.72.186,Yes,0,3,51
+MACMD143,172.20.110.36,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Dec 2025, 13:41","21 Feb 2026, 16:09",8.20.72.186,Yes,0,1,54
+MACMD141,172.20.110.156,Windows,Manually Installed Agents,4.31.0.19214,OK,"03 Dec 2025, 11:09","21 Feb 2026, 16:01",8.20.72.192,Yes,0,1,52
+MACMD139,100.63.27.13,Windows,Manually Installed Agents,4.30.1.18852,OK,"01 Jan 2026, 13:31","22 Jan 2026, 10:42",8.20.70.72,Yes,0,0,6
+MACMD138,172.20.120.71,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:08","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,57
+MACMD135,172.20.80.4,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,53
+MACMD134,172.20.80.11,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:09","21 Feb 2026, 16:00",8.20.72.192,Yes,0,2,53
+MACMD133,172.20.110.86,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 09:03","21 Feb 2026, 16:08",8.20.72.192,Yes,0,5,58
+MACMD13,172.20.80.66,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,52
+MACMD03,172.20.50.49,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,60
+MACMD02,172.20.50.24,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 08:07","17 Feb 2026, 16:36",8.20.72.148,Yes,0,8,58
+MACMD01,172.20.30.126,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,6,58
+MACMBOPADB,192.168.101.172,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Dec 2025, 14:19","21 Feb 2026, 16:07",8.20.72.186,Yes,0,27,42
+MACMADC,192.168.101.22,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.202,Yes,0,0,49
+MACM-XTENDVOICE,192.168.101.150,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,52
+MACM-UAT-WEBAPP,192.168.142.13,Windows,STT instance,4.31.0.19214,OK,"09 Dec 2025, 17:09","21 Feb 2026, 16:08",8.20.72.186,Yes,0,43,48
+MACM-TRACKWIZZUAT,192.168.101.52,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.216,Yes,0,20,44
+MACM-RPA-TALLY2,172.20.50.81,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,3,58
+MACM-RPA-TALLY,172.20.50.41,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:35","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,58
+MACM-PRTG,192.168.101.124,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.216,Yes,0,1,44
+MACM-PRO-DB,10.8.172.14,Windows,Manually Installed Agents,4.31.0.19214,OK,"26 Dec 2025, 22:39","21 Feb 2026, 16:07",8.20.72.186,Yes,0,27,46
+MACM-PRO-APP1,192.168.152.27,Windows,Manually Installed Agents,4.31.0.19214,OK,"26 Dec 2025, 22:43","21 Feb 2026, 16:05",8.20.72.186,Yes,0,5,42
+MACM-MISDB,192.168.101.185,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:04",8.20.72.186,Yes,0,44,41
+MACM-LSRV01,192.168.101.40,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.216,Yes,0,9,50
+MACM-LPRTG,192.168.101.139,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.216,Yes,0,0,47
+MACM-IAPP,192.168.101.60,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,40
+MACM-FS,192.168.101.120,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,0,38
+MACM-DATABASE,192.168.101.25,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,29,51
+MACM-CI-IAM,192.168.101.207,Windows,Manually Installed Agents,4.31.0.19214,OK,"12 Feb 2026, 12:00","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,39
+MACM-B2B2C-DB,10.20.99.254,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,25,42
+MACM-B2B2C-APP,10.20.97.250,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:06",8.20.72.186,Yes,0,6,40
+MACM-APP,192.168.101.30,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,3,51
+MACM-ACCOUNT,172.20.50.10,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:05",8.20.72.186,Yes,0,0,50
+MABackoffUAT,10.7.132.12,Windows,STT instance,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,10,44
+MABOWEBPRO4,192.168.152.41,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:27","21 Feb 2026, 16:08",8.20.72.186,Yes,0,2,42
+MABOWEBPRO3,192.168.152.42,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:27","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,49
+MABOWEBPRO2,192.168.152.24,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:29","21 Feb 2026, 16:06",8.20.72.204,Yes,0,5,46
+MABOPREDB,10.8.172.25,Windows,STT instance,4.30.0.18632,Warning,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.204,Yes,0,27,47
+MABOPREAPP,192.168.152.47,Windows,N/A,4.7.0.8385,Warning,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",N/A,No,0,0,0
+MABODBSEC,10.8.172.20,Windows,STT instance,4.31.0.19214,OK,"12 Dec 2025, 12:54","21 Feb 2026, 16:04",8.20.72.186,Yes,0,12,53
+MA-VLogger,192.168.101.245,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.186,Yes,0,35,48
+MA-UDP1,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.216,Yes,0,7,53
+MA-SYMPROX2,192.168.101.207,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 05:31","12 Feb 2026, 11:51",8.20.71.172,Yes,0,2,39
+MA-SYMPROX1,192.168.101.206,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,39
+MA-SRV-02,100.63.27.13,Windows,Manually Installed Agents,4.30.0.18632,OK,"01 Dec 2025, 05:34","09 Feb 2026, 15:31",8.20.70.46,Yes,0,0,0
+MA-SRV-01,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 05:30","09 Feb 2026, 11:44",8.20.70.46,Yes,0,0,0
+MA-REF-CMOTS-DB,10.8.172.24,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:14","21 Feb 2026, 16:07",8.20.72.186,Yes,0,27,44
+MA-REF-CMOTS-APP2,192.168.152.44,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:16","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,41
+MA-REF-CMOTS-APP,192.168.152.43,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:15","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,41
+MA-PUB-02,192.168.101.111,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.200,Yes,0,0,45
+MA-PUB-01,192.168.101.110,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.200,Yes,0,1,46
+MA-PRIMEDB,192.168.101.54,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.216,Yes,0,3,46
+MA-OPAPI-Feed1-DC,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19139,OK,"09 Feb 2026, 15:36","17 Feb 2026, 11:57",8.20.72.48,Yes,0,0,4
+MA-OPAPI-Feed1-DC,192.168.152.20,Windows,STT instance,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,24
+MA-OPAPI-F1,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19139,OK,"01 Dec 2025, 05:31","09 Feb 2026, 15:40",8.20.70.64,Yes,0,3,4
+MA-MAC001-2,192.168.104.148,Mac,N/A,4.11.1.6442,Warning,"01 Dec 2025, 12:18","17 Feb 2026, 17:27",N/A,No,0,0,0
+MA-GWDB-UAT,192.168.101.239,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:07",8.20.72.186,Yes,0,43,40
+MA-GWAPP-UAT,192.168.101.238,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,10,42
+MA-DCVM-EKYCP-APP02,192.168.152.36,Windows,STT instance,4.31.0.19214,OK,"15 Dec 2025, 09:46","21 Feb 2026, 16:07",8.20.72.186,Yes,0,4,18
+MA-DCVM-EKYC-RS,192.168.152.28,Windows,STT instance,4.31.0.19214,OK,"15 Dec 2025, 09:36","21 Feb 2026, 16:05",8.20.72.186,Yes,0,4,18
+MA-DCVM-EKYC-APP06,192.168.152.33,Windows,STT instance,4.31.0.19214,OK,"13 Dec 2025, 11:37","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,18
+MA-DCVM-EKYC-APP05,192.168.152.32,Windows,STT instance,4.31.0.19214,OK,"12 Dec 2025, 12:51","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,18
+MA-DCVM-EKYC-APP04,192.168.152.31,Windows,STT instance,4.31.0.19214,OK,"12 Dec 2025, 12:52","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,18
+MA-DCVM-EKYC-APP03,192.168.152.30,Windows,STT instance,4.30.1.18852,OK,"13 Dec 2025, 11:14","30 Jan 2026, 02:03",8.20.70.46,Yes,0,3,18
+MA-DCVM-EKYC-APP02,192.168.152.35,Windows,STT instance,4.31.0.19214,OK,"15 Dec 2025, 11:34","21 Feb 2026, 16:09",8.20.72.186,Yes,0,4,18
+MA-ClassBO2,192.168.152.46,Windows,Manually Installed Agents,4.31.0.19214,OK,"11 Dec 2025, 17:43","21 Feb 2026, 16:06",8.20.72.186,Yes,0,3,41
+MA-ClassBO1,192.168.152.45,Windows,Manually Installed Agents,4.31.0.19214,OK,"11 Dec 2025, 17:22","21 Feb 2026, 16:04",8.20.72.186,Yes,0,4,40
+MA-CMOTS-WEB,192.168.152.25,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:12","21 Feb 2026, 16:04",8.20.72.186,Yes,0,2,45
+MA-CMOTS-UAT-DB,10.7.132.13,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 17:30","21 Feb 2026, 16:07",8.20.72.186,Yes,0,38,43
+MA-CMOTS-UAT-APPS,192.168.142.12,Windows,STT instance,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:04",8.20.72.186,Yes,0,5,44
+MA-CMOTS-D-1,10.8.172.13,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 09:55","21 Feb 2026, 16:09",8.20.72.186,Yes,0,34,46
+MA-CMOTS-APP3,192.168.152.40,Windows,STT instance,4.31.0.19214,OK,"11 Dec 2025, 09:22","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,42
+MA-CMOTS-APP2,192.168.152.39,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:12","21 Feb 2026, 16:07",8.20.72.186,Yes,0,2,42
+MA-CMOTS-APP1,192.168.152.38,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 16:47","21 Feb 2026, 16:05",8.20.72.186,Yes,0,2,42
+MA-CMOTS-APP,192.168.152.26,Windows,STT instance,4.31.0.19214,OK,"10 Dec 2025, 18:12","21 Feb 2026, 16:06",8.20.72.186,Yes,0,4,44
+MA-CLASSDPSLAVE,10.8.172.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"26 Dec 2025, 11:57","21 Feb 2026, 16:08",8.20.72.186,Yes,0,28,51
+MA-BingeFeed,192.168.101.235,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:08",8.20.72.186,Yes,0,1,42
+MA-BigFix-DB,192.168.101.241,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:08",8.20.72.186,Yes,0,18,42
+MA-BigFix-App,192.168.101.240,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:06",8.20.72.186,Yes,0,2,40
+MA-BXADP-02-DC,10.222.37.149,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"17 Feb 2026, 18:34","21 Feb 2026, 16:08",8.20.72.216,No,0,0,0
+MA-BOX-06,192.168.208.13,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:32","17 Feb 2026, 16:57",8.20.70.78,Yes,0,0,0
+MA-BOX-05,192.168.208.12,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:34","04 Feb 2026, 18:41",8.20.70.62,Yes,0,0,0
+MA-BOX-04,192.168.202.96,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:31","13 Feb 2026, 16:58",8.20.70.62,Yes,0,0,0
+MA-BOX-03,10.223.108.172,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:32","13 Feb 2026, 20:06",8.20.70.62,Yes,0,0,0
+MA-BOX-01,10.223.105.75,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"01 Dec 2025, 05:31","17 Feb 2026, 18:02",8.20.70.78,Yes,0,0,0
+MA-02-mStockFeed-DC,192.168.152.22,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"03 Feb 2026, 18:15","21 Feb 2026, 16:09",8.20.72.212,No,0,0,0
+MA-02-RSFEED-DC-ntt,172.20.80.160,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Feb 2026, 13:24","16 Feb 2026, 17:18",8.20.72.146,Yes,0,0,5
+MA-02-RSFEED-DC,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Feb 2026, 11:44","16 Feb 2026, 13:24",8.20.72.48,Yes,0,1,32
+MA-01-mStockFeed-DC,192.168.152.21,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"03 Feb 2026, 17:20","21 Feb 2026, 16:04",8.20.72.212,No,0,0,0
+MA-01-mStockFeed-DC,192.168.152.21,Linux,Manually Installed Agents - Linux,4.30.0.15643,OK,"26 Dec 2025, 12:58","03 Feb 2026, 16:31",8.20.71.176,Yes,0,0,0
+MA-01-RSFeed-DR,192.168.252.12,Windows,Manually Installed Agents,4.30.1.18852,Warning,"02 Jan 2026, 15:27","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,20
+MA-01-RSFeed-DC-ntt,172.20.80.184,Windows,Manually Installed Agents,4.31.0.19214,OK,"16 Feb 2026, 13:33","16 Feb 2026, 17:03",8.20.72.146,Yes,0,1,17
+MA-01-RSFeed-DC,100.63.27.13,Windows,Manually Installed Agents,4.31.0.19214,OK,"09 Feb 2026, 15:30","16 Feb 2026, 13:33",8.20.72.48,Yes,0,0,0
+LAMA-UAT-APP,10.40.40.99,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"19 Feb 2026, 17:13","20 Feb 2026, 21:56",8.20.72.196,No,0,0,0
+KGISL-UATDB,192.168.101.183,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:08",8.20.72.216,Yes,0,2,44
+KGISL-DBSRV,192.168.101.180,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.216,Yes,0,4,44
+IT-NOC-02,192.168.101.155,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:32","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+IT-NOC-01,192.168.101.156,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:30","21 Feb 2026, 16:05",8.20.72.206,No,0,0,0
+GreekApp,172.20.50.80,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:04",8.20.72.186,Yes,0,1,55
+GENAI-TOOL,192.168.101.214,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:34","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,36
+ESMSERVER,192.168.101.26,Windows,Windows Servers,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:04",8.20.72.186,Yes,0,24,50
+EKYC-UAT,10.7.132.11,Windows,STT instance,4.31.0.19214,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:07",8.20.72.186,Yes,0,54,49
+EC2AMAZ-1IFAD6F,10.40.66.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 09:10","21 Feb 2026, 16:08",8.20.72.192,Yes,0,20,39
+DESKTOP-4D87TLB,172.20.110.85,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 13:04","20 Feb 2026, 13:58",8.20.72.196,Yes,0,0,4
+CMOTS_AWS,192.168.101.237,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,38
+Buyback-prod-sqldb,10.20.85.23,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:32","20 Feb 2026, 16:57",8.20.72.192,Yes,0,31,43
+BackOfficeHyperV,192.168.101.171,Windows,Manually Installed Agents,4.31.0.19214,OK,"23 Dec 2025, 13:46","21 Feb 2026, 16:06",8.20.72.186,Yes,0,1,40
+BO-OPP-02,10.8.172.17,Windows,STT instance,4.31.0.19214,OK,"05 Dec 2025, 19:23","21 Feb 2026, 16:07",8.20.72.186,Yes,0,27,48
+Aikyam-Strapi-Dashboard-and-CM-Web-EC2,10.20.81.65,Linux,Manually Installed Agents - Linux,4.31.0.16354,OK,"01 Dec 2025, 05:31","21 Feb 2026, 16:08",8.20.72.206,No,0,0,0
+AE-UAT-APP,10.40.57.219,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 09:08","20 Feb 2026, 21:57",8.20.72.192,Yes,0,1,30
+AE-UAT-AGENT,10.40.49.161,Windows,Manually Installed Agents,4.31.0.19214,OK,"20 Feb 2026, 09:03","20 Feb 2026, 21:56",8.20.72.192,Yes,0,0,28
+AE-PROD-APP,10.23.1.6,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:05",8.20.72.186,Yes,0,0,29
+AE-PROD-AGENT,10.23.2.202,Windows,Manually Installed Agents,4.31.0.19214,OK,"01 Dec 2025, 05:33","21 Feb 2026, 16:07",8.20.72.186,Yes,0,1,31

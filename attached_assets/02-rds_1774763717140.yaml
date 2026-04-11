@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GRC Shield — RDS PostgreSQL Layer
+  Creates an RDS PostgreSQL 15 instance with Multi-AZ, automated backups,
+  encryption at rest, and a Secrets Manager secret for credentials.
+  Depends on: 01-vpc.yaml (exports VpcId, DBSubnet*Id, RDSSecurityGroupId)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: grc-shield
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    AllowedValues:
+      - db.t3.medium
+      - db.t3.large
+      - db.r6g.large
+      - db.r6g.xlarge
+    Description: RDS instance type. Use db.r6g.large for production workloads.
+
+  DBName:
+    Type: String
+    Default: grcshield
+
+  DBUsername:
+    Type: String
+    Default: grcuser
+    NoEcho: false
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: >
+      Master DB password (16+ chars). Will also be stored in Secrets Manager.
+      Generate with: openssl rand -base64 24
+
+  MultiAZ:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable Multi-AZ for HA. Set false for dev/staging to save cost.
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+  AllocatedStorageGB:
+    Type: Number
+    Default: 50
+    MinValue: 20
+
+Resources:
+  # ─── DB Subnet Group ──────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: GRC Shield RDS subnet group (isolated DB subnets)
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-DBSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-DBSubnet2Id"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-db-subnet-group"
+        - Key: Project
+          Value: grc-shield
+
+  # ─── DB Parameter Group ───────────────────────────────────────────────────
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: GRC Shield PostgreSQL 15 parameters
+      Family: postgres15
+      Parameters:
+        # Connection settings
+        max_connections: "200"
+        # Performance
+        shared_buffers: "262144"           # 256MB in 8KB pages
+        effective_cache_size: "786432"     # 768MB
+        maintenance_work_mem: "65536"      # 64MB in KB
+        checkpoint_completion_target: "0.9"
+        wal_buffers: "2048"                # 16MB
+        default_statistics_target: "100"
+        random_page_cost: "1.1"            # SSD-optimized
+        effective_io_concurrency: "200"    # SSD-optimized
+        work_mem: "4096"                   # 4MB
+        # Security
+        log_connections: "1"
+        log_disconnections: "1"
+        log_duration: "0"
+        log_min_duration_statement: "1000" # Log queries > 1s
+        log_statement: "ddl"              # Log DDL changes
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # ─── RDS Instance ─────────────────────────────────────────────────────────
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-postgres"
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: postgres
+      EngineVersion: "15.14"
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-RDSSecurityGroupId"
+      MultiAZ: !Ref MultiAZ
+      AllocatedStorage: !Sub "${AllocatedStorageGB}"
+      StorageType: gp3
+      StorageEncrypted: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      EnableIAMDatabaseAuthentication: false
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-postgres"
+        - Key: Project
+          Value: grc-shield
+
+  # ─── Enhanced Monitoring IAM Role ─────────────────────────────────────────
+  RDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-rds-monitoring-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # ─── Secrets Manager — DB Credentials ────────────────────────────────────
+  # The ECS task will pull DATABASE_URL from this secret.
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}/database"
+      Description: GRC Shield RDS PostgreSQL connection string
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${DBInstance.Endpoint.Address}",
+          "port": "5432",
+          "dbname": "${DBName}",
+          "DATABASE_URL": "postgresql://${DBUsername}:${DBPassword}@${DBInstance.Endpoint.Address}:5432/${DBName}"
+        }
+      Tags:
+        - Key: Project
+          Value: grc-shield
+
+  # Enable automatic secret rotation (optional — RDS secret rotation Lambda)
+  # Uncomment if you want AWS to auto-rotate the password every 30 days:
+  # DBSecretRotationSchedule:
+  #   Type: AWS::SecretsManager::RotationSchedule
+  #   Properties:
+  #     SecretId: !Ref DBSecret
+  #     RotationLambdaARN: ... (deploy aws-samples/aws-secrets-manager-rotation-lambdas)
+  #     RotationRules:
+  #       AutomaticallyAfterDays: 30
+
+  # ─── CloudWatch Alarms ────────────────────────────────────────────────────
+  DBHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-rds-high-cpu"
+      AlarmDescription: RDS CPU > 80% for 5 min
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+
+  DBLowStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-rds-low-storage"
+      AlarmDescription: RDS free storage < 5GB
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5368709120  # 5GB in bytes
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+
+  DBConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-rds-high-connections"
+      AlarmDescription: RDS connections > 150 (approaching max_connections=200)
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 150
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+
+Outputs:
+  DBEndpointAddress:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${EnvironmentName}-DBEndpoint"
+
+  DBEndpointPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${EnvironmentName}-DBPort"
+
+  DBSecretArn:
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub "${EnvironmentName}-DBSecretArn"
+
+  DBInstanceIdentifier:
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub "${EnvironmentName}-DBInstanceId"

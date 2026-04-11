@@ -1,0 +1,19 @@
+{{- if .Values.detectionEngine.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-detection-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: detection-engine
+spec:
+  type: {{ .Values.detectionEngine.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.detectionEngine.service.port }}
+      targetPort: http
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: detection-engine
+{{- end }}

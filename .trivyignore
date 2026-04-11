@@ -1,0 +1,41 @@
+##############################################################################
+# .trivyignore — Trivy vulnerability ignore list
+#
+# Used by the `security-scan` job in .github/workflows/deploy-aws.yml.
+# Trivy scans the built Docker image for OS-level and application CVEs.
+#
+# Format (one per line):
+#   CVE-YYYY-NNNNN  # Severity | Reason | Expiry (if known)
+#
+# Review this file quarterly. Remove entries when upstream patches ship.
+# ALL ignores MUST have a documented rationale comment.
+#
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
+##############################################################################
+
+# ── node:20-alpine OS-level CVEs (musl libc / Alpine) ────────────────────────
+
+# CVE-2023-4806   # MEDIUM | glibc heap-use-after-free in getaddrinfo — Alpine
+#                 # uses musl libc, not glibc; this CVE does not apply.
+#                 # Upstream: https://security.alpinelinux.org/
+# CVE-2023-4806
+
+# CVE-2023-5156   # MEDIUM | glibc getaddrinfo — same as above; musl-only base.
+# CVE-2023-5156
+
+# ── npm package CVEs (accepted after risk assessment) ────────────────────────
+# Add entries here only after:
+#   1. Confirming the vulnerable code path is not reachable in production
+#   2. Creating a tracking issue referencing the CVE
+#   3. Getting security team sign-off
+#
+# Template:
+# CVE-YYYY-NNNNN  # SEVERITY | Package | Reason | Tracking issue #
+
+# ── Instructions for adding new ignores ──────────────────────────────────────
+# When Trivy flags a CVE that you wish to accept:
+#   1. Research the CVE on NVD (https://nvd.nist.gov/)
+#   2. Confirm the affected code path is not exercised by this application
+#   3. Add the CVE ID below with mandatory rationale comment
+#   4. Open a tracking issue to revisit when a patch is available
+#   5. Set an expiry comment (e.g. "# Re-evaluate after Alpine 3.22 ships")

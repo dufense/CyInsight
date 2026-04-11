@@ -1,0 +1,310 @@
+  // ─────────────────────────────────────────────────────────────────────────
+  // THREAT RADAR — Attack vector distribution (10 sectors, last 30 days)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get("/api/threat-radar/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      // Enforce tenant access before any data access (prevents cross-tenant IDOR)
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+      const since = new Date(Date.now() - 30 * 86400000);
+
+      // Query event_type distribution from security_events
+      const [eventsRes, subTypeRes, aiRes] = await Promise.all([
+        pool.query(
+          `SELECT event_type,
+                  COUNT(*) AS cnt,
+                  MAX(CASE
+                    WHEN severity = 'critical' THEN 4
+                    WHEN severity = 'high'     THEN 3
+                    WHEN severity = 'medium'   THEN 2
+                    WHEN severity = 'low'      THEN 1
+                    ELSE 0 END) AS max_sev
+           FROM security_events
+           WHERE tenant_id = ANY($1) AND occurred_at >= $2
+             AND event_type IS NOT NULL
+           GROUP BY event_type`,
+          [tenantIds, since]
+        ),
+
+        // Sub-type fingerprinting: count keyword hits per event_type across threat_vector + threat + mitre_technique
+        pool.query(
+          `SELECT event_type,
+                  SUM(CASE WHEN txt LIKE '%ransom%' THEN 1 ELSE 0 END)                                                 AS ransomware,
+                  SUM(CASE WHEN txt LIKE '%malware%' OR txt LIKE '%trojan%' OR txt LIKE '%virus%' THEN 1 ELSE 0 END)   AS malware,
+                  SUM(CASE WHEN txt LIKE '%ddos%' OR txt LIKE '%flood%' OR txt LIKE '%dos%' THEN 1 ELSE 0 END)         AS ddos,
+                  SUM(CASE WHEN txt LIKE '%bot%' OR txt LIKE '%c2%' OR txt LIKE '%beacon%' OR txt LIKE '%command and control%' THEN 1 ELSE 0 END) AS botnet,
+                  SUM(CASE WHEN txt LIKE '%lateral%' THEN 1 ELSE 0 END)                                                AS lateral,
+                  SUM(CASE WHEN txt LIKE '%phish%' THEN 1 ELSE 0 END)                                                  AS phishing,
+                  SUM(CASE WHEN txt LIKE '%spam%' THEN 1 ELSE 0 END)                                                   AS spam,
+                  SUM(CASE WHEN txt LIKE '%bec%' THEN 1 ELSE 0 END)                                                    AS bec,
+                  SUM(CASE WHEN txt LIKE '%exploit%' THEN 1 ELSE 0 END)                                                AS exploit,
+                  SUM(CASE WHEN txt LIKE '%scan%' THEN 1 ELSE 0 END)                                                   AS scanning,
+                  SUM(CASE WHEN txt LIKE '%exfil%' OR txt LIKE '%data leak%' THEN 1 ELSE 0 END)                        AS exfiltration,
+                  SUM(CASE WHEN txt LIKE '%misconfig%' OR txt LIKE '%shadow it%' THEN 1 ELSE 0 END)                    AS misconfig,
+                  SUM(CASE WHEN txt LIKE '%brute%' OR txt LIKE '%credential%' OR txt LIKE '%spray%' THEN 1 ELSE 0 END) AS bruteforce
+           FROM (
+             SELECT event_type,
+               LOWER(
+                 COALESCE(threat_vector,'') || ' ' ||
+                 COALESCE(threat,'')        || ' ' ||
+                 COALESCE(mitre_technique,'')
+               ) AS txt
+             FROM security_events
+             WHERE tenant_id = ANY($1) AND occurred_at >= $2 AND event_type IS NOT NULL
+           ) t
+           GROUP BY event_type`,
+          [tenantIds, since]
+        ),
+
+        // AI-vector incidents
+        pool.query(
+          `SELECT COUNT(*) AS cnt,
+                  MAX(CASE
+                    WHEN severity = 'critical' THEN 4
+                    WHEN severity = 'high'     THEN 3
+                    WHEN severity = 'medium'   THEN 2
+                    WHEN severity = 'low'      THEN 1
+                    ELSE 0 END) AS max_sev
+           FROM incidents
+           WHERE tenant_id = ANY($1) AND created_at >= $2
+             AND (
+               LOWER(incident_type) LIKE '%prompt%'
+               OR LOWER(incident_type) LIKE '%ai attack%'
+               OR LOWER(incident_type) LIKE '%model poison%'
+               OR LOWER(incident_type) LIKE '%adversarial%'
+               OR LOWER(incident_type) LIKE '%deepfake%'
+               OR LOWER(category)     LIKE '%ai%'
+             )
+             AND LOWER(COALESCE(incident_type,'')) NOT LIKE '%ai analysis%'`,
+          [tenantIds, since]
+        ),
+      ]);
+
+      const sevName = (score: number): string => {
+        if (score >= 4) return "critical";
+        if (score >= 3) return "high";
+        if (score >= 2) return "medium";
+        if (score >= 1) return "low";
+        return "none";
+      };
+
+      // Build event-type → {count, sev} lookup
+      const evMap = new Map<string, { count: number; sev: string }>();
+      for (const row of eventsRes.rows) {
+        evMap.set(row.event_type, { count: parseInt(row.cnt), sev: sevName(parseInt(row.max_sev)) });
+      }
+
+      // Build event-type → sub-type counts lookup
+      const stMap = new Map<string, Record<string, number>>();
+      for (const row of subTypeRes.rows) {
+        stMap.set(row.event_type, {
+          ransomware:  parseInt(row.ransomware  || 0),
+          malware:     parseInt(row.malware     || 0),
+          ddos:        parseInt(row.ddos        || 0),
+          botnet:      parseInt(row.botnet      || 0),
+          lateral:     parseInt(row.lateral     || 0),
+          phishing:    parseInt(row.phishing    || 0),
+          spam:        parseInt(row.spam        || 0),
+          bec:         parseInt(row.bec         || 0),
+          exploit:     parseInt(row.exploit     || 0),
+          scanning:    parseInt(row.scanning    || 0),
+          exfiltration:parseInt(row.exfiltration|| 0),
+          misconfig:   parseInt(row.misconfig   || 0),
+          bruteforce:  parseInt(row.bruteforce  || 0),
+        });
+      }
+
+      // Pick dominant sub-type label given a radar vector and its underlying event_type(s)
+      function topSubTypeFor(vector: string, eventTypes: string[]): string | null {
+        const merged: Record<string, number> = {};
+        for (const et of eventTypes) {
+          const st = stMap.get(et);
+          if (!st) continue;
+          for (const [k, v] of Object.entries(st)) merged[k] = (merged[k] || 0) + v;
+        }
+        const pick = (keys: string[]): string | null => {
+          let best: string | null = null;
+          let bestN = 0;
+          for (const k of keys) { if ((merged[k] || 0) > bestN) { bestN = merged[k]; best = k; } }
+          return bestN > 0 ? best : null;
+        };
+        const LABELS: Record<string, string> = {
+          ransomware: "ransomware", malware: "malware",
+          ddos: "DDoS", botnet: "botnet/C2", lateral: "lateral mvmt",
+          phishing: "phishing", spam: "spam", bec: "BEC",
+          exploit: "exploitation", scanning: "scanning",
+          exfiltration: "exfiltration", misconfig: "misconfig",
+          bruteforce: "brute force",
+        };
+        if (vector === "endpoint")      { const k = pick(["ransomware","malware"]); return k ? LABELS[k] : null; }
+        if (vector === "network")       { const k = pick(["ddos","botnet","lateral"]); return k ? LABELS[k] : null; }
+        if (vector === "email")         { const k = pick(["phishing","spam","bec"]); return k ? LABELS[k] : null; }
+        if (vector === "vulnerability") { const k = pick(["exploit","scanning"]); return k ? LABELS[k] : null; }
+        if (vector === "data")          { const k = pick(["exfiltration"]); return k ? LABELS[k] : null; }
+        if (vector === "cloud")         { const k = pick(["misconfig"]); return k ? LABELS[k] : null; }
+        if (vector === "identity")      { const k = pick(["bruteforce"]); return k ? LABELS[k] : null; }
+        return null;
+      }
+
+      // Cloud: casb + cloud combined
+      const casbData  = evMap.get("casb")  || { count: 0, sev: "none" };
+      const cloudData = evMap.get("cloud") || { count: 0, sev: "none" };
+      const cloudCombined = {
+        count: casbData.count + cloudData.count,
+        sev:   casbData.count > cloudData.count ? casbData.sev : cloudData.sev,
+      };
+
+      const aiCount = parseInt(aiRes.rows[0]?.cnt || "0");
+      const aiSev   = sevName(parseInt(aiRes.rows[0]?.max_sev || "0"));
+
+      const SECTORS: Array<{ vector: string; label: string; data: { count: number; sev: string }; eventTypes: string[] }> = [
+        { vector: "email",         label: "Email",         data: evMap.get("email")         || { count: 0, sev: "none" }, eventTypes: ["email"] },
+        { vector: "endpoint",      label: "Endpoint",      data: evMap.get("endpoint")      || { count: 0, sev: "none" }, eventTypes: ["endpoint"] },
+        { vector: "network",       label: "Network",       data: evMap.get("network")        || { count: 0, sev: "none" }, eventTypes: ["network"] },
+        { vector: "web",           label: "Web",           data: evMap.get("sse")            || { count: 0, sev: "none" }, eventTypes: ["sse"] },
+        { vector: "web_app",       label: "Web App",       data: evMap.get("waf")            || { count: 0, sev: "none" }, eventTypes: ["waf"] },
+        { vector: "cloud",         label: "Cloud",         data: cloudCombined,                                            eventTypes: ["casb","cloud"] },
+        { vector: "identity",      label: "Identity",      data: evMap.get("identity")       || { count: 0, sev: "none" }, eventTypes: ["identity"] },
+        { vector: "data",          label: "Data",          data: evMap.get("dlp")            || { count: 0, sev: "none" }, eventTypes: ["dlp"] },
+        { vector: "vulnerability", label: "Vulnerability", data: evMap.get("vulnerability")  || { count: 0, sev: "none" }, eventTypes: ["vulnerability"] },
+        { vector: "ai",            label: "AI",            data: { count: aiCount, sev: aiSev },                          eventTypes: [] },
+      ];
+
+      const result = SECTORS.map(s => ({
+        vector:           s.vector,
+        label:            s.label,
+        count:            s.data.count,
+        dominantSeverity: s.data.sev,
+        topSubType:       topSubTypeFor(s.vector, s.eventTypes),
+      }));
+
+      // Fallback: if 30-day window has zero data, retry with 90-day window
+      const totalCount30 = result.reduce((acc, r) => acc + r.count, 0);
+      if (totalCount30 === 0) {
+        const since90 = new Date(Date.now() - 90 * 86400000);
+        const [ev90, st90, ai90] = await Promise.all([
+          pool.query(
+            `SELECT event_type, COUNT(*) AS cnt,
+                    MAX(CASE WHEN severity='critical' THEN 4 WHEN severity='high' THEN 3 WHEN severity='medium' THEN 2 WHEN severity='low' THEN 1 ELSE 0 END) AS max_sev
+             FROM security_events WHERE tenant_id = ANY($1) AND occurred_at >= $2 AND event_type IS NOT NULL GROUP BY event_type`,
+            [tenantIds, since90]
+          ),
+          pool.query(
+            `SELECT event_type,
+               SUM(CASE WHEN txt LIKE '%ransom%' THEN 1 ELSE 0 END) AS ransomware,
+               SUM(CASE WHEN txt LIKE '%malware%' OR txt LIKE '%trojan%' OR txt LIKE '%virus%' THEN 1 ELSE 0 END) AS malware,
+               SUM(CASE WHEN txt LIKE '%ddos%' OR txt LIKE '%flood%' OR txt LIKE '%dos%' THEN 1 ELSE 0 END) AS ddos,
+               SUM(CASE WHEN txt LIKE '%bot%' OR txt LIKE '%c2%' OR txt LIKE '%beacon%' THEN 1 ELSE 0 END) AS botnet,
+               SUM(CASE WHEN txt LIKE '%lateral%' THEN 1 ELSE 0 END) AS lateral,
+               SUM(CASE WHEN txt LIKE '%phish%' THEN 1 ELSE 0 END) AS phishing,
+               SUM(CASE WHEN txt LIKE '%spam%' THEN 1 ELSE 0 END) AS spam,
+               SUM(CASE WHEN txt LIKE '%bec%' THEN 1 ELSE 0 END) AS bec,
+               SUM(CASE WHEN txt LIKE '%exploit%' THEN 1 ELSE 0 END) AS exploit,
+               SUM(CASE WHEN txt LIKE '%scan%' THEN 1 ELSE 0 END) AS scanning,
+               SUM(CASE WHEN txt LIKE '%exfil%' OR txt LIKE '%data leak%' THEN 1 ELSE 0 END) AS exfiltration,
+               SUM(CASE WHEN txt LIKE '%misconfig%' THEN 1 ELSE 0 END) AS misconfig,
+               SUM(CASE WHEN txt LIKE '%brute%' OR txt LIKE '%credential%' OR txt LIKE '%spray%' THEN 1 ELSE 0 END) AS bruteforce
+             FROM (SELECT event_type, LOWER(COALESCE(threat_vector,'') || ' ' || COALESCE(threat,'') || ' ' || COALESCE(mitre_technique,'')) AS txt
+                   FROM security_events WHERE tenant_id = ANY($1) AND occurred_at >= $2 AND event_type IS NOT NULL) t
+             GROUP BY event_type`,
+            [tenantIds, since90]
+          ),
+          pool.query(
+            `SELECT COUNT(*) AS cnt,
+                    MAX(CASE WHEN severity='critical' THEN 4 WHEN severity='high' THEN 3 WHEN severity='medium' THEN 2 WHEN severity='low' THEN 1 ELSE 0 END) AS max_sev
+             FROM incidents WHERE tenant_id = ANY($1) AND created_at >= $2
+               AND (LOWER(incident_type) LIKE '%prompt%' OR LOWER(incident_type) LIKE '%ai attack%' OR LOWER(category) LIKE '%ai%')
+               AND LOWER(COALESCE(incident_type,'')) NOT LIKE '%ai analysis%'`,
+            [tenantIds, since90]
+          ),
+        ]);
+        const evMap90 = new Map<string, { count: number; sev: string }>();
+        for (const row of ev90.rows) evMap90.set(row.event_type, { count: parseInt(row.cnt), sev: sevName(parseInt(row.max_sev)) });
+        const stMap90 = new Map<string, Record<string, number>>();
+        for (const row of st90.rows) stMap90.set(row.event_type, {
+          ransomware: parseInt(row.ransomware||0), malware: parseInt(row.malware||0),
+          ddos: parseInt(row.ddos||0), botnet: parseInt(row.botnet||0), lateral: parseInt(row.lateral||0),
+          phishing: parseInt(row.phishing||0), spam: parseInt(row.spam||0), bec: parseInt(row.bec||0),
+          exploit: parseInt(row.exploit||0), scanning: parseInt(row.scanning||0),
+          exfiltration: parseInt(row.exfiltration||0), misconfig: parseInt(row.misconfig||0), bruteforce: parseInt(row.bruteforce||0),
+        });
+        const aiCount90 = parseInt(ai90.rows[0]?.cnt || "0");
+        const aiSev90 = sevName(parseInt(ai90.rows[0]?.max_sev || "0"));
+        const casbD90 = evMap90.get("casb") || { count: 0, sev: "none" };
+        const cloudD90 = evMap90.get("cloud") || { count: 0, sev: "none" };
+        const cloudC90 = { count: casbD90.count + cloudD90.count, sev: casbD90.count > cloudD90.count ? casbD90.sev : cloudD90.sev };
+        const stMap90ref = stMap90;
+        function topSubType90(vector: string, eventTypes: string[]): string | null {
+          const merged: Record<string, number> = {};
+          for (const et of eventTypes) { const st = stMap90ref.get(et); if (!st) continue; for (const [k, v] of Object.entries(st)) merged[k] = (merged[k] || 0) + v; }
+          const pick = (keys: string[]) => { let best: string | null = null; let bestN = 0; for (const k of keys) { if ((merged[k]||0) > bestN) { bestN = merged[k]; best = k; } } return bestN > 0 ? best : null; };
+          const LBL: Record<string, string> = { ransomware: "ransomware", malware: "malware", ddos: "DDoS", botnet: "botnet/C2", lateral: "lateral mvmt", phishing: "phishing", spam: "spam", bec: "BEC", exploit: "exploitation", scanning: "scanning", exfiltration: "exfiltration", misconfig: "misconfig", bruteforce: "brute force" };
+          if (vector === "endpoint") { const k = pick(["ransomware","malware"]); return k ? LBL[k] : null; }
+          if (vector === "network") { const k = pick(["ddos","botnet","lateral"]); return k ? LBL[k] : null; }
+          if (vector === "email") { const k = pick(["phishing","spam","bec"]); return k ? LBL[k] : null; }
+          if (vector === "vulnerability") { const k = pick(["exploit","scanning"]); return k ? LBL[k] : null; }
+          if (vector === "data") { const k = pick(["exfiltration"]); return k ? LBL[k] : null; }
+          if (vector === "cloud") { const k = pick(["misconfig"]); return k ? LBL[k] : null; }
+          if (vector === "identity") { const k = pick(["bruteforce"]); return k ? LBL[k] : null; }
+          return null;
+        }
+        const SECTORS90 = [
+          { vector: "email", label: "Email", data: evMap90.get("email") || { count: 0, sev: "none" }, eventTypes: ["email"] },
+          { vector: "endpoint", label: "Endpoint", data: evMap90.get("endpoint") || { count: 0, sev: "none" }, eventTypes: ["endpoint"] },
+          { vector: "network", label: "Network", data: evMap90.get("network") || { count: 0, sev: "none" }, eventTypes: ["network"] },
+          { vector: "web", label: "Web", data: evMap90.get("sse") || { count: 0, sev: "none" }, eventTypes: ["sse"] },
+          { vector: "web_app", label: "Web App", data: evMap90.get("waf") || { count: 0, sev: "none" }, eventTypes: ["waf"] },
+          { vector: "cloud", label: "Cloud", data: cloudC90, eventTypes: ["casb","cloud"] },
+          { vector: "identity", label: "Identity", data: evMap90.get("identity") || { count: 0, sev: "none" }, eventTypes: ["identity"] },
+          { vector: "data", label: "Data", data: evMap90.get("dlp") || { count: 0, sev: "none" }, eventTypes: ["dlp"] },
+          { vector: "vulnerability", label: "Vulnerability", data: evMap90.get("vulnerability") || { count: 0, sev: "none" }, eventTypes: ["vulnerability"] },
+          { vector: "ai", label: "AI", data: { count: aiCount90, sev: aiSev90 }, eventTypes: [] },
+        ];
+        res.json({ sectors: SECTORS90.map(s => ({ vector: s.vector, label: s.label, count: s.data.count, dominantSeverity: s.data.sev, topSubType: topSubType90(s.vector, s.eventTypes) })), windowDays: 90, fallbackUsed: true });
+        return;
+      }
+
+      res.json({ sectors: result, windowDays: 30, fallbackUsed: false });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // THREAT MAP — Office locations (office-aware arc targeting)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get("/api/threat-map/offices", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.query.tenantId as string);
+      if (!tenantId) return res.status(400).json({ message: "tenantId required" });
+
+      // Enforce tenant access — prevents cross-tenant IDOR exposure
+      await assertTenantAccess(req, tenantId);
+
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      // Read all geo-enabled office locations for this tenant from infrastructure_locations (DB-driven)
+      const locRes = await pool.query(
+        `SELECT id, name, city, country_code, latitude, longitude, hostname_keywords, metadata
+         FROM infrastructure_locations
+         WHERE tenant_id = ANY($1) AND is_active = true
+           AND latitude IS NOT NULL AND longitude IS NOT NULL
+         ORDER BY id ASC`,
+        [tenantIds]
+      );
+
+      const offices = locRes.rows.map((r: any) => ({
+        id:               r.id,
+        name:             r.name,
+        city:             r.city || r.metadata?.city || r.name,
+        countryCode:      r.country_code || r.metadata?.countryCode || "US",
+        lat:              r.latitude,
+        lon:              r.longitude,
+        hostnameKeywords: r.hostname_keywords || r.metadata?.hostnameKeywords || [],
+        code:             (r.name || "HQ").replace(/^PKF\s+/i, "").substring(0, 4).toUpperCase(),
+      }));
+
+      return res.json(offices);
+    } catch (error: any) {
+      const status = (error as any).status || 500;

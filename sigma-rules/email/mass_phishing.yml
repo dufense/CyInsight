@@ -1,0 +1,36 @@
+title: Mass Phishing Campaign Detection
+id: sigma-email-001
+status: stable
+level: high
+description: Detects large-scale phishing campaigns targeting multiple recipients with similar characteristics.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: email
+  product: any
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - phishing
+    - phish
+    - credential harvesting
+    - spearphishing
+    - spear-phishing
+    - spoofed email
+    - malicious link
+    - click here
+    - verify your account
+    - password expired
+    - security alert
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate security notification emails
+  - Password reset workflows
+tags:
+  - attack.initial_access
+  - attack.t1566
+mitre:
+  tactic: Initial Access
+  technique: T1566
+  technique_name: Phishing

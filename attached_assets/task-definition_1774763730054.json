@@ -1,0 +1,83 @@
+{
+  "family": "grc-shield-app",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/grc-shield-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/grc-shield-task-role",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/grc-shield/app:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",       "value": "production" },
+        { "name": "PORT",           "value": "5000" },
+        { "name": "SECURE_COOKIES", "value": "true" },
+        { "name": "UPLOAD_DIR",     "value": "/app/uploads" },
+        { "name": "NODE_OPTIONS",   "value": "--max-old-space-size=1536" },
+        { "name": "DEFAULT_AI_MODE","value": "cloud_only" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:grc-shield/database:DATABASE_URL::"
+        },
+        {
+          "name": "SESSION_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:grc-shield/session-secret"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:grc-shield/openai-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/grc-shield/app",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "app"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "node -e \"const h=require('http');const r=h.get('http://localhost:5000/api/health',(res)=>{process.exit(res.statusCode===200?0:1)});r.on('error',()=>process.exit(1));r.setTimeout(5000,()=>{r.destroy();process.exit(1)})\""
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "uploads-storage",
+          "containerPath": "/app/uploads",
+          "readOnly": false
+        }
+      ],
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "readonlyRootFilesystem": false,
+      "stopTimeout": 30
+    }
+  ],
+  "volumes": [
+    {
+      "name": "uploads-storage"
+    }
+  ],
+  "tags": [
+    { "key": "Project",     "value": "grc-shield" },
+    { "key": "ManagedBy",  "value": "cloudformation" }
+  ]
+}

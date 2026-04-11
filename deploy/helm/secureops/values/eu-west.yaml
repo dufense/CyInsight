@@ -1,0 +1,69 @@
+global:
+  storageClass: "gp3"
+
+receiver:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 30
+  ingress:
+    host: eu-ingest.secureops.io
+    tls:
+      secretName: secureops-eu-receiver-tls
+  config:
+    region: eu-west
+
+management:
+  replicaCount: 3
+  ingress:
+    host: app.secureops.io
+    tls:
+      secretName: secureops-eu-management-tls
+
+dataPlane:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 15
+  config:
+    region: eu-west
+    objectStorageBucket: secureops-events-eu-west
+    objectStorageRegion: eu-west-1
+
+collector:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 10
+
+normalizer:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 15
+
+detectionEngine:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 10
+
+enrichment:
+  replicaCount: 2
+  hpa:
+    minReplicas: 2
+    maxReplicas: 8
+
+storage:
+  replicaCount: 3
+  hpa:
+    minReplicas: 3
+    maxReplicas: 6
+
+kafka:
+  replicaCount: 3
+  persistence:
+    size: 100Gi
+
+kafkaKraft:
+  enabled: false

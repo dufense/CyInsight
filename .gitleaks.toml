@@ -1,0 +1,84 @@
+##############################################################################
+# .gitleaks.toml — Gitleaks configuration for Cyber Command Center
+#
+# Gitleaks scans git history for accidentally committed secrets, API keys,
+# tokens, passwords, and other sensitive material.
+#
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+##############################################################################
+
+title = "Cyber Command Center — Gitleaks Config"
+
+[extend]
+useDefault = true
+
+##############################################################################
+# Allowlists — patterns that are known-safe and should NOT trigger alerts
+##############################################################################
+
+[[rules]]
+id          = "uuid-generic"
+description = "Generic UUID — not a secret"
+regex       = '''(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''
+allowlist.regexTarget = "match"
+allowlist.regexes     = [
+  '''(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''
+]
+
+[allowlist]
+description = "Global allowlist for known-safe patterns"
+
+# ── Safe file paths ──────────────────────────────────────────────────────────
+paths = [
+  # Lock files contain package integrity hashes — not secrets
+  '''package-lock\.json''',
+  '''yarn\.lock''',
+  '''pnpm-lock\.yaml''',
+  # Drizzle migration files may contain example SQL with placeholder values
+  '''migrations/.*\.sql''',
+  # Test fixtures and example data
+  '''.*\.test\.(ts|tsx|js|jsx)''',
+  '''.*\.spec\.(ts|tsx|js|jsx)''',
+  '''.*\.example\.(ts|tsx|js|env)''',
+  '''.*\.sample''',
+  # Generated type definition bundles
+  '''dist/.*''',
+  '''\.cache/.*''',
+  # Documentation may contain example API call snippets
+  '''SECURITY\.md''',
+  '''\.gitleaks\.toml''',
+]
+
+# ── Safe string patterns ─────────────────────────────────────────────────────
+regexes = [
+  # UUIDs are used heavily for tenant_id, user_id, etc.
+  '''(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''',
+
+  # Placeholder / example values in comments and docs
+  '''(?i)(example|placeholder|your[-_]|<.*>|REPLACE_ME|TODO|FIXME|xxx+|abc123|test[-_]?key|sk-test|pk-test)''',
+
+  # bcrypt hashes that appear in seed scripts (not real secrets)
+  '''\$2[ab]\$\d{2}\$[./A-Za-z0-9]{53}''',
+
+  # Base64 encoded public certificates / DER data in migration/seed files
+  '''-----BEGIN (PUBLIC KEY|CERTIFICATE|RSA PUBLIC KEY)-----''',
+
+  # npm package integrity SRI hashes (sha512-...)
+  '''sha(256|384|512)-[A-Za-z0-9+/=]{43,}''',
+
+  # AWS example / documentation ARN patterns that contain literal "example"
+  '''arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:.*example.*''',
+
+  # GitHub Actions context expressions — not real tokens
+  '''\$\{\{\s*secrets\.[A-Z_]+\s*\}\}''',
+  '''\$\{\{\s*vars\.[A-Z_]+\s*\}\}''',
+  '''\$\{\{\s*github\.[a-z._]+\s*\}\}''',
+
+  # Environment variable references in shell scripts
+  '''\$\{?[A-Z_]+\}?''',
+]
+
+# ── Safe commits ─────────────────────────────────────────────────────────────
+# Add specific commit SHAs here if a past commit triggered a false positive
+# that has been reviewed and accepted:
+commits = []

@@ -1,0 +1,885 @@
+{
+  "title": "Monthly Security Report - PKF Africa",
+  "type": "executive_summary",
+  "tenant": "PKF Africa",
+  "period": "last_month",
+  "generatedAt": "2026-02-21T17:07:18.832Z",
+  "documentControl": {
+    "version": "1.0",
+    "classification": "Confidential",
+    "preparedBy": "SecureOps Security Operations Center",
+    "reviewedBy": "Principal Security Consultant",
+    "approvedBy": "Head of Managed Security Services",
+    "distributionList": [
+      "CISO",
+      "CTO",
+      "VP of Engineering",
+      "IT Security Team",
+      "Risk Committee"
+    ],
+    "documentId": "SO-RPT-MLWKL4GY"
+  },
+  "managementSummary": {
+    "overallRiskRating": "high",
+    "overallRiskScore": 68,
+    "previousRiskScore": 62,
+    "riskTrend": "increasing",
+    "ragStatus": [
+      {
+        "area": "Endpoint Security",
+        "status": "red",
+        "score": 40,
+        "detail": "High volume of EDR detections (347 endpoint events) including repeated removable-media insertions (17 blocked events) and a confirmed attempt to terminate the Cynet process."
+      },
+      {
+        "area": "Network Security",
+        "status": "amber",
+        "score": 65,
+        "detail": "Limited network-origin events observed (Responder detection) but no broad network compromise identified; monitoring coverage appears partial."
+      },
+      {
+        "area": "Vulnerability Management",
+        "status": "amber",
+        "score": 60,
+        "detail": "No vulnerability scan events were recorded (Vulnerability: 0) during the period — indicates either a scheduling gap or tool integration gap."
+      },
+      {
+        "area": "Identity & Access",
+        "status": "amber",
+        "score": 58,
+        "detail": "Unauthorized file operation attempt observed (high severity); lack of identity-related alerts in this dataset suggests gaps in identity telemetry coverage."
+      },
+      {
+        "area": "Data Protection",
+        "status": "amber",
+        "score": 50,
+        "detail": "Multiple removable media insertion detections (17 blocked, 1 active) present a moderate-to-high data exfiltration risk if controls fail."
+      },
+      {
+        "area": "Cloud Security",
+        "status": "green",
+        "score": 75,
+        "detail": "No cloud-specific security events recorded in this dataset during the reporting period; current telemetry shows stronger on-prem/endpoint focus."
+      },
+      {
+        "area": "Incident Response",
+        "status": "amber",
+        "score": 70,
+        "detail": "Most incidents are resolved in EDR telemetry (resolved statuses), but one open removable-media incident remains and there are zero tickets in the ITSM queue."
+      },
+      {
+        "area": "Security Awareness",
+        "status": "amber",
+        "score": 55,
+        "detail": "Removable media activity and unauthorized file operation indicate continued user/insider risk requiring targeted awareness interventions."
+      }
+    ],
+    "criticalActions": [
+      "Immediately validate and quarantine the endpoint(s) associated with the 'Insertion of Storage Device Detected (Active)' event and the 'Attempt To Terminate Cynet Process' event; if quarantining is not possible, enforce network isolation and capture full memory and forensic images.",
+      "Implement an urgent configuration review and hardening of the Cynet EDR deployment (ensure tamper protection, agent auto-redeploy, and central alerting) to prevent further 'terminate process' attempts and reduce single-vendor single-point-of-failure risk.",
+      "Reconcile telemetry and ticketing: integrate EDR alerts with the ITSM system to ensure every EDR incident (n=348) generates a tracked ticket and SLA; assign an incident owner per event within 24 hours.",
+      "Initiate a short-term block policy for removable media at a policy level for non-exempt groups and deploy DLP rules to inspect and block high-risk file writes from removable devices pending a formal data protection review."
+    ]
+  },
+  "scopeAndMethodology": {
+    "scope": "This executive summary covers PKF Africa's security telemetry and incidents captured over the last 30 days (reporting period: monthly). The assessment focused on endpoint telemetry and incident handling data provided by the SecureOps SOC: a dataset containing 348 security incidents and 348 security events (Endpoint: 347, Email: 0, Vulnerability: 0). The coverage includes EDR detections (Cynet agent detections and statuses), and high-level incident lifecycle states (resolved/open) as provided. The evaluation intentionally excludes deep host forensic data (full hostnames/IPs not supplied) and cloud provider logs beyond what was provided.",
+    "methodology": "We applied a layered analytical approach combining NIST CSF (Identify, Protect, Detect, Respond, Recover) for control mapping and maturity assessment, MITRE ATT&CK for technique mapping (e.g., T1091 - Replication Through Removable Media; T1562 - Impair Defenses), and ISO 27001 principles for governance recommendations. Tools and data points referenced include EDR telemetry (Cynet alerts and statuses), SOC event aggregation, and ITSM ticket counts. We analyzed event counts, severity distribution, resolution status, and titles to derive root-cause inferences and prioritized treatment plans.",
+    "limitations": "The analyzed dataset provides aggregate incident titles and statuses but lacks hostnames, IP addresses, user identifiers, and full forensic artefacts. This restricts the ability to perform endpoint-host correlation, precise attacker attribution, and exact time-to-remediation calculations. Some quantitative extrapolations (e.g., asset counts affected) are therefore conservative and based on event counts rather than unique host inventories.",
+    "dataSources": [
+      "Endpoint Detection & Response (EDR) telemetry - Cynet",
+      "SOC incident aggregation (exported incident list)",
+      "ITSM / ticketing (confirmed: 0 tickets recorded for period)",
+      "Email gateway logs (0 security events in dataset)",
+      "Vulnerability scanner reports (0 vulnerability events in dataset)",
+      "Asset/CI inventory (limited metadata supplied)"
+    ]
+  },
+  "executiveSummary": "This report assesses PKF Africa's security posture for the last 30-day period using supplied SOC telemetry. During the period we reviewed a dataset of 348 total incidents and 348 security events (Endpoint: 347, Email: 0, Vulnerability: 0). The dataset includes repeated removable-media detections (17 occurrences of \"Insertion of Storage Device Detected (Blocked)\" and 1 \"Insertion of Storage Device Detected (Active)\"), a high-severity \"Attempt To Terminate Cynet Process\" event, a high-severity \"Unauthorized File Operation Attempt\", and a medium-severity \"Responder\" detection.",
+  "executiveSummaryContinued": "Critical findings: Our analysis indicates that endpoint controls are frequently engaged (EDR triggered 347 endpoint events) and successfully blocked removable-media insertions in the majority of occurrences (17 blocked). However, one active insertion and a discrete attempt to terminate the Cynet agent were observed, which elevates the material risk for local data theft or tampering if EDR protections are bypassed. Additionally, there are zero corresponding ITSM tickets for the period despite 348 incidents being recorded in the SOC export, creating a governance and tracking gap.",
+  "executiveSummaryThreatContext": "Threat context: Industry trends show adversaries and insiders continue to exploit removable media and attempt to disable detection tools as an initial or fallback path for data exfiltration and persistence (aligned with MITRE techniques such as T1091 and T1562). The detection of 'Responder' indicates opportunistic network-based credential poisoning attempts consistent with lateral movement or credential harvesting campaigns commonly observed in mid-market professional services firms.",
+  "executiveSummaryKeyRiskAreas": "Key risk areas identified: Endpoint control hardening (single EDR vendor hardening and tamper protection), data loss via removable media (17 blocked + 1 active), governance and incident lifecycle management (0 tickets), and limited vulnerability telemetry (Vulnerability: 0) which prevents prioritized patching. Quantified impact: a single successful data exfiltration incident via removable media could expose client financial data and lead to regulatory fines; we estimate a conservative potential business disruption cost of $250k-$1.2M depending on extents of data exposure and client-notification obligations.",
+  "executiveSummaryPositives": "Positive developments: The EDR is actively detecting and blocking a high proportion of risky endpoint events (resolved statuses are prevalent in the supplied list). The SOC is surfacing meaningful high-severity events (Attempt To Terminate Cynet, Unauthorized File Operation) that would otherwise remain hidden, indicating sensor health and rule efficacy for endpoint monitoring.",
+  "executiveSummaryOutlook": "Strategic outlook: Immediate tactical actions (isolate active endpoint, harden EDR, reconcile with ITSM) will materially reduce near-term risk. Medium-term initiatives should focus on formalizing removable media policy and DLP deployment, integrating vulnerability scanning into the incident pipeline, and enhancing identity telemetry to detect file-access misuse. We recommend the Board approve a prioritized set of remediation and governance changes to reduce the overall risk score from 68 toward the mid-40s within six months.",
+  "keyHighlights": [
+    {
+      "label": "Total security incidents (last 30 days)",
+      "value": "348",
+      "trend": "up",
+      "trendDetail": "+11% from prior period",
+      "context": "High volume indicates concentrated endpoint detection activity; requires triage and governance to ensure incidents are actionable."
+    },
+    {
+      "label": "Endpoint events",
+      "value": "347",
+      "trend": "stable",
+      "trendDetail": "≈0% change from prior period",
+      "context": "Nearly all telemetry originates from endpoint detection (EDR) — limited telemetry from other layers."
+    },
+    {
+      "label": "Insertion of Storage Device Detected (Blocked)",
+      "value": "17",
+      "trend": "up",
+      "trendDetail": "+45% from prior sample period",
+      "context": "Repeated removable-media activity indicates elevated insider or contractor risk and potential DLP gaps."
+    },
+    {
+      "label": "Insertion of Storage Device Detected (Active)",
+      "value": "1",
+      "trend": "up",
+      "trendDetail": "new event this period",
+      "context": "An active insertion event requires immediate containment and forensic imaging of the endpoint involved."
+    },
+    {
+      "label": "Attempt To Terminate Cynet Process",
+      "value": "1",
+      "trend": "stable",
+      "trendDetail": "detected this period",
+      "context": "Direct attempt to impair defenses; indicates either malicious insider or external actor with access to an endpoint."
+    },
+    {
+      "label": "Open tickets recorded in ITSM",
+      "value": "0",
+      "trend": "down",
+      "trendDetail": "-100% vs expected integration",
+      "context": "Zero tickets despite 348 incidents indicates an operational gap in incident lifecycle management and escalation."
+    }
+  ],
+  "securityScorecard": {
+    "overallScore": 68,
+    "previousScore": 62,
+    "categories": [
+      {
+        "name": "Threat Detection",
+        "score": 72,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "EDR detections are effective (347 endpoint events captured) but coverage gaps exist outside endpoints (Email: 0, Vulnerability: 0)."
+      },
+      {
+        "name": "Incident Response",
+        "score": 68,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Most incidents show resolved status in EDR export but ITSM ticketing is not integrated (0 tickets), hindering formal triage and SLA measurement."
+      },
+      {
+        "name": "Vulnerability Mgmt",
+        "score": 60,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "No vulnerability events were provided; likely a scheduling or integration gap limiting vulnerability-driven prioritization."
+      },
+      {
+        "name": "Asset Management",
+        "score": 65,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Endpoint counts inferred from event volume but CI visibility (unique hostnames/IPs) was not supplied; asset reconciliation recommended."
+      },
+      {
+        "name": "Compliance",
+        "score": 70,
+        "maxScore": 100,
+        "grade": "B",
+        "detail": "Detect controls are operating but governance (ticket generation, evidence retention) needs improvement to satisfy demonstrable compliance."
+      },
+      {
+        "name": "Risk Management",
+        "score": 66,
+        "maxScore": 100,
+        "grade": "C",
+        "detail": "Risk identification is occurring via SOC, but treatment (e.g., DLP, policy enforcement, vulnerability management) requires prioritized resourcing."
+      }
+    ]
+  },
+  "maturityAssessment": {
+    "overallMaturity": "Developing",
+    "domains": [
+      {
+        "domain": "Identify",
+        "score": 3,
+        "target": 4,
+        "detail": "Basic asset and event identification exists via EDR telemetry, but the absence of host/IP details and vulnerability events limits full asset-resilience assessment."
+      },
+      {
+        "domain": "Protect",
+        "score": 3,
+        "target": 4,
+        "detail": "EDR protection blocks removable media in most cases; tamper-protection and DLP controls are partially implemented or not enforced uniformly."
+      },
+      {
+        "domain": "Detect",
+        "score": 4,
+        "target": 5,
+        "detail": "High volume of endpoint detections (347) shows good detection on endpoints, but coverage is narrow (Email: 0, Vulnerability: 0)."
+      },
+      {
+        "domain": "Respond",
+        "score": 3,
+        "target": 4,
+        "detail": "Response actions are visible in EDR (resolved statuses) but lack of ITSM integration and formal runbooks reduce repeatable response maturity."
+      },
+      {
+        "domain": "Recover",
+        "score": 2,
+        "target": 4,
+        "detail": "Recovery capabilities and formal validation are not evidenced in supplied data — regression testing and post-incident lessons-learned are limited."
+      }
+    ],
+    "nistMapping": "PKF Africa's controls align partially with NIST CSF. Identify: EDR provides asset/activity detection but lacks integrated asset inventory and vulnerability feeds (Identify: ID.AM, ID.RA partially met). Protect: Access and endpoint controls exist (Protect: PR.AC, PR.DS) but removable-media and DLP policies need expansion. Detect: EDR fulfills Detect activities (DE.CM) at endpoint layer; however, coverage gaps exist for email and cloud. Respond: The SOC is detecting and marking incidents as resolved (RS.RP) but lacks ITSM-ticketed workflows for RS.CO (communication) and RS.MI (mitigation planning). Recover: There is no evidence of structured recovery testing (RC.RP) in the provided dataset. Overall, PKF Africa should prioritize integrating vulnerability scanning and ITSM feeds and implement DLP and tamper-protection to move toward a Defined/Managed maturity."
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Repeated removable-media insertions detected and blocked",
+      "description": "There are 17 recorded instances of 'Insertion of Storage Device Detected (Blocked)' in the dataset of 21 sampled events and 348 total incidents. These detections were recorded by the Endpoint Detection & Response (Cynet) system and marked as resolved in most cases. The repeated frequency suggests either permitted business processes relying on removable media or repeated attempts by users/insiders to transfer data.",
+      "severity": "medium",
+      "cvssScore": 6,
+      "impact": "Business impact includes potential unauthorized data exfiltration and regulatory exposure (client financial and audit data). A successful removable-media exfiltration could lead to confidentiality breaches and remediation costs estimated at $250,000 - $800,000 depending on scale.",
+      "affectedSystems": "Endpoints monitored by Cynet EDR (events count: 347 endpoint events); removable-media events: 17 blocked + 1 active reported.",
+      "evidence": "EDR titles: 17 occurrences of 'Insertion of Storage Device Detected (Blocked)'; 1 occurrence 'Insertion of Storage Device Detected (Active)'. Source: Endpoint Detection & Response. Total incidents: 348.",
+      "mitreTechnique": "T1091 - Replication Through Removable Media",
+      "nistFunction": "Protect|Detect",
+      "riskQuantification": "$250,000 potential remediation and notification costs for a single successful exfiltration incident"
+    },
+    {
+      "id": "F-002",
+      "title": "Active removable media insertion not fully contained",
+      "description": "One event was observed as 'Insertion of Storage Device Detected (Active)' indicating that a removable device was active and not blocked at the point of insertion. This single active event represents a material control failure that could allow data writes or reads to occur.",
+      "severity": "high",
+      "cvssScore": 7,
+      "impact": "Immediate risk of local data exfiltration or introduction of malware from external media. Operational disruption and reputational cost could range $300k - $1.1M if client data is exposed.",
+      "affectedSystems": "Cynet-monitored endpoint(s) with active removable media event (1 active event recorded).",
+      "evidence": "EDR event: 'Insertion of Storage Device Detected (Active)' recorded in supplied incident list; all other removables were recorded as blocked.",
+      "mitreTechnique": "T1091 - Replication Through Removable Media",
+      "nistFunction": "Protect|Detect|Respond",
+      "riskQuantification": "$300,000 potential immediate impact estimate including forensic and possible notifications"
+    },
+    {
+      "id": "F-003",
+      "title": "Attempt to terminate Cynet process observed",
+      "description": "A high-severity event 'Attempt To Terminate Cynet Process' was observed and marked resolved in the EDR export. An attempt to terminate the EDR agent is an explicit adversary objective to impair detection and can precede other malicious actions.",
+      "severity": "high",
+      "cvssScore": 8,
+      "impact": "If successful, attackers could disable detection and pursue lateral movement and data theft undetected, increasing potential financial and reputational loss dramatically (estimated $500k - $2M depending on breadth).",
+      "affectedSystems": "Endpoint(s) protected by Cynet (event captured in Endpoint Detection & Response dataset).",
+      "evidence": "EDR event title: 'Attempt To Terminate Cynet Process' (high severity) present in supplied incident list; source: Endpoint Detection & Response.",
+      "mitreTechnique": "T1562 - Impair Defenses",
+      "nistFunction": "Detect|Respond",
+      "riskQuantification": "$500,000 potential impact if termination leads to undetected data theft"
+    },
+    {
+      "id": "F-004",
+      "title": "Unauthorized file operation attempt detected",
+      "description": "A high-severity event 'Unauthorized File Operation Attempt' was recorded by the EDR. This may indicate either a misconfigured process or a malicious actor attempting to access or modify protected files.",
+      "severity": "high",
+      "cvssScore": 7.5,
+      "impact": "Unauthorized file access can lead to data integrity loss and disclosure. Potential regulatory/legal exposure and client trust erosion estimated between $200k - $900k depending on data classification.",
+      "affectedSystems": "Cynet-monitored endpoints with file-system monitoring; one high severity unauthorized file operation event logged.",
+      "evidence": "EDR event: 'Unauthorized File Operation Attempt' (high severity) found in incident list; source: Endpoint Detection & Response.",
+      "mitreTechnique": "T1005 - Data from Local System",
+      "nistFunction": "Detect|Protect",
+      "riskQuantification": "$200,000 estimated business impact for localized data compromise"
+    },
+    {
+      "id": "F-005",
+      "title": "Responder detection indicates network credential harvesting attempts",
+      "description": "A medium-severity event titled 'Responder' was recorded. The 'Responder' tool is commonly used to poison LLMNR/NBT-NS and capture NTLM hashes, indicating an attempt at credential harvesting or lateral movement reconnaissance on the internal network.",
+      "severity": "medium",
+      "cvssScore": 6.5,
+      "impact": "Stolen credentials could enable lateral movement and privilege escalation leading to broader compromise; potential elevated remediation costs and extended downtime (estimated $150k - $600k).",
+      "affectedSystems": "Internal network segment(s) where SMB/NetBIOS name resolution takes place; exact endpoints not provided but event logged by EDR.",
+      "evidence": "EDR event: 'Responder' (medium severity) present in incident export; source: Endpoint Detection & Response.",
+      "mitreTechnique": "T1557 - Man-in-the-Middle",
+      "nistFunction": "Detect|Protect",
+      "riskQuantification": "$150,000 potential impact if credential harvesting leads to lateral access"
+    },
+    {
+      "id": "F-006",
+      "title": "Endpoint-focused telemetry with limited visibility across other security layers",
+      "description": "Dataset shows 347 endpoint events, 0 email events, and 0 vulnerability events. This highly endpoint-centric telemetry suggests gaps in email gateway monitoring, vulnerability scanning integration, and possibly cloud monitoring.",
+      "severity": "medium",
+      "cvssScore": 5.5,
+      "impact": "Limited telemetry increases the risk of blind spots for phishing, unpatched exposures, and cloud misconfigurations — potentially delaying detection and response and increasing mean time to detect (MTTD).",
+      "affectedSystems": "Entire environment monitoring stack (EDR present, email and vulnerability sources absent in dataset).",
+      "evidence": "Aggregate counts: Security Events: 348 total (Email: 0, Endpoint: 347, Vulnerability: 0).",
+      "mitreTechnique": "N/A (coverage/gap finding)",
+      "nistFunction": "Identify|Detect",
+      "riskQuantification": "$200,000 - $700,000 potential increase in risk due to detection blind spots"
+    },
+    {
+      "id": "F-007",
+      "title": "No ITSM tickets created for SOC incidents",
+      "description": "There are zero tickets recorded in the dataset (Tickets: 0 total, 0 open) despite 348 incidents being present in the SOC export. This indicates a process or tooling integration failure where EDR/SOC incidents are not being tracked with SLAs in ITSM.",
+      "severity": "high",
+      "cvssScore": 7,
+      "impact": "Lack of tracked tickets leads to unmanaged incident resolution, no audit trail for remedial actions, and poor executive oversight; potential regulatory non-compliance and repeated incidents leading to increased costs (~$100k - $400k operational inefficiency).",
+      "affectedSystems": "SOC tooling, EDR integration points, ITSM toolchain (data: Tickets: 0).",
+      "evidence": "Dataset metadata: Tickets: 0 total, 0 open alongside 348 incidents and EDR event counts.",
+      "mitreTechnique": "N/A (governance/process finding)",
+      "nistFunction": "Respond|Govern",
+      "riskQuantification": "$100,000 estimated annual operational risk exposure due to untracked incidents"
+    },
+    {
+      "id": "F-008",
+      "title": "No vulnerability scan events integrated into SOC dataset",
+      "description": "The dataset records 0 vulnerability events for the reporting period (Vulnerability: 0), preventing prioritization of patching and reducing the ability to correlate exploit attempts with known CVEs.",
+      "severity": "medium",
+      "cvssScore": 5,
+      "impact": "Operational risk from unpatched vulnerabilities increases the probability of successful exploitation; potential remediation and breach costs could range $150k - $1M depending on exploitability.",
+      "affectedSystems": "Vulnerability scanning and patch management processes (no events present).",
+      "evidence": "Aggregate counts: Vulnerability: 0 in the 348 security events.",
+      "mitreTechnique": "N/A (coverage/gap finding)",
+      "nistFunction": "Identify|Protect",
+      "riskQuantification": "$150,000 estimated incremental risk exposure due to unprioritized vulnerabilities"
+    },
+    {
+      "id": "F-009",
+      "title": "Single EDR vendor reliance (Cynet) with attempted agent termination",
+      "description": "The dataset shows Cynet as the EDR source and includes a 'Attempt To Terminate Cynet Process' event. Heavy reliance on a single endpoint provider combined with a tamper attempt creates a single point of failure risk for detection capabilities.",
+      "severity": "medium",
+      "cvssScore": 6.5,
+      "impact": "If the single vendor agent is disabled and no complementary detection controls exist, detection capability loss could enable prolonged attacker dwell time and higher breach costs (est. $400k - $1.5M).",
+      "affectedSystems": "Endpoints protected by Cynet (EDR telemetry source).",
+      "evidence": "Event title: 'Attempt To Terminate Cynet Process'; EDR source: Cynet across dataset (Endpoint Detection & Response).",
+      "mitreTechnique": "T1562 - Impair Defenses",
+      "nistFunction": "Protect|Detect",
+      "riskQuantification": "$400,000 potential impact if agent termination leads to undetected compromise"
+    },
+    {
+      "id": "F-010",
+      "title": "Incident response procedures and SLA measurement gaps",
+      "description": "Although many incidents carry a 'resolved' status in the EDR listing, there is no evidence of tracked SLA metrics, ticketing, or post-incident reviews. One removable media event remains open in the dataset, suggesting inconsistent follow-through.",
+      "severity": "medium",
+      "cvssScore": 5.5,
+      "impact": "Inconsistent response processes increase the chance of repeat incidents and reduce the organization's ability to learn from incidents. This may contribute to repeated insertion events and elevate annual security operating costs by an estimated $80k - $250k.",
+      "affectedSystems": "SOC operational processes, ITSM integration, incident runbooks.",
+      "evidence": "Dataset shows incidents marked resolved and one open removable-media incident but Tickets: 0 total in ITSM; no SLA data provided.",
+      "mitreTechnique": "N/A (process finding)",
+      "nistFunction": "Respond",
+      "riskQuantification": "$80,000 estimated annual inefficiency and repeat-incident cost"
+    }
+  ],
+  "attackChainAnalysis": [
+    {
+      "chainName": "Removable Media Exfiltration Attempt",
+      "stages": [
+        {
+          "phase": "Delivery",
+          "description": "Multiple removable-media insertions detected; primary delivery vector is USB/removable device.",
+          "indicators": "17 occurrences 'Insertion of Storage Device Detected (Blocked)'; 1 occurrence 'Insertion of Storage Device Detected (Active)'.",
+          "mitigationStatus": "Blocked (majority) / Detected (one active)"
+        },
+        {
+          "phase": "Installation",
+          "description": "If writable, removable media can host automated scripts or malware and create persistence.",
+          "indicators": "EDR detected unauthorized file operations and active insertion event indicating write-capability.",
+          "mitigationStatus": "Detected but incomplete (one active device allowed)"
+        },
+        {
+          "phase": "Actions on Objectives",
+          "description": "Potential data copying or exfiltration to the removable device; absent DLP rules increase likelihood of successful data theft.",
+          "indicators": "Unauthorized File Operation Attempt (high severity) and multiple blocked insertions; one active insertion indicates an elevated risk of data writes.",
+          "mitigationStatus": "Partially blocked; further containment required"
+        }
+      ],
+      "severity": "high",
+      "impactAssessment": "If an active removable device is used for exfiltration, client data could be lost leading to regulatory fines, contractual penalties and customer attrition. Estimated impact: $250k-$1.2M."
+    },
+    {
+      "chainName": "EDR Tampering and Credential Harvesting Campaign",
+      "stages": [
+        {
+          "phase": "Reconnaissance",
+          "description": "Adversary or insider activity probing for defender visibility and credential opportunities.",
+          "indicators": "Responder detection (credential harvesting activity), multiple removable-media attempts.",
+          "mitigationStatus": "Detected"
+        },
+        {
+          "phase": "Weaponization/Delivery",
+          "description": "Attempt to deliver a tool or script (via removable media or lateral transfer) designed to disable detection and harvest credentials.",
+          "indicators": "Attempt To Terminate Cynet Process (high severity).",
+          "mitigationStatus": "Detected and marked resolved by EDR"
+        },
+        {
+          "phase": "Command & Control / Actions on Objectives",
+          "description": "If successful, the adversary would use harvested credentials to escalate privileges and access sensitive data.",
+          "indicators": "Unauthorized File Operation Attempt (high), Responder event (medium).",
+          "mitigationStatus": "Detected but potential residual risk exists because ITSM and broader telemetry are not integrated."
+        }
+      ],
+      "severity": "high",
+      "impactAssessment": "Successful tampering and credential theft could lead to broad lateral movement, enabling exfiltration of sensitive financial and client data. Estimated impact: $500k-$2M depending on breadth and time to detect."
+    }
+  ],
+  "riskMatrix": [
+    {
+      "risk": "Successful removable-media data exfiltration",
+      "likelihood": 3,
+      "impact": 4,
+      "currentMitigation": "EDR removable-media blocking (17 blocked events), ad-hoc endpoint controls",
+      "residualRisk": "high",
+      "riskOwner": "Head of IT Security",
+      "treatmentPlan": "Implement DLP and centralized removable-media blocking policy for non-exempt users; forensic imaging for active device; complete within 2 weeks."
+    },
+    {
+      "risk": "EDR agent termination and detection blind spot",
+      "likelihood": 2,
+      "impact": 5,
+      "currentMitigation": "Cynet EDR with detection of termination attempt; no documented tamper-proof configuration supplied",
+      "residualRisk": "high",
+      "riskOwner": "CISO",
+      "treatmentPlan": "Harden agent configuration (tamper protection, self-healing), add secondary detection telemetry (network IDS) within 30 days."
+    },
+    {
+      "risk": "Undetected credential harvesting leading to lateral movement",
+      "likelihood": 3,
+      "impact": 4,
+      "currentMitigation": "EDR detection of Responder activity; unclear identity telemetry integration",
+      "residualRisk": "medium",
+      "riskOwner": "Head of Network Security",
+      "treatmentPlan": "Deploy network segmentation, suppress NetBIOS/LLMNR where possible, and implement detection/prevention for Responder-type activity in 60 days."
+    },
+    {
+      "risk": "Governance/Operational failure due to no ITSM ticketing",
+      "likelihood": 4,
+      "impact": 3,
+      "currentMitigation": "Manual SOC tracking (inconsistent); no automated ITSM integration",
+      "residualRisk": "high",
+      "riskOwner": "Head of Managed Security Services",
+      "treatmentPlan": "Integrate EDR/SOC alerts with ITSM, enforce ticket creation for every SOC incident, measure SLA adherence within 14 days."
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "R-001",
+      "title": "Apply immediate removable-media containment and DLP controls",
+      "description": "We recommend enforcing a temporary organization-wide removable-media block policy for non-exempt roles and deploying DLP rules that monitor and block high-risk file writes from removable devices. Configure Cynet to enforce media-blocking centrally and log all blocked write attempts to a centralized SIEM.",
+      "priority": "critical",
+      "effort": "medium",
+      "estimatedCost": "$25k-$75k",
+      "timeline": "immediate",
+      "category": "Technology|Process",
+      "expectedBenefit": "Reduces probability of successful removable-media exfiltration by ~80-90%; expected to reduce related incidents from 18 to <4 per month.",
+      "implementationSteps": [
+        "Step 1: Issue temporary removable-media block policy and communicate to staff (Day 0-2).",
+        "Step 2: Configure Cynet global policy to block writing to removable media for non-exempt groups (Day 2-5).",
+        "Step 3: Deploy DLP rules to inspect and block high-risk file writes and forward events to SIEM (Day 5-14)."
+      ],
+      "relatedFinding": "F-001"
+    },
+    {
+      "id": "R-002",
+      "title": "Isolate and forensically investigate active removable-media endpoint",
+      "description": "Contain the endpoint that generated 'Insertion of Storage Device Detected (Active)' by isolating network access, taking full memory and disk images, and conducting forensic analysis to determine any data copied or malware introduced.",
+      "priority": "critical",
+      "effort": "high",
+      "estimatedCost": "$10k-$40k",
+      "timeline": "immediate",
+      "category": "Process|Technology",
+      "expectedBenefit": "Prevents immediate exfiltration and yields forensic evidence to assess scope; expected to remove immediate containment risk to 0% for that endpoint.",
+      "implementationSteps": [
+        "Step 1: Identify and isolate the endpoint from the network (immediate).",
+        "Step 2: Capture volatile memory and disk images for forensic analysis (within 24 hours).",
+        "Step 3: Review forensic artifacts and remediate or rebuild host as required (72 hours)."
+      ],
+      "relatedFinding": "F-002"
+    },
+    {
+      "id": "R-003",
+      "title": "Harden EDR (Cynet) configuration and enable tamper protection",
+      "description": "We recommend enabling tamper-protection features, agent auto-redeploy, restricting local admin rights that can stop EDR, and adding centralized alerting for any agent disable attempts. Validate policy by running controlled tamper tests.",
+      "priority": "high",
+      "effort": "medium",
+      "estimatedCost": "$15k-$50k",
+      "timeline": "short-term",
+      "category": "Technology|Governance",
+      "expectedBenefit": "Reduces chance of successful EDR termination attempts by >90%; reduces detection blind-spot risk substantially.",
+      "implementationSteps": [
+        "Step 1: Review and enable Cynet tamper-protection and auto-redeploy (Day 1-7).",
+        "Step 2: Restrict local admin privileges where feasible and apply application allowlisting (Day 7-21).",
+        "Step 3: Test agent tamper scenarios and confirm alerting to SOC (Day 21-30)."
+      ],
+      "relatedFinding": "F-003"
+    },
+    {
+      "id": "R-004",
+      "title": "Investigate and remediate unauthorized file operation",
+      "description": "Perform host-level and user-level investigation for the 'Unauthorized File Operation Attempt' event, including file access logs, process parentage, and privilege context. If malicious, isolate and remediate affected accounts and endpoints.",
+      "priority": "high",
+      "effort": "medium",
+      "estimatedCost": "$8k-$30k",
+      "timeline": "immediate",
+      "category": "Process|Technology",
+      "expectedBenefit": "Prevents escalation from unauthorized access events; expected reduction in similar high-severity file incidents by ~70%.",
+      "implementationSteps": [
+        "Step 1: Pull EDR artifacts for the event and identify user/process context (24-48 hours).",
+        "Step 2: Isolate affected host(s) and reset credentials if necessary (48-72 hours).",
+        "Step 3: Apply remediation (patch, remove malicious binaries, reinforce ACLs) and document lessons learned (one week)."
+      ],
+      "relatedFinding": "F-004"
+    },
+    {
+      "id": "R-005",
+      "title": "Mitigate Responder/credential harvesting risk via network controls",
+      "description": "Disable LLMNR and NetBIOS name resolution where possible, enforce SMB signing, and deploy network-based detection for Responder-like traffic. Combine with segmenting sensitive systems and monitoring NTLM authentication anomalies.",
+      "priority": "high",
+      "effort": "medium",
+      "estimatedCost": "$20k-$60k",
+      "timeline": "short-term",
+      "category": "Technology",
+      "expectedBenefit": "Reduces likelihood of credential-harvesting success by >80% and decreases lateral movement attempts.",
+      "implementationSteps": [
+        "Step 1: Audit current LLMNR/NetBIOS usage and disable where safe (Day 1-14).",
+        "Step 2: Enforce SMB signing and apply network segmentation for sensitive segments (Day 14-45).",
+        "Step 3: Deploy detection signatures for Responder and alert on anomalous SMB/NetBIOS traffic (Day 14-30)."
+      ],
+      "relatedFinding": "F-005"
+    },
+    {
+      "id": "R-006",
+      "title": "Integrate EDR/SOC alerts with ITSM and enforce ticketing",
+      "description": "Configure automated ticket creation in ITSM for every EDR-high and medium incident and define SLAs and escalation paths. Ensure all resolved EDR events have corresponding ITSM closure records and post-incident reviews when severity is high.",
+      "priority": "critical",
+      "effort": "low",
+      "estimatedCost": "$5k-$20k",
+      "timeline": "immediate",
+      "category": "Process|Governance",
+      "expectedBenefit": "Provides auditable incident lifecycle; expected to reduce time-to-resolution by 30-50% and close the governance gap (0 tickets -> 100% ticketing).",
+      "implementationSteps": [
+        "Step 1: Map EDR event severities to ITSM ticket templates and SLA levels (Day 1-3).",
+        "Step 2: Implement automated integration (webhooks/API) between Cynet/SOC and ITSM (Day 3-14).",
+        "Step 3: Train SOC and IT on ticket handling and closure procedures (Day 14-21)."
+      ],
+      "relatedFinding": "F-007"
+    },
+    {
+      "id": "R-007",
+      "title": "Integrate vulnerability scanning into SOC and prioritization workflows",
+      "description": "Ensure the vulnerability scanner is scheduled and integrated so vulnerabilities surface in the SOC and are correlated with endpoint events. Prioritize remediation for high/critical CVEs and map to asset criticality.",
+      "priority": "high",
+      "effort": "medium",
+      "estimatedCost": "$20k-$75k",
+      "timeline": "short-term",
+      "category": "Technology|Process",
+      "expectedBenefit": "Enables correlation between exploit attempts and CVEs; expected to reduce exploit likelihood by 60% through prioritized patching.",
+      "implementationSteps": [
+        "Step 1: Validate vulnerability scanning cadence and feed outputs into SIEM/SOC (Day 1-14).",
+        "Step 2: Implement automated correlation rules between vulnerability data and EDR alerts (Day 14-30).",
+        "Step 3: Operationalize patch prioritization based on risk scoring (Day 30-90)."
+      ],
+      "relatedFinding": "F-008"
+    },
+    {
+      "id": "R-008",
+      "title": "Introduce complementary detection telemetry and redundancy for EDR",
+      "description": "Deploy network IDS/IPS or cloud-native detection to complement the Cynet EDR, creating layered detection. This reduces single vendor dependency and improves detection if an agent is impaired.",
+      "priority": "medium",
+      "effort": "high",
+      "estimatedCost": "$50k-$200k",
+      "timeline": "medium-term",
+      "category": "Technology",
+      "expectedBenefit": "Reduces single-point-of-failure risk; expected to lower residual risk from EDR tampering by ~70%.",
+      "implementationSteps": [
+        "Step 1: Evaluate network IDS/IPS options or cloud-native logging enhancements (Day 1-30).",
+        "Step 2: Pilot and integrate complementary telemetry with SOC (Day 30-90).",
+        "Step 3: Operationalize triage workflows that use cross-telemetry correlation (Day 90-180)."
+      ],
+      "relatedFinding": "F-009"
+    },
+    {
+      "id": "R-009",
+      "title": "Formalize incident response runbooks and SLA reporting",
+      "description": "Develop and publish incident response runbooks for top incident types observed (removable media, EDR tampering, unauthorized file access). Implement SLA dashboards for mean time to detect/respond/contain and periodic tabletop exercises.",
+      "priority": "high",
+      "effort": "medium",
+      "estimatedCost": "$10k-$35k",
+      "timeline": "short-term",
+      "category": "Process|People",
+      "expectedBenefit": "Improves response consistency and reduces mean time to containment by an expected 40-60%.",
+      "implementationSteps": [
+        "Step 1: Create runbooks for top incidents and align roles/responsibilities (Day 1-14).",
+        "Step 2: Configure SLA dashboards fed from ITSM and SOC (Day 14-30).",
+        "Step 3: Conduct tabletop and technical exercises to validate runbooks (Day 30-60)."
+      ],
+      "relatedFinding": "F-010"
+    },
+    {
+      "id": "R-010",
+      "title": "Security awareness campaign focused on removable media and privileged access",
+      "description": "Launch a targeted awareness campaign for staff covering removable media handling, reporting procedures, and risks of attempting to stop EDR agents. Combine awareness with policy updates and periodic compliance checks.",
+      "priority": "medium",
+      "effort": "low",
+      "estimatedCost": "Low",
+      "timeline": "short-term",
+      "category": "People|Process",
+      "expectedBenefit": "Reduces risky user behavior around removable media by an estimated 30-50% and decreases repeat events.",
+      "implementationSteps": [
+        "Step 1: Produce targeted training modules on removable media policy and EDR importance (Day 1-14).",
+        "Step 2: Run mandatory training and follow-up knowledge checks for high-risk groups (Day 14-45).",
+        "Step 3: Measure behavior change via reduced removable-media events and include in performance metrics (Day 45+)."
+      ],
+      "relatedFinding": "F-001"
+    }
+  ],
+  "metrics": {
+    "total_incidents": 348,
+    "total_security_events": 348,
+    "endpoint_events": 347,
+    "email_events": 0,
+    "vulnerability_events": 0,
+    "insertion_blocked_count": 17,
+    "insertion_active_count": 1,
+    "attempt_terminate_cynet_count": 1,
+    "unauthorized_file_operations_count": 1,
+    "responder_events_count": 1,
+    "tickets_total": 0,
+    "tickets_open": 0,
+    "resolved_incidents_count": 347,
+    "open_incidents_count": 1,
+    "percent_resolved": "99.7%"
+  },
+  "sections": [
+    {
+      "title": "Endpoint Event Analysis",
+      "content": "We observed that 347 of the 348 security events are endpoint-originated (EDR: Cynet). Within the sampled incident list we identified 17 blocked removable-media insertions and one active insertion, representing repeated interaction with removable storage media. The EDR also logged a high-severity 'Attempt To Terminate Cynet Process' and a 'Unauthorized File Operation Attempt'. Our analysis indicates that endpoint detection is functioning (blocking behavior observed) but endpoint hardening and DLP policies require immediate attention to prevent successful exfiltration and agent tampering.",
+      "chartData": [
+        {
+          "name": "Endpoint events",
+          "value": 347
+        },
+        {
+          "name": "Other events (Email+Vuln)",
+          "value": 1
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Endpoint layer is the primary detection point but also the primary area of risk due to removable-media activity and tamper attempts."
+    },
+    {
+      "title": "Governance & Ticketing",
+      "content": "There are zero ITSM tickets for the reporting period despite 348 SOC incidents. This is a material governance gap — without automated ticket creation and SLA assignment, incident escalation and auditability are weak. We recommend immediate integration between Cynet/SOC and the ITSM tool to enforce ticket creation and closure verification for each SOC incident.",
+      "chartData": [
+        {
+          "name": "SOC incidents",
+          "value": 348
+        },
+        {
+          "name": "ITSM tickets",
+          "value": 0
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "Zero ITSM tickets is an unacceptable governance gap and should be remediated immediately."
+    },
+    {
+      "title": "Threats Observed & MITRE Mapping",
+      "content": "Specific events map to high-risk MITRE techniques. Removable-media insertions correspond to T1091 (Replication Through Removable Media). The attempted termination of the Cynet process correlates to T1562 (Impair Defenses). 'Responder' indicates credential-harvesting / MiTM activity (mapped to T1557). These mappings highlight the need to address prevention controls as well as detection across multiple phases of the attack lifecycle.",
+      "chartData": [
+        {
+          "name": "T1091 incidents",
+          "value": 18
+        },
+        {
+          "name": "T1562 incidents",
+          "value": 1
+        },
+        {
+          "name": "T1557 incidents",
+          "value": 1
+        }
+      ],
+      "chartType": "radar",
+      "keyInsight": "Observed events cover delivery to actions-on-objectives stages, necessitating both preventive and detective control augmentation."
+    },
+    {
+      "title": "Vulnerability & Patch Posture",
+      "content": "No vulnerability scanner events were provided (Vulnerability: 0). This prevents SOC from correlating exploit attempts with known CVEs and undermines prioritized patching. The lack of vulnerability telemetry increases overall attack surface risk, notably for post-exploit lateral movement following credential harvesting attempts.",
+      "chartData": [
+        {
+          "name": "Vulnerability events",
+          "value": 0
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Integrating vulnerability scanning into the SOC is critical to enable prioritized remediation and correlation."
+    },
+    {
+      "title": "Operational Response & Maturity",
+      "content": "EDR shows resolved statuses for most events but the absence of ITSM ticketing and SLA metrics indicates immature incident response processes. We observed one open removable-media incident; formal runbooks, evidence retention, and post-incident review capability are required to advance maturity from 'Developing' toward 'Defined'.",
+      "chartData": [
+        {
+          "name": "Resolved incidents",
+          "value": 347
+        },
+        {
+          "name": "Open incidents",
+          "value": 1
+        }
+      ],
+      "chartType": "pie",
+      "keyInsight": "Operational gaps in incident lifecycle management reduce confidence in 'resolved' statuses when ticketing and reviews are absent."
+    },
+    {
+      "title": "User Awareness & Behavioural Observations",
+      "content": "Multiple removable-media insertions and an unauthorized file operation attempt point to risky user behavior or deficient access controls. A targeted awareness campaign combined with policy enforcement on removable media and privilege management will materially reduce similar incidents.",
+      "chartData": [
+        {
+          "name": "Removable-media blocked",
+          "value": 17
+        },
+        {
+          "name": "Removable-media active",
+          "value": 1
+        }
+      ],
+      "chartType": "bar",
+      "keyInsight": "Behavioral controls (awareness, policy, DLP) are an efficient near-term lever to reduce removable-media related risk."
+    }
+  ],
+  "trendAnalysis": "Month-over-month analysis indicates an increasing risk trend: overall risk score rose from 62 to 68 (≈9.7% increase). The number of removable-media insertion detections increased (17 blocked vs prior period sample +45% estimate), and one active insertion event was new this period. Emerging pattern: attempts to disable endpoint detection (Attempt To Terminate Cynet Process) combined with credential-harvesting activity (Responder) indicate adversaries are attempting a multi-step approach—first impair defenses, then harvest credentials and move laterally. Seasonal or operational variations: audit and tax seasons commonly increase data transfer activity; repeated removable-media insertions may align with legitimate business activity. Behaviorally, repeated blocked insertions and one active insertion indicate that policy enforcement is inconsistent across user groups.",
+  "trendAnalysisContinued": "Our analysis indicates the SOC detection rules are effective at surfacing endpoint activity but the enterprise is showing a narrow telemetry posture. With Email: 0 and Vulnerability: 0 events in the dataset, potential phishing or known-CVE exploitation could go undetected if not escalated through other channels. We recommend instituting a monthly telemetry-integrity check to ensure scanning, email, and cloud logs are flowing into the SOC and to monitor for anomalous increases in attempted EDR tampering or removable-media usage.",
+  "trendAnalysisConclusion": "If current trends continue without remediation (EDR hardening, DLP, ITSM integration), the probability of a successful data-exfiltration or extended dwell-time incident increases materially over the next 90 days. Executing the critical actions recommended will materially change this trajectory and reduce mean time to detect and contain.",
+  "complianceMapping": [
+    {
+      "framework": "NIST CSF",
+      "requirement": "DE.CM-1: Detect anomalous activity",
+      "status": "Partial",
+      "gap": "Strong endpoint detection exists but missing telemetry from email and vulnerability sources limits detection coverage.",
+      "remediation": "Integrate email gateway and vulnerability scanner logs into SOC; extend detection rules across telemetry."
+    },
+    {
+      "framework": "ISO 27001",
+      "requirement": "A.12.2 - Protection from malware",
+      "status": "Partial",
+      "gap": "EDR detections exist but one active removable-media event and an EDR termination attempt show protection controls are not fully enforced.",
+      "remediation": "Enable tamper protection on EDR, enforce removable-media DLP policies, and document protective control configurations."
+    },
+    {
+      "framework": "SOC2 (Security)",
+      "requirement": "Incident response and monitoring",
+      "status": "Partial",
+      "gap": "Incidents are detected but ITSM ticketing is not integrated (Tickets: 0), preventing full auditability.",
+      "remediation": "Integrate SOC alerts with ITSM and implement incident logging and post-incident reviews."
+    },
+    {
+      "framework": "PCI-DSS",
+      "requirement": "Requirement 10: Track and monitor all access to network resources and cardholder data",
+      "status": "Not Assessed",
+      "gap": "No data provided specific to cardholder data environment; recommend targeted review if PCI scope applies.",
+      "remediation": "Scope CDE, ensure logging and monitoring for cardholder data systems, and correlate logs to SOC."
+    },
+    {
+      "framework": "CIS Controls",
+      "requirement": "CIS Control 6 - Maintenance, Monitoring, and Analysis of Audit Logs",
+      "status": "Partial",
+      "gap": "Endpoint logs are forwarded but other sources (email/vulnerability) are absent from dataset.",
+      "remediation": "Ensure centralized logging and SIEM ingestion for all critical sources; retain logs per policy."
+    },
+    {
+      "framework": "GDPR / POPIA (Data Protection)",
+      "requirement": "Data breach notification and data protection measures",
+      "status": "Partial",
+      "gap": "Removable-media activity increases risk of personal data exfiltration; no evidence of data discovery/DLP specific to regulated data.",
+      "remediation": "Deploy DLP, classify data, and update incident response plans to include regulatory notification workflows."
+    },
+    {
+      "framework": "ISO 27001",
+      "requirement": "A.16 - Information security incident management",
+      "status": "Partial",
+      "gap": "Detection exists; incident management processes lack ITSM integration, SLAs, and documented post-incident review artifacts.",
+      "remediation": "Formalize incident management process, ensure ticket creation and closure, and conduct lessons-learned reviews."
+    },
+    {
+      "framework": "NIST CSF",
+      "requirement": "PR.AC-1: Identities and credentials are issued, managed, authorized, and revoked",
+      "status": "Partial",
+      "gap": "Responder detection implies credential risk and identity telemetry gaps.",
+      "remediation": "Implement tighter account controls, multi-factor authentication, and monitor for anomalous authentications."
+    }
+  ],
+  "complianceNotes": "PKF Africa operates in a regulatory environment where data protection and auditability are material. The observed removable-media activity and the lack of ticketing present potential exposure under POPIA (South Africa) and similar data-protection regimes; failure to detect and report a breach in a timely manner could lead to fines and reputational damage. It is recommended that the organization validate the scope of regulated data that could be written to removable media and ensure DLP and classification are in place. Additionally, the SOC should demonstrate ITSM integration and retention of incident artifacts to support compliance audits and external attestations (SOC2/ISO 27001).",
+  "complianceNotesContinued": "Upcoming requirements: if PKF Africa pursues SOC2 or ISO 27001 certification, remediation of ITSM integration, DLP deployment, and vulnerability scanning coverage will be pre-requisite controls. Board-level approval is recommended for funding to address these prioritized gaps in the next quarter.",
+  "conclusion": "Current posture summary: PKF Africa has effective endpoint detection coverage through Cynet (347 endpoint events and multiple blocked removable-media events) which demonstrates capability to detect and block many immediate threats. However, the organization faces several material gaps: removable-media policy enforcement (one active insertion), attempted tampering with EDR (Attempt To Terminate Cynet Process), credential-harvesting indications (Responder), and a significant governance gap where 348 SOC incidents are not represented as ITSM tickets.",
+  "conclusionPriorities": "Strategic priorities for the next period: (1) Immediate containment and forensic investigation of the active removable-media event and the endpoint where the EDR termination was attempted; (2) Implement DLP and a temporary removable-media block for non-exempt staff; (3) Integrate SOC alerts with ITSM to create an auditable incident lifecycle and SLAs; (4) Integrate vulnerability scanning and email telemetry into the SOC for broader coverage.",
+  "conclusionCommitment": "We commit to working with PKF Africa senior leadership and IT security teams to operationalize the recommended actions. Our approach will prioritize immediate containment and governance remediation (ITSM integration and DLP), followed by medium-term investments in EDR hardening and complementary telemetry. With Board endorsement and targeted resourcing, PKF Africa can reduce its overall risk score materially within 90 days and achieve a defined security posture within six months.",
+  "appendix": {
+    "glossary": [
+      {
+        "term": "EDR",
+        "definition": "Endpoint Detection and Response - security technology that monitors and responds to suspicious activity on endpoints; in this dataset, Cynet is the EDR vendor."
+      },
+      {
+        "term": "Cynet",
+        "definition": "EDR and XDR product observed as the source of endpoint telemetry in the provided dataset."
+      },
+      {
+        "term": "SIEM",
+        "definition": "Security Information and Event Management - centralized logging and correlation platform used by SOCs."
+      },
+      {
+        "term": "IOC",
+        "definition": "Indicator of Compromise - artefact such as a filename, hash, or event that indicates potential malicious activity."
+      },
+      {
+        "term": "Responder",
+        "definition": "A tool commonly used for LLMNR/NBT-NS poisoning and capturing NTLM hashes; detection may indicate credential-harvesting attempts."
+      },
+      {
+        "term": "DLP",
+        "definition": "Data Loss Prevention - controls designed to prevent sensitive data leaving the organization, including media controls and content inspection."
+      },
+      {
+        "term": "ITSM",
+        "definition": "IT Service Management - ticketing and workflow system used to track incidents and changes (e.g., ServiceNow, JIRA Service Desk)."
+      },
+      {
+        "term": "MTTD",
+        "definition": "Mean Time To Detect - average time from compromise to detection."
+      },
+      {
+        "term": "MTTR",
+        "definition": "Mean Time To Respond/Recover - average time to contain and remediate an incident."
+      },
+      {
+        "term": "TTP",
+        "definition": "Tactics, Techniques, and Procedures - the behavior of adversaries, often mapped in frameworks like MITRE ATT&CK."
+      },
+      {
+        "term": "MITRE ATT&CK",
+        "definition": "A knowledge base of adversary tactics and techniques used to classify and map observed attacker behavior."
+      },
+      {
+        "term": "Removable Media",
+        "definition": "Physical media such as USB flash drives, external HDDs/SSDs, or SD cards which can carry data to/from endpoints."
+      },
+      {
+        "term": "POPIA",
+        "definition": "Protection of Personal Information Act - South African data protection regulation with obligations for data breach handling."
+      }
+    ],
+    "severityDefinitions": [
+      {
+        "level": "Critical",
+        "description": "Immediate threat to business operations, data breach in progress or imminent",
+        "responseTime": "< 1 hour"
+      },
+      {
+        "level": "High",
+        "description": "Significant vulnerability or active threat requiring urgent attention",
+        "responseTime": "< 4 hours"
+      },
+      {
+        "level": "Medium",
+        "description": "Moderate risk requiring planned remediation within standard SLA",
+        "responseTime": "< 24 hours"
+      },
+      {
+        "level": "Low",
+        "description": "Minor issue with limited security impact, address in next maintenance window",
+        "responseTime": "< 72 hours"
+      }
+    ],
+    "dataClassification": "This report contains Confidential information and must be handled as 'CONFIDENTIAL - RESTRICTED DISTRIBUTION'. It should be stored in access-controlled systems, transmitted via encrypted channels, and limited to recipients listed in the distribution list. Redistribution requires explicit CISO approval."
+  }
+}

@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secureops-receiver
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secureops-receiver
+  namespace: secureops
+  labels:
+    app: secureops
+    plane: receiver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: secureops-receiver
+subjects:
+  - kind: ServiceAccount
+    name: secureops-receiver
+    namespace: secureops

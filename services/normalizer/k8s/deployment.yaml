@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secureops-normalizer
+  namespace: secureops
+  labels:
+    app: secureops
+    component: normalizer
+    tier: pipeline
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secureops
+      component: normalizer
+  template:
+    metadata:
+      labels:
+        app: secureops
+        component: normalizer
+        tier: pipeline
+    spec:
+      containers:
+        - name: normalizer
+          image: secureops/normalizer:latest
+          ports:
+            - containerPort: 5000
+              name: http
+              protocol: TCP
+          env:
+            - name: SERVICE
+              value: normalizer
+            - name: PORT
+              value: "5000"
+            - name: NODE_ENV
+              value: production
+            - name: NORMALIZER_CONCURRENCY
+              value: "10"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: secureops-config
+                  key: KAFKA_BROKERS
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: secureops-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureops-normalizer
+  namespace: secureops
+  labels:
+    app: secureops
+    component: normalizer
+spec:
+  selector:
+    app: secureops
+    component: normalizer
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+      name: http
+  type: ClusterIP

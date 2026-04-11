@@ -1,0 +1,43 @@
+##############################################################################
+# Dockerfile.migrate — Migration-only image for Cyber Command Center
+#
+# This image retains all devDependencies so that drizzle-kit push can be run
+# inside a one-off ECS Fargate task without requiring network access to npm.
+#
+# Used by deploy/ecs/scripts/migrate.sh --mode ecs
+#
+# Build + push:
+#   docker build -f Dockerfile.migrate -t ccc-migrate:${IMAGE_TAG} .
+#   docker push ${ECR_REGISTRY}/ccc-migrate:${IMAGE_TAG}
+##############################################################################
+
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --include=dev
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS migrate
+WORKDIR /app
+ENV NODE_ENV=production
+
+RUN apk add --no-cache curl && \
+    addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 appuser
+
+# Retain ALL node_modules (including devDependencies) so drizzle-kit is available.
+# This image is used only for one-off migration tasks — not for serving traffic.
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/migrations ./migrations
+COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
+
+USER appuser
+
+CMD ["npx", "drizzle-kit", "push", "--config=drizzle.config.ts"]

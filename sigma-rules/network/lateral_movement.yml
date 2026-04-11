@@ -1,0 +1,38 @@
+title: Lateral Movement Detection
+id: sigma-network-003
+status: stable
+level: high
+description: Detects lateral movement techniques including remote service exploitation, pass-the-hash, and remote desktop abuse.
+author: SecureOps
+date: 2024/01/01
+logsource:
+  category: network
+  product: any
+detection:
+  selection:
+    eventType:
+      - network
+      - endpoint
+  keywords:
+    - lateral movement
+    - pass the hash
+    - pass-the-hash
+    - remote desktop
+    - rdp brute
+    - psexec
+    - wmi remote
+    - winrm
+    - smb lateral
+    - remote service
+    - remote execution
+  condition: selection AND keywords
+falsepositives:
+  - Legitimate remote administration
+  - IT management tools
+tags:
+  - attack.lateral_movement
+  - attack.t1021
+mitre:
+  tactic: Lateral Movement
+  technique: T1021
+  technique_name: Remote Services

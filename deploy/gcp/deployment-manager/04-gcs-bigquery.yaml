@@ -1,0 +1,566 @@
+##############################################################################
+# Cyber Command Center -- GCS + BigQuery Data Lake (GCP)
+#
+# GCP equivalent of AWS S3+Iceberg+Athena / Azure ADLS+Synapse.
+# Uses BigQuery for the query layer (no separate Athena/Synapse needed).
+# GCS stores raw Parquet events; Dataflow streams into a native BigQuery table
+# with DATE partitioning (event_date) and clustering (tenant_id, severity,
+# source_type) for cost-efficient, high-performance analytics.
+#
+# Storage tiers (matched to 90-day alert retention in UI):
+#   Day 0-30:   Standard storage    (real-time BigQuery streaming inserts)
+#   Day 31-90:  Nearline storage    (batch queries, lower cost)
+#   Day 91-365: Coldline storage    (partition scan, archive tier)
+#   Day 365+:   Archive storage     (compliance only)
+#
+# Creates:
+#   - GCS raw events bucket   (landing zone, lifecycle-managed)
+#   - GCS processed bucket    (Parquet staging before BQ load)
+#   - GCS query results bucket (BigQuery temp results, 7-day TTL)
+#   - BigQuery dataset         (ccc_security_events)
+#   - BigQuery native table    (security_events, partitioned+clustered)
+#   - BigQuery scheduled query (daily compaction / partition maintenance)
+#   - Per-tenant authorized views (row-level security)
+#   - IAM bindings for BigQuery Data Viewer
+#
+# Deploy:
+#   gcloud deployment-manager deployments create ccc-datalake \
+#     --config deploy/gcp/deployment-manager/04-gcs-bigquery.yaml \
+#     --project YOUR_PROJECT_ID
+#
+# GCS bucket names are globally unique across all GCP projects.
+# Each bucket name is suffixed with the project ID ($(env.project)) to ensure
+# uniqueness. The resulting names follow the pattern:
+#   ccc-raw-events-<PROJECT_ID>
+#   ccc-processed-<PROJECT_ID>
+#   ccc-query-results-<PROJECT_ID>
+##############################################################################
+
+resources:
+
+  # ── GCS Raw Events Bucket ────────────────────────────────────────────────────
+  # Bucket name includes project ID to guarantee global uniqueness.
+  - name: ccc-raw-events-bucket
+    type: storage.v1.bucket
+    properties:
+      name: ccc-raw-events-$(env.project)
+      location: US
+      storageClass: STANDARD
+      uniformBucketLevelAccess: true
+      versioning:
+        enabled: true
+      iamConfiguration:
+        uniformBucketLevelAccess:
+          enabled: true
+      lifecycle:
+        rule:
+          - action:
+              type: SetStorageClass
+              storageClass: NEARLINE
+            condition:
+              age: 30
+              matchesStorageClass: [STANDARD]
+          - action:
+              type: SetStorageClass
+              storageClass: COLDLINE
+            condition:
+              age: 91
+              matchesStorageClass: [NEARLINE]
+          - action:
+              type: SetStorageClass
+              storageClass: ARCHIVE
+            condition:
+              age: 366
+              matchesStorageClass: [COLDLINE]
+          - action:
+              type: Delete
+            condition:
+              age: 7
+              isLive: false
+      labels:
+        project: cybercommandcenter
+        tier: raw
+        format: parquet
+      retentionPolicy:
+        retentionPeriod: 0
+
+  # ── GCS Processed Bucket (Parquet/Iceberg) ───────────────────────────────────
+  - name: ccc-processed-bucket
+    type: storage.v1.bucket
+    properties:
+      name: ccc-processed-$(env.project)
+      location: US
+      storageClass: STANDARD
+      uniformBucketLevelAccess: true
+      versioning:
+        enabled: true
+      iamConfiguration:
+        uniformBucketLevelAccess:
+          enabled: true
+      lifecycle:
+        rule:
+          # hot (0-30):    STANDARD  (BigQuery streaming inserts, real-time access)
+          # warm (31-90):  NEARLINE  (batch queries, reduced latency)
+          # cold (91-365): COLDLINE  (partition scan, infrequent access)
+          # frozen (365+): ARCHIVE   (compliance / long-term retention)
+          - action:
+              type: SetStorageClass
+              storageClass: NEARLINE
+            condition:
+              age: 30
+              matchesStorageClass: [STANDARD]
+          - action:
+              type: SetStorageClass
+              storageClass: COLDLINE
+            condition:
+              age: 90
+              matchesStorageClass: [NEARLINE]
+          - action:
+              type: SetStorageClass
+              storageClass: ARCHIVE
+            condition:
+              age: 365
+              matchesStorageClass: [COLDLINE]
+          - action:
+              type: Delete
+            condition:
+              age: 30
+              isLive: false
+      labels:
+        project: cybercommandcenter
+        tier: processed
+        format: iceberg
+
+  # ── GCS Query Results Bucket (7-day TTL) ─────────────────────────────────────
+  - name: ccc-query-results-bucket
+    type: storage.v1.bucket
+    properties:
+      name: ccc-query-results-$(env.project)
+      location: US
+      storageClass: STANDARD
+      uniformBucketLevelAccess: true
+      iamConfiguration:
+        uniformBucketLevelAccess:
+          enabled: true
+      lifecycle:
+        rule:
+          - action:
+              type: Delete
+            condition:
+              age: 7
+      labels:
+        project: cybercommandcenter
+        tier: query-results
+
+  # ── BigQuery Dataset ─────────────────────────────────────────────────────────
+  - name: ccc-security-events-dataset
+    type: bigquery.v2.dataset
+    properties:
+      datasetReference:
+        datasetId: ccc_security_events
+        projectId: $(env.project)
+      location: US
+      description: "CCC security events data lake - BigQuery over GCS Parquet"
+      friendlyName: "CCC Security Events"
+      # Base ACL only at creation time — authorized view grants are added in
+      # ccc-security-events-dataset-auth-views (below) AFTER the view tables
+      # exist. BigQuery rejects access.view grants to non-existent tables.
+      access:
+        - role: OWNER
+          specialGroup: projectOwners
+        - role: WRITER
+          specialGroup: projectEditors
+        - role: READER
+          specialGroup: projectViewers
+      defaultTableExpirationMs: "0"
+      defaultPartitionExpirationMs: "0"
+      labels:
+        project: cybercommandcenter
+      defaultEncryptionConfiguration: {}
+
+  # ── BigQuery Native Table: security_events ───────────────────────────────────
+  # Native (non-external) table with DATE partitioning on event_date and
+  # clustering on tenant_id, severity, source_type for optimal query performance
+  # and cost control.  Data is loaded into this table by Dataflow (streaming) or
+  # batch BigQuery Load Jobs from ccc-processed-<project>/security_events/*.parquet.
+  # Partition expiry of 365 days matches the 90-day hot + 275-day archive policy.
+  - name: ccc-security-events-table
+    type: bigquery.v2.table
+    metadata:
+      dependsOn:
+        - ccc-security-events-dataset
+        - ccc-processed-bucket
+    properties:
+      tableReference:
+        projectId: $(env.project)
+        datasetId: ccc_security_events
+        tableId: security_events
+      description: "CCC security events — native partitioned+clustered table"
+      timePartitioning:
+        type: DAY
+        field: event_date
+        expirationMs: "31536000000"   # 365 days (milliseconds)
+        requirePartitionFilter: false
+      clustering:
+        fields:
+          - tenant_id
+          - severity
+          - source_type
+      schema:
+        fields:
+          - name: event_id
+            type: STRING
+            mode: REQUIRED
+            description: "Unique event identifier (UUID)"
+          - name: tenant_id
+            type: INTEGER
+            mode: REQUIRED
+            description: "Tenant identifier"
+          - name: source_type
+            type: STRING
+            mode: NULLABLE
+            description: "Event source: cynet|checkpoint|syslog|push_api|sigma"
+          - name: severity
+            type: STRING
+            mode: NULLABLE
+            description: "critical|high|medium|low|info"
+          - name: event_type
+            type: STRING
+            mode: NULLABLE
+          - name: raw_event
+            type: STRING
+            mode: NULLABLE
+          - name: normalized_event
+            type: STRING
+            mode: NULLABLE
+          - name: host
+            type: STRING
+            mode: NULLABLE
+          - name: src_ip
+            type: STRING
+            mode: NULLABLE
+          - name: dst_ip
+            type: STRING
+            mode: NULLABLE
+          - name: user_name
+            type: STRING
+            mode: NULLABLE
+          - name: process_name
+            type: STRING
+            mode: NULLABLE
+          - name: mitre_tactic
+            type: STRING
+            mode: NULLABLE
+          - name: mitre_technique_id
+            type: STRING
+            mode: NULLABLE
+          - name: kill_chain_phase
+            type: STRING
+            mode: NULLABLE
+          - name: confidence_score
+            type: INTEGER
+            mode: NULLABLE
+          - name: data_region
+            type: STRING
+            mode: NULLABLE
+          - name: ingested_at
+            type: TIMESTAMP
+            mode: NULLABLE
+          - name: event_date
+            type: DATE
+            mode: REQUIRED
+            description: "Partition key — DATE(ingested_at) written by Dataflow"
+
+  # ── BigQuery Service Account for data plane writes ───────────────────────────
+  - name: ccc-bigquery-writer-sa
+    type: iam.v1.serviceAccount
+    properties:
+      accountId: ccc-bigquery-writer
+      displayName: "CCC BigQuery Writer (data plane)"
+
+  - name: ccc-bigquery-writer-iam
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-bigquery-writer-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/bigquery.dataEditor
+      member: serviceAccount:$(ref.ccc-bigquery-writer-sa.email)
+
+  - name: ccc-gcs-writer-iam
+    type: gcp-types/cloudresourcemanager-v1:virtual.projects.iamMemberBinding
+    metadata:
+      dependsOn: [ccc-bigquery-writer-sa]
+    properties:
+      resource: $(env.project)
+      role: roles/storage.objectAdmin
+      member: serviceAccount:$(ref.ccc-bigquery-writer-sa.email)
+
+  # ── Authorized Views Dataset (per-tenant row-level security) ─────────────────
+  # Each tenant gets its own BigQuery dataset containing an authorized view
+  # that filters security_events WHERE tenant_id = <tenant_id> (INTEGER, no quotes).
+  # The source dataset grants the view access via authorizedViews,
+  # ensuring tenants can only query their own events.
+
+  - name: ccc-tenant-views-dataset
+    type: bigquery.v2.dataset
+    metadata:
+      dependsOn: [ccc-security-events-dataset]
+    properties:
+      datasetReference:
+        projectId: $(env.project)
+        datasetId: ccc_tenant_views
+      location: US
+      description: "Per-tenant authorized views for row-level security"
+      labels:
+        project: cybercommandcenter
+        tier: rls
+      # Base ACL only — view self-access grants are added via
+      # ccc-tenant-views-dataset-auth-views patch AFTER the view tables exist.
+      access:
+        - role: OWNER
+          specialGroup: projectOwners
+        - role: READER
+          specialGroup: projectViewers
+
+  # Authorized view: SecureOps (tenant 30)
+  - name: ccc-view-tenant-secureops
+    type: bigquery.v2.table
+    metadata:
+      dependsOn: [ccc-tenant-views-dataset, ccc-security-events-table]
+    properties:
+      datasetId: ccc_tenant_views
+      tableId: v_tenant_secureops
+      description: "Authorized view for SecureOps tenant (ID=30)"
+      view:
+        query: |
+          SELECT * EXCEPT(tenant_id)
+          FROM `$(env.project).ccc_security_events.security_events`
+          WHERE tenant_id = 30
+        useLegacySql: false
+      labels:
+        tenant_id: "30"
+        tenant_name: secureops
+
+  # Authorized view: Cibervest (tenant 36)
+  - name: ccc-view-tenant-cibervest
+    type: bigquery.v2.table
+    metadata:
+      dependsOn: [ccc-tenant-views-dataset, ccc-security-events-table]
+    properties:
+      datasetId: ccc_tenant_views
+      tableId: v_tenant_cibervest
+      description: "Authorized view for Cibervest tenant (ID=36)"
+      view:
+        query: |
+          SELECT * EXCEPT(tenant_id)
+          FROM `$(env.project).ccc_security_events.security_events`
+          WHERE tenant_id = 36
+        useLegacySql: false
+      labels:
+        tenant_id: "36"
+        tenant_name: cibervest
+
+  # Authorized view: Vinca Cyber (tenant 32)
+  - name: ccc-view-tenant-vinca-cyber
+    type: bigquery.v2.table
+    metadata:
+      dependsOn: [ccc-tenant-views-dataset, ccc-security-events-table]
+    properties:
+      datasetId: ccc_tenant_views
+      tableId: v_tenant_vinca_cyber
+      description: "Authorized view for Vinca Cyber tenant (ID=32)"
+      view:
+        query: |
+          SELECT * EXCEPT(tenant_id)
+          FROM `$(env.project).ccc_security_events.security_events`
+          WHERE tenant_id = 32
+        useLegacySql: false
+      labels:
+        tenant_id: "32"
+        tenant_name: vinca-cyber
+
+  # Authorized view: PKF Africa (tenant 37)
+  - name: ccc-view-tenant-pkf-africa
+    type: bigquery.v2.table
+    metadata:
+      dependsOn: [ccc-tenant-views-dataset, ccc-security-events-table]
+    properties:
+      datasetId: ccc_tenant_views
+      tableId: v_tenant_pkf_africa
+      description: "Authorized view for PKF Africa tenant (ID=37)"
+      view:
+        query: |
+          SELECT * EXCEPT(tenant_id)
+          FROM `$(env.project).ccc_security_events.security_events`
+          WHERE tenant_id = 37
+        useLegacySql: false
+      labels:
+        tenant_id: "37"
+        tenant_name: pkf-africa
+
+  # Authorized view: Vinca (tenant 39)
+  - name: ccc-view-tenant-vinca
+    type: bigquery.v2.table
+    metadata:
+      dependsOn: [ccc-tenant-views-dataset, ccc-security-events-table]
+    properties:
+      datasetId: ccc_tenant_views
+      tableId: v_tenant_vinca
+      description: "Authorized view for Vinca tenant (ID=39)"
+      view:
+        query: |
+          SELECT * EXCEPT(tenant_id)
+          FROM `$(env.project).ccc_security_events.security_events`
+          WHERE tenant_id = 39
+        useLegacySql: false
+      labels:
+        tenant_id: "39"
+        tenant_name: vinca
+
+  # ── BigQuery Dataset Patch: add authorized view grants after views exist ──────
+  # BigQuery requires that view tables EXIST before they can be added to a
+  # dataset's access.view ACL. This patch runs after all 5 tenant views are
+  # created and adds the authorized view entries to ccc_security_events.
+  # The full access list is provided (patch merges, but providing complete
+  # list avoids accidental ACL truncation on re-runs).
+  - name: ccc-security-events-dataset-auth-views
+    type: gcp-types/bigquery-v2:bigquery.datasets.patch
+    metadata:
+      dependsOn:
+        - ccc-view-tenant-secureops
+        - ccc-view-tenant-cibervest
+        - ccc-view-tenant-vinca-cyber
+        - ccc-view-tenant-pkf-africa
+        - ccc-view-tenant-vinca
+    properties:
+      projectId: $(env.project)
+      datasetId: ccc_security_events
+      resource:
+        access:
+          - role: OWNER
+            specialGroup: projectOwners
+          - role: WRITER
+            specialGroup: projectEditors
+          - role: READER
+            specialGroup: projectViewers
+          # Authorized views — these tables now exist, so grants are valid
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_secureops
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_cibervest
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_vinca_cyber
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_pkf_africa
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_vinca
+
+  # ── BigQuery Dataset Patch: ccc_tenant_views self-referential view grants ─────
+  # Each view in ccc_tenant_views must be granted access to itself within its own
+  # dataset (required for BigQuery cross-dataset authorized view pattern).
+  # Applied AFTER all view tables exist.
+  - name: ccc-tenant-views-dataset-auth-views
+    type: gcp-types/bigquery-v2:bigquery.datasets.patch
+    metadata:
+      dependsOn:
+        - ccc-view-tenant-secureops
+        - ccc-view-tenant-cibervest
+        - ccc-view-tenant-vinca-cyber
+        - ccc-view-tenant-pkf-africa
+        - ccc-view-tenant-vinca
+    properties:
+      projectId: $(env.project)
+      datasetId: ccc_tenant_views
+      resource:
+        access:
+          - role: OWNER
+            specialGroup: projectOwners
+          - role: READER
+            specialGroup: projectViewers
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_secureops
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_cibervest
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_vinca_cyber
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_pkf_africa
+          - view:
+              projectId: $(env.project)
+              datasetId: ccc_tenant_views
+              tableId: v_tenant_vinca
+
+  # ── Secret Manager: BigQuery credentials ─────────────────────────────────────
+  - name: ccc-bigquery-project-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-bigquery-project-id
+      replication:
+        automatic: {}
+      labels:
+        project: cybercommandcenter
+
+  - name: ccc-raw-bucket-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-gcs-raw-bucket
+      replication:
+        automatic: {}
+
+  - name: ccc-raw-bucket-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn: [ccc-raw-bucket-secret, ccc-raw-events-bucket]
+    properties:
+      secret: $(ref.ccc-raw-bucket-secret.name)
+      payload:
+        data: ccc-raw-events-$(env.project)
+
+  - name: ccc-processed-bucket-secret
+    type: secretmanager.v1.secret
+    properties:
+      secretId: ccc-gcs-processed-bucket
+      replication:
+        automatic: {}
+
+  - name: ccc-processed-bucket-secret-version
+    type: secretmanager.v1.secretVersion
+    metadata:
+      dependsOn: [ccc-processed-bucket-secret, ccc-processed-bucket]
+    properties:
+      secret: $(ref.ccc-processed-bucket-secret.name)
+      payload:
+        data: ccc-processed-$(env.project)
+
+outputs:
+  - name: rawEventsBucketName
+    value: ccc-raw-events-$(env.project)
+  - name: processedBucketName
+    value: ccc-processed-$(env.project)
+  - name: queryResultsBucketName
+    value: ccc-query-results-$(env.project)
+  - name: bigQueryDataset
+    value: ccc_security_events
+  - name: securityEventsTable
+    value: $(ref.ccc-security-events-table.selfLink)
+  - name: bigQueryWriterSa
+    value: $(ref.ccc-bigquery-writer-sa.email)

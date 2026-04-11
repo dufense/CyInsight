@@ -1,0 +1,14 @@
+{{- if .Values.detectionEngine.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-detection-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: detection-engine
+data:
+  BATCH_SIZE: {{ .Values.detectionEngine.config.batchSize | quote }}
+  SIGMA_RULES_PATH: {{ .Values.detectionEngine.config.sigmaRulesPath | quote }}
+  LOG_LEVEL: {{ .Values.detectionEngine.config.logLevel | default "info" | quote }}
+{{- end }}

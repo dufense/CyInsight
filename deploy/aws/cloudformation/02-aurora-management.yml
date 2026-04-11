@@ -1,0 +1,483 @@
+##############################################################################
+# Cyber Command Center -- Aurora Serverless v2 (Management Plane OLTP)
+#
+# Replaces single-AZ RDS with Aurora Serverless v2 PostgreSQL cluster for
+# management-plane OLTP workloads: tenants, users, incidents metadata,
+# tickets, projects, configurations. NOT for security event data.
+#
+# Creates:
+#   - Aurora Serverless v2 PostgreSQL cluster (writer + reader)
+#   - DB Subnet Group (isolated subnets, no internet route)
+#   - DB Cluster Parameter Group tuned for OLTP + pg_stat_statements
+#   - Secrets Manager secret with auto-rotation (90-day cycle)
+#   - Enhanced Monitoring IAM Role
+#   - CloudWatch alarms (CPU, connections, ACU utilization, replication lag)
+#
+# Depends on: 01-vpc.yml (exports VpcId, IsolatedSubnetIds, AuroraSecurityGroupId)
+#
+# ── Capacity & Sizing Guide (management plane; scales with tenant count) ──────
+# MaxACU:  128 (Serverless v2 ceiling; raised from 64 to support ≥100 tenants)
+# RDS Proxy: IAM auth, IdleClientTimeout 300s, pool 90% MaxConnections
+#   — pools up to 90% of Aurora's max_connections from management-plane ECS tasks
+#   — dedicated RDSProxySecurityGroup + AuroraProxyIngress for correct SG wiring
+# Previous MaxACU (64) was tuned for ≤50 active tenants at moderate query load.
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/02-aurora-management.yml \
+#     --stack-name ccc-aurora-management \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       VpcStackName=ccc-vpc \
+#       DBPassword=<32-char-password> \
+#       EnvironmentName=production
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- Aurora Serverless v2 PostgreSQL (Management OLTP)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  VpcStackName:
+    Type: String
+    Default: ccc-vpc
+    Description: Name of the VPC stack (to import subnet/SG exports)
+
+  DBName:
+    Type: String
+    Default: ccc_management
+    Description: PostgreSQL database name
+
+  DBUsername:
+    Type: String
+    Default: ccc_admin
+    NoEcho: false
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Master password (min 16 chars) - stored in Secrets Manager
+
+  MinACU:
+    Type: Number
+    Default: 0.5
+    Description: Minimum Aurora Capacity Units (0.5 = 0.5 vCPU, 1 GB RAM)
+
+  MaxACU:
+    Type: Number
+    Default: 128
+    Description: Maximum Aurora Capacity Units (128 = 128 vCPU, 256 GB RAM) for 100-500 GB/day OLTP
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 35
+
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Resources:
+
+  # ── DB Subnet Group (isolated subnets only) ──────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "CCC Aurora management - isolated subnets"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+
+  # ── Cluster Parameter Group (pg_stat_statements + OLTP tuning) ──────────────
+  ClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: "CCC Aurora management - OLTP tuned PostgreSQL 16"
+      Family: aurora-postgresql16
+      Parameters:
+        shared_preload_libraries: "pg_stat_statements,auto_explain"
+        pg_stat_statements.track: "all"
+        pg_stat_statements.max: "10000"
+        auto_explain.log_min_duration: "5000"
+        idle_in_transaction_session_timeout: "60000"
+        statement_timeout: "30000"
+        lock_timeout: "10000"
+        tcp_keepalives_idle: "60"
+        tcp_keepalives_interval: "10"
+        tcp_keepalives_count: "6"
+        log_min_duration_statement: "2000"
+        log_lock_waits: "1"
+        work_mem: "16384"
+        maintenance_work_mem: "262144"
+        checkpoint_completion_target: "0.9"
+        autovacuum_vacuum_scale_factor: "0.05"
+        autovacuum_analyze_scale_factor: "0.02"
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── Enhanced Monitoring Role ─────────────────────────────────────────────────
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-aurora-monitoring-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # ── Aurora Serverless v2 Cluster ────────────────────────────────────────────
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: !Sub "ccc-management-${EnvironmentName}"
+      Engine: aurora-postgresql
+      EngineVersion: "16.6"
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterParameterGroupName: !Ref ClusterParameterGroup
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref MinACU
+        MaxCapacity: !Ref MaxACU
+      StorageEncrypted: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      DeletionProtection: !Ref DeletionProtection
+      EnableCloudwatchLogsExports:
+        - postgresql
+      CopyTagsToSnapshot: true
+      EnableHttpEndpoint: false
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ── Writer Instance ──────────────────────────────────────────────────────────
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-management-writer-${EnvironmentName}"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Role
+          Value: writer
+
+  # ── Reader Instance (Multi-AZ failover) ─────────────────────────────────────
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "ccc-management-reader-${EnvironmentName}"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Role
+          Value: reader
+
+  # ── Secrets Manager Secret ───────────────────────────────────────────────────
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "ccc/management/database-credentials-${EnvironmentName}"
+      Description: "CCC Aurora management plane connection credentials"
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${AuroraCluster.Endpoint.Address}",
+          "port": "5432",
+          "dbname": "${DBName}",
+          "engine": "aurora-postgresql",
+          "DATABASE_URL": "postgresql://${DBUsername}:${DBPassword}@${AuroraCluster.Endpoint.Address}:5432/${DBName}?sslmode=require"
+        }
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+
+  # ── Secrets Manager Rotation (90-day automatic password rotation) ────────────
+  DBSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: AuroraWriterInstance
+    Properties:
+      SecretId: !Ref DBSecret
+      HostedRotationLambda:
+        RotationType: PostgreSQLSingleUser
+        RotationLambdaName: !Sub "ccc-aurora-rotation-${EnvironmentName}"
+        VpcSecurityGroupIds:
+          Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+        VpcSubnetIds:
+          Fn::Join:
+            - ","
+            - - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+              - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+      RotationRules:
+        AutomaticallyAfterDays: 90
+
+  # ── RDS Proxy (connection pooling + IAM auth for management plane) ──────────
+  # RDS Proxy pools connections between management-plane ECS tasks and Aurora,
+  # preventing connection exhaustion during auto-scaling bursts.
+  # IAM authentication required — no password accepted at the proxy level.
+
+  # Dedicated security group for the management RDS Proxy.
+  # Traffic flow: ECS → RDSProxySecurityGroup:5432 → Proxy → AuroraSecurityGroup:5432 → Aurora
+  #   1. Inbound from ECS on port 5432: allowed via VPC CIDR ingress rule on this SG (below)
+  #   2. Outbound to Aurora on port 5432: allowed via AuroraProxyIngress resource (below)
+  # We attach this dedicated SG to the proxy instead of the Aurora SG.
+  RDSProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "RDS Proxy SG — management Aurora proxy [${EnvironmentName}]"
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      # Allow ECS tasks (and any VPC resource) to connect to the proxy on port 5432.
+      # Scoped to VPC CIDR to avoid cross-stack ECS SG parameter dependencies.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStackName}-VpcCidr"
+          Description: Allow VPC resources (ECS tasks) to connect to management RDS Proxy on 5432
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Allow RDS Proxy → Aurora PostgreSQL (port 5432) inbound on Aurora SG.
+  # Without this rule the proxy target-group is unhealthy and all connections fail.
+  AuroraProxyIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${VpcStackName}-AuroraSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref RDSProxySecurityGroup
+      Description: Allow management RDS Proxy to reach Aurora writer/reader on 5432
+
+  RDSProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-aurora-rds-proxy-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Ref DBSecret
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    DependsOn:
+      - DBSecret
+      - AuroraWriterInstance
+    Properties:
+      DBProxyName: !Sub "ccc-management-proxy-${EnvironmentName}"
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !Ref DBSecret
+          IAMAuth: REQUIRED
+      VpcSubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet1Id"
+        - Fn::ImportValue: !Sub "${VpcStackName}-IsolatedSubnet2Id"
+      # Use the dedicated proxy SG — not the Aurora SG directly.
+      # AuroraProxyIngress adds port-5432 ingress from this SG to AuroraSecurityGroup,
+      # ensuring proxy → Aurora connectivity while keeping the Aurora SG clean.
+      VpcSecurityGroupIds:
+        - !Ref RDSProxySecurityGroup
+      RequireTLS: true
+      IdleClientTimeout: 300
+      Tags:
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: Plane
+          Value: management
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RDSProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: default
+      DBClusterIdentifiers:
+        - !Ref AuroraCluster
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # ── CloudWatch Alarms ────────────────────────────────────────────────────────
+  AlarmHighCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-aurora-management-${EnvironmentName}-high-cpu"
+      AlarmDescription: Aurora writer CPU above 80% for 5 minutes
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+        - Name: Role
+          Value: WRITER
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmHighACU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-aurora-management-${EnvironmentName}-high-acu"
+      AlarmDescription: Aurora ACU utilization above 80% of MaxACU
+      Namespace: AWS/RDS
+      MetricName: ServerlessDatabaseCapacity
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref MaxACU
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+  AlarmHighConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-aurora-management-${EnvironmentName}-high-connections"
+      AlarmDescription: Aurora connections above 800 (approaching limit)
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 800
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmReplicationLag:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-aurora-management-${EnvironmentName}-replication-lag"
+      AlarmDescription: Aurora replica lag above 30 seconds
+      Namespace: AWS/RDS
+      MetricName: AuroraReplicaLag
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraCluster
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 30000
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+
+  ClusterEndpoint:
+    Description: Aurora cluster writer endpoint
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterEndpoint"
+
+  ReaderEndpoint:
+    Description: Aurora cluster reader endpoint (for read replicas)
+    Value: !GetAtt AuroraCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-ReaderEndpoint"
+
+  ClusterPort:
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterPort"
+
+  DBSecretArn:
+    Description: Secrets Manager ARN containing DATABASE_URL and credentials
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecretArn"
+
+  DatabaseUrl:
+    Description: "PostgreSQL connection string (sslmode=require, no password in plain text)"
+    Value: !Sub "postgresql://${DBUsername}:REDACTED@${AuroraCluster.Endpoint.Address}:5432/${DBName}?sslmode=require"
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseUrl"
+
+  ClusterIdentifier:
+    Value: !Ref AuroraCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterIdentifier"
+
+  RDSProxyEndpoint:
+    Description: RDS Proxy endpoint for connection-pooled IAM-authenticated access
+    Value: !GetAtt RDSProxy.Endpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSProxyEndpoint"

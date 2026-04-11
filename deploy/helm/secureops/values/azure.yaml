@@ -1,0 +1,138 @@
+cloudProvider: "azure"
+
+cloudProviderConfig:
+  name: Azure
+  zones:
+    - eastus-1
+    - eastus-2
+    - eastus-3
+
+global:
+  storageClass: "managed-premium"
+  dataResidency:
+    country: US
+    label: azure
+    complianceFramework: SOC2
+
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: ""
+  labels:
+    azure.workload.identity/use: "true"
+
+objectStorage:
+  provider: azure
+  bucket: secureops-events
+  region: eastus
+  endpoint: ""
+  accountName: ""
+  accountKey: ""
+  connectionString: ""
+  containerName: secureops-events
+  storageClass: Hot
+  archiveStorageClass: Archive
+
+ingress:
+  className: azure-application-gateway
+  annotations:
+    kubernetes.io/ingress.class: azure/application-gateway
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/backend-protocol: http
+    appgw.ingress.kubernetes.io/health-probe-path: /health
+    appgw.ingress.kubernetes.io/request-timeout: "120"
+
+receiver:
+  replicaCount: 2
+  ingress:
+    enabled: true
+    className: azure-application-gateway
+    host: ingest.secureops.io
+    annotations:
+      appgw.ingress.kubernetes.io/ssl-redirect: "true"
+      appgw.ingress.kubernetes.io/backend-protocol: http
+      appgw.ingress.kubernetes.io/health-probe-path: /health
+    tls:
+      enabled: true
+      secretName: secureops-receiver-tls
+  service:
+    type: ClusterIP
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+
+management:
+  enabled: true
+  ingress:
+    enabled: true
+    className: azure-application-gateway
+    host: app.secureops.io
+    annotations:
+      appgw.ingress.kubernetes.io/ssl-redirect: "true"
+      appgw.ingress.kubernetes.io/backend-protocol: http
+      appgw.ingress.kubernetes.io/cookie-based-affinity: "true"
+    tls:
+      enabled: true
+      secretName: secureops-management-tls
+  database:
+    host: ""
+    port: 5432
+    name: secureops_management
+    existingSecret: secureops-secrets
+    secretKey: database-url
+    ssl: true
+    sslMode: require
+
+dataPlane:
+  persistence:
+    enabled: true
+    hotStorage:
+      size: 100Gi
+      storageClass: managed-premium
+    coldStorage:
+      size: 500Gi
+      storageClass: managed-csi
+
+kafka:
+  enabled: false
+
+kafkaKraft:
+  enabled: false
+
+kafkaExternal:
+  enabled: true
+  brokers: ""
+  securityProtocol: SASL_SSL
+  saslMechanism: PLAIN
+  saslJaasConfig: ""
+  sslEnabled: true
+  eventhubsConnectionString: ""
+
+redis:
+  enabled: true
+  architecture: replicaset
+  sentinel:
+    enabled: true
+  auth:
+    enabled: true
+
+opensearch:
+  enabled: true
+  replicas: 2
+
+secrets:
+  create: true
+  databaseUrl: ""
+  sessionSecret: ""
+  aiApiKey: ""
+  superadminPassword: ""
+  cloudStorage:
+    accountName: ""
+    accountKey: ""
+    connectionString: ""
+
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+
+networkPolicies:
+  enabled: true

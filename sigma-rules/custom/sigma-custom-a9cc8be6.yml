@@ -1,0 +1,22 @@
+title: Test Custom Rule
+id: sigma-custom-a9cc8be6
+status: experimental
+level: medium
+description: ''
+author: SecureOps Custom
+date: 2026/02/28
+logsource:
+  category: any
+  product: any
+detection:
+  selection: {}
+  keywords:
+    - test-keyword
+    - suspicious-activity
+  condition: selection AND keywords
+falsepositives: []
+tags: []
+mitre:
+  tactic: ''
+  technique: ''
+  technique_name: ''

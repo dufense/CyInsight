@@ -1,0 +1,51 @@
+
+Library
+Search
+Other
+#18 - ARIA AI Security Copilot — Natural Language Assistant
+What & Why
+All leading AI SOC platforms now ship a natural-language AI assistant embedded directly into the interface:
+
+Microsoft Sentinel: Security Copilot Agents + MCP Server (GA 2025)
+CrowdStrike Charlotte AI: Natural language → structured queries, 40 hrs/week saved
+Palo Alto XSIAM: AgentiX framework for conversational SOC operations
+We have ARIA in the background but zero conversational interface. Analysts must manually navigate pages, filter tables, and remember query syntax. Adding a floating "Ask ARIA" copilot panel transforms the platform into a genuinely next-generation AI SOC experience.
+
+Done looks like
+A floating "Ask ARIA" button (bottom-right corner) visible on every page in the platform
+Clicking it opens a sleek slide-in chat panel (dark glass morphism style)
+Analyst types a natural-language question; ARIA responds with a structured answer, stats, and action links
+Example questions ARIA can handle:
+"How many critical incidents do we have open this week?"
+"Show me the top MITRE techniques used against PKF Africa"
+"What is our average MTTR for high-severity incidents this month?"
+"Which users have the highest risk score in the last 7 days?"
+"List all IOCs observed in the last 24 hours"
+"Are there any unresolved SLA breaches on tickets?"
+ARIA response includes: prose summary + formatted data table or metric cards + clickable action links (e.g. "View Incidents →")
+Quick prompt chips shown when chat is empty: "Today's briefing", "Top threats", "MITRE coverage", "Open incidents", "SLA status"
+Conversation history persists for the session
+Context-aware: ARIA knows which tenant is active and the user's role
+Loading shimmer while ARIA is generating a response
+Error handling if AI provider is unavailable (graceful fallback message)
+Out of scope
+Multi-turn memory across sessions (session-scoped only)
+Voice input / speech-to-text
+ARIA taking autonomous actions (read-only queries only in this task)
+Modifying data via the chat panel
+A dedicated /copilot page (embedded panel only)
+Tasks
+Backend: Intent router + query dispatcher — Create server/aria-copilot.ts with an intent classification layer (uses OpenAI) that maps natural-language queries to one of ~15 structured handlers (incidents summary, MITRE stats, IOC list, MTTR metrics, user risk scores, ticket SLAs, etc.). Each handler queries the DB via storage and formats a structured JSON response with answer (prose), data (table rows or metric cards), and links (route shortcuts).
+
+Backend: REST endpoint — Add POST /api/copilot/query to server/routes.ts that accepts { question: string, tenantId: number }, calls the intent router, and streams/returns the ARIA response. Rate-limited to 20 req/min per user. Requires auth.
+
+Frontend: AriaCopilot component — Create client/src/components/aria-copilot.tsx as a floating panel: a circular glowing button bottom-right; clicks toggle a 420px-wide slide-in glass-morphism panel. Panel has a header with ARIA logo + "Online" status dot, message thread, input textarea, and send button. Messages styled as chat bubbles (user = right/blue, ARIA = left/dark). ARIA responses render markdown-lite: bold headings, inline metric badges, and link buttons.
+
+Frontend: Data renderers in ARIA — ARIA responses can include a data.type field: "metrics" renders a 2-column stat grid (number + label cards), "table" renders a compact dark-themed table, "links" renders action button chips. These are rendered below the prose in the ARIA message bubble.
+
+Frontend: Quick-prompt chips — When the chat is empty, show 5 clickable chip buttons ("Today's briefing", "Top threats this week", "Open critical incidents", "MITRE coverage gap", "SLA status") that auto-fill the input. These contextually change based on the current page.
+
+Global mount — Mount <AriaCopilot /> in client/src/App.tsx outside the router so it persists across all page navigations. Z-index above page content but below modals.
+
+Relevant files
+client/src/App.tsx server/routes.ts server/ai-soc-analyst.ts server/ai-provider.ts server/storage.ts client/src/lib/tenant-context.tsx

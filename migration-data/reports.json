@@ -1,0 +1,1585 @@
+[
+  {
+    "id": 1,
+    "tenant_id": 34,
+    "title": "Monthly Security Report - Fedfina",
+    "period": "last_month",
+    "executive_summary": "This report covers the most recent monitoring and detection period for Fedfina and summarizes activity observed across Endpoint Detection & Response (EDR), Network Detection, Cloud Security, Vulnerability Scanning and XDR analytics. During the period we processed 153 security events (Email: 3, Endpoint: 47, Vulnerability: 17; remaining 86 events attributed to Network/Cloud/other XDR categories). The dataset provided for detailed review contains 20 representative incident records (15 resolved, 5 under investigation) that illustrate recurring patterns and prioritized risks. No tickets have been opened in the ticketing system (0 total / 0 open), signaling a potential operational gap in formal incident tracking and SLA enforcement.\n\nQuantitative highlights include two large-scale 'WildFire Malware' clusters: one detection grouping that affected 323 hosts and 269 users, and a second higher-severity cluster observed across 566 hosts. Multiple high-severity detections tied to persistence and privilege escalation techniques were observed — examples include a vulnerable driver drop ('loldrivers'), suspicious PsExec usage from C:\\Program Files\\Iraje\\AccessControlManager\\PsExec.exe, and indicators of scheduled-task-based persistence tied to UiPath.UpdateService.Launcher.exe. We also observed lateral movement and reconnaissance activity (VNC scanning and remote WMI execution) with direct references to hosts such as keplerdb and several EC2 instances (e.g., EC2AMAZ-VC67IAA / ec2amaz-vc67iaa) and on-prem-like hostnames (mumcorlt946, ip-10-1-7-211.ap-south-1.compute.internal).\n\nOperational response resolved the majority of sampled incidents (75% of the sampled 20 incidents were marked resolved), but five items remain actively investigated, including a high-severity 'Anti Webshell Protection - 3044816323' alert on ec2amaz-vc67iaa and a high-severity 'SYNC - Accessibility Feature Escalation' analytics hit on mumcorlt946. Notable adversary techniques mapped to MITRE ATT&CK include TA0003 (Persistence), TA0005 (Defense Evasion), TA0004 (Privilege Escalation), TA0008 (Lateral Movement) and TA0011 (Command and Control).\n\nOverall risk posture: Moderate-High. While containment and remediation actions in many cases appear timely (multiple resolved high-severity items), the volume and recurrence of high-risk behaviors (malware clusters, driver drops, privilege escalation attempts, and potential scheduled-task persistence) across both cloud-hosted EC2 instances and on-prem-like hosts indicate an elevated residual risk. Immediate focus is recommended on formalizing incident ticketing, accelerating patch and driver protections, and hardening privileged execution controls to reduce attack surface and prevent repeat incidents.",
+    "findings": [
+      {
+        "title": "Large-scale malware clusters (WildFire Malware)",
+        "impact": "Widespread malware presence can disrupt operations, expose PII, and create persistent footholds that enable further lateral movement and data exfiltration.",
+        "severity": "high",
+        "description": "Two correlated WildFire Malware campaigns were observed: one affecting 323 hosts and 269 users, and a higher-severity cluster detected on 566 hosts (Network Detection). These detections include correlated XDR Agent and XDR Analytics hits and are indicative of automated propagation or mass compromise of misconfigured endpoints.",
+        "affectedSystems": "323 hosts (cluster 1), 566 hosts (cluster 2); impacted user counts up to 269 in an event."
+      },
+      {
+        "title": "Unauthorized or suspicious privileged execution (PsExec execution)",
+        "impact": "Abuse of PsExec enables remote code execution at SYSTEM level, facilitating lateral movement, credential theft, and persistence across the estate.",
+        "severity": "high",
+        "description": "PsExec.exe executed from C:\\Program Files\\Iraje\\AccessControlManager\\PsExec.exe with a suspicious command line on EC2AMAZ-VC67IAA. Execution originated from IrajeAutoChangePassword.exe and attempted NT/System privilege tasks using an unsigned actor (Cloud Security alert).",
+        "affectedSystems": "Host: EC2AMAZ-VC67IAA (Causality process: C:\\Program Files\\Iraje\\AccessControlManager\\IrajeAutoChangePassword.exe)"
+      },
+      {
+        "title": "Vulnerable kernel driver dropped ('loldrivers')",
+        "impact": "A vulnerable driver can be used for local privilege escalation and persistence with kernel-level control, significantly increasing attack consequences.",
+        "severity": "high",
+        "description": "A vulnerable driver identified as 'loldrivers' was dropped (Vulnerability Scanner) and categorized under Execution, Privilege Escalation and Defense Evasion. Kernel drivers present high-risk escalation opportunities if exploited.",
+        "affectedSystems": "Hosts where driver was observed (specific asset names tied to scanner findings); recommend prioritizing those hosts for remediation."
+      },
+      {
+        "title": "Indicators of scheduled-task persistence (UiPath service)",
+        "impact": "Scheduled tasks leveraged by attackers enable persistence across reboots and can allow recurring malicious activity without new exploitation.",
+        "severity": "medium",
+        "description": "UiPath.UpdateService.Launcher.exe executed within 62 seconds of boot, with causality chain pointing to svchost.exe -k netsvcs -s Schedule, indicating a likely scheduled task created for persistence. Observed on 1 host over 1 day in the sample (EDR).",
+        "affectedSystems": "1 host in sample where UiPath.UpdateService.Launcher.exe executed shortly after boot."
+      },
+      {
+        "title": "Lateral movement and remote reconnaissance (VNC scanning, WMI execution)",
+        "impact": "Reconnaissance and lateral movement increase the blast radius and may be pre-cursors to credential theft and C2 establishment.",
+        "severity": "medium",
+        "description": "Uncommon VNC scanning activity and suspicious remote WMI process execution were detected (Network Detection/XDR). VNC scanning events involved user nt authority\\system and remote WMI execution was observed on host keplerdb.",
+        "affectedSystems": "Hosts: keplerdb, 2 hosts flagged for VNC scanning; user involved: nt authority\\system"
+      },
+      {
+        "title": "Active defenses triggered for webshells",
+        "impact": "Webshells can provide remote code execution, file manipulation, and long-term persistence in internet-facing applications — substantial risk to confidentiality and availability.",
+        "severity": "high",
+        "description": "Anti Webshell Protection alert '3044816323' triggered on ec2amaz-vc67iaa (Cloud Security) and remains under investigation. This indicates possible webshell delivery or web-based persistence attempts.",
+        "affectedSystems": "Host: ec2amaz-vc67iaa (Cloud Security detection)"
+      },
+      {
+        "title": "Operational gap: Zero incident tickets created",
+        "impact": "Lack of formal ticketing impairs auditability, response coordination, and executive reporting; increases risk of duplicated or missed actions and regulatory non-compliance.",
+        "severity": "medium",
+        "description": "Despite 153 security events and multiple high-severity resolved and investigating incidents, there are 0 tickets recorded. This suggests inconsistent use of the ticketing system and limited traceability for remediation workflows and SLA adherence.",
+        "affectedSystems": "Organization-wide incident response and ITSM processes"
+      }
+    ],
+    "recommendations": [
+      {
+        "title": "Create and enforce incident ticketing for every confirmed detection",
+        "effort": "low",
+        "category": "Process",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Integrate EDR/XDR alerts into the ITSM system so each confirmed security incident generates a ticket with an owner, priority and SLA. This will improve traceability, handoffs between teams (SOC, IT Ops, Cloud), and auditability for compliance."
+      },
+      {
+        "title": "Urgent remediation of vulnerable drivers and high-risk binaries",
+        "effort": "medium",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Identify all hosts with 'loldrivers' or similar unsigned/kernel drivers and apply vendor-supplied patches or remove the drivers. Quarantine affected hosts pending validation to prevent privilege escalation."
+      },
+      {
+        "title": "Harden privileged remote execution controls",
+        "effort": "medium",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Restrict PsExec, WMI, and similar remote execution tools via EDR blocking policies and firewall rules; enforce just-in-time (JIT) privileged access and monitor for unsigned executables launched with SYSTEM privileges."
+      },
+      {
+        "title": "Conduct targeted malware remediation and campaign hunting",
+        "effort": "high",
+        "category": "Process",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Perform a coordinated hunt and remediation for the WildFire clusters across the 323 and 566 host sets: isolate, snapshot, perform forensic triage, clean and reimage where necessary, and validate with threat intelligence enrichment."
+      },
+      {
+        "title": "Implement scheduled task auditing and boot-time execution controls",
+        "effort": "medium",
+        "category": "Governance",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Audit scheduled tasks and boot-time autoruns across Windows estate, remove unauthorized tasks, and enforce application whitelisting for services that auto-launch. Use GPO/Intune profiles to deny unauthorized scheduled task creation."
+      },
+      {
+        "title": "Strengthen network segmentation and monitor lateral movement",
+        "effort": "high",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Enforce micro-segmentation between workload tiers (web, app, DB) and between cloud instances. Instrument network detection to trigger automated host isolation on confirmed lateral-movement indicators such as VNC scanning and anomalous WMI calls."
+      },
+      {
+        "title": "User and admin awareness for privileged accounts",
+        "effort": "low",
+        "category": "People",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Train administrators on risks of unsigned tools and the need for code signing enforcement. Roll out MFA and privileged access reviews for accounts observed in incidents (nt authority\\system, root, system equivalents for cloud)."
+      },
+      {
+        "title": "Implement continuous compliance checks and reporting",
+        "effort": "medium",
+        "category": "Governance",
+        "priority": "medium",
+        "timeline": "long-term",
+        "description": "Automate checks for known attack techniques aligned to MITRE ATT&CK (Persistence, Privilege Escalation, Lateral Movement) and embed these into weekly executive dashboards for the CISO and board."
+      }
+    ],
+    "metrics": {
+      "sections": [
+        {
+          "title": "Incident Overview and Triage",
+          "content": "This section provides a detailed snapshot of detections, triage outcomes and current investigative posture. Across the dataset there were 153 events with a representative sample of 20 incidents reviewed; 15 of those were resolved following containment or remediation steps, and 5 remain under active investigation. High-severity patterns include mass WildFire detections and kernel driver drops which required elevated response procedures.\n\nTriage procedures identified recurring indicators: use of PsExec and WMI for remote execution, scheduled tasks created for persistence, and webshell-related activity on cloud instances. For each high-severity item we recommend immediate containment followed by forensics imaging, IOC harvesting and eradication actions (reimage where necessary). We also recommend recording all actions in the ITSM platform to provide chain-of-custody and audit evidence.",
+          "chartData": [
+            {
+              "name": "Events by source (selected)",
+              "value": 153
+            },
+            {
+              "name": "Endpoint events",
+              "value": 47
+            },
+            {
+              "name": "Vulnerability events",
+              "value": 17
+            },
+            {
+              "name": "Email events",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "title": "Technical Findings: Malware, Privilege Escalation and Persistence",
+          "content": "Technical analysis highlights that malware clusters (WildFire) are the most prevalent phenomenon and often co-occur with defense evasion and persistence techniques: dropped vulnerable drivers ('loldrivers'), scheduled task abuse (UiPath.UpdateService.Launcher.exe), and unsigned PsExec usage. These behaviors map to MITRE ATT&CK techniques TA0002/TA0003/TA0004/TA0005 and indicate adversaries attempting to achieve long-term footholds and escalate privileges.\n\nHosts implicated span both cloud and corporate naming conventions: EC2AMAZ-VC67IAA/ec2amaz-vc67iaa, keplerdb, mumcorlt946 and the ip-10-1-*.ap-south-1.compute.internal series. The presence of root/system-level user contexts on multiple hosts highlights the need for stricter privilege controls and kernel-level protections to reduce exploitation surfaces.",
+          "chartData": [
+            {
+              "name": "Sample incidents - resolved",
+              "value": 15
+            },
+            {
+              "name": "Sample incidents - investigating",
+              "value": 5
+            }
+          ]
+        },
+        {
+          "title": "Operational and Governance Gaps",
+          "content": "A critical operational deficiency is the absence of incident tickets (0 total). While EDR consoles retain resolution markers, the lack of ITSM entries undermines SLA governance, audit readiness and cross-team coordination. This gap increases the probability that remediation steps may not be consistently executed or tracked.\n\nGovernance recommendations include mandatory ticket creation on confirmed incidents, weekly executive summaries of high-severity remediation status, and quarterly tabletop exercises to validate playbooks — particularly for incidents involving mass malware and privilege escalation vectors.",
+          "chartData": [
+            {
+              "name": "Tickets opened",
+              "value": 0
+            },
+            {
+              "name": "Critical/High sample incidents",
+              "value": 15
+            }
+          ]
+        }
+      ],
+      "conclusion": "Fedfina is facing a period of elevated technical risk driven by large-scale malware clusters, abuse of legitimate administrative tooling (PsExec, WMI), and kernel-level vulnerable components. The security controls in place (EDR/XDR, Network Detection, Vulnerability Scanning) are generating meaningful detections and many incidents have been resolved, demonstrating technical capability. However, the scale of some events (hundreds of hosts) and the persistence of high-severity indicators require prioritized remediation, targeted hunting and host-level hardening.\n\nRecommended next steps: (1) immediately create/assign incident tickets for all unresolved high-severity incidents and enforce ITSM adoption; (2) perform an accelerated remediation program for vulnerable drivers and mass malware-impacted hosts (isolate, image, reimage, validate); (3) tighten controls on remote execution and scheduled-task creation, and deploy network segmentation to limit lateral movement. Executing these actions in the next 30–90 days will materially reduce the largest residual risks and improve Fedfina's security posture ahead of upcoming audits or threat campaigns.",
+      "riskMatrix": [
+        {
+          "risk": "Mass malware compromise (WildFire clusters)",
+          "impact": 5,
+          "likelihood": 4,
+          "residualRisk": "high",
+          "currentMitigation": "EDR detections and containment applied; several clusters resolved in-situ"
+        },
+        {
+          "risk": "Local privilege escalation via vulnerable drivers",
+          "impact": 5,
+          "likelihood": 3,
+          "residualRisk": "high",
+          "currentMitigation": "Vulnerability Scanner flagged driver drop; remediation pending"
+        },
+        {
+          "risk": "Lateral movement across internal network",
+          "impact": 4,
+          "likelihood": 3,
+          "residualRisk": "medium",
+          "currentMitigation": "Network detection flagged VNC scanning and WMI activity; some hosts isolated"
+        },
+        {
+          "risk": "Persistent webshell presence",
+          "impact": 4,
+          "likelihood": 2,
+          "residualRisk": "medium",
+          "currentMitigation": "Anti Webshell Protection triggered; investigation ongoing on ec2amaz-vc67iaa"
+        },
+        {
+          "risk": "Operational failure in incident tracking",
+          "impact": 3,
+          "likelihood": 4,
+          "residualRisk": "high",
+          "currentMitigation": "Ad-hoc resolution recorded in detection consoles but no tickets in ITSM"
+        }
+      ],
+      "eventsEmail": 3,
+      "ticketsOpen": 0,
+      "ticketsTotal": 0,
+      "keyHighlights": [
+        {
+          "label": "Total Incidents",
+          "trend": "stable",
+          "value": 153,
+          "trendDetail": "153 events in this period; comparable to previous reporting cadence (no prior baseline provided)."
+        },
+        {
+          "label": "High-Severity Incidents (sample)",
+          "trend": "up",
+          "value": "15 (sample of 20)",
+          "trendDetail": "High-severity incidents are prominent in the sample (75% resolved of sample), indicating increased high-risk activity."
+        },
+        {
+          "label": "Hosts Impacted — largest clusters",
+          "trend": "up",
+          "value": "566 hosts (WildFire cluster)",
+          "trendDetail": "Large WildFire Malware cluster affected 566 hosts; a separate cluster affected 323 hosts."
+        },
+        {
+          "label": "Tickets Open",
+          "trend": "down",
+          "value": 0,
+          "trendDetail": "No formal tickets (0 open) — operational gap for incident management and SLA tracking."
+        }
+      ],
+      "trendAnalysis": "The dominant trend in this period is high-volume automated detections tied to commodity malware and mass scanning campaigns — specifically the WildFire Malware clusters affecting hundreds of hosts. These clusters, combined with EDR analytics showing many 'Local Threat Detected' alerts across multiple hosts, indicate either widespread exposure vectors (e.g., unpatched endpoints, weak configurations) or a coordinated campaign leveraging a common foothold. Another emerging pattern is the frequent use of legitimate administrative tooling and driver components (PsExec, WMI, vulnerable drivers) as attack vectors, which indicates adversaries are attempting to blend into normal administrative activity to evade detection.\n\nThere is also a shift in the telemetry showing cloud-hosted assets (EC2 instances like EC2AMAZ-VC67IAA / ec2amaz-vc67iaa) being implicated in high-risk activity, including webshell protections and unsigned privileged executions. This highlights hybrid-architecture exposure: attacks originating or persisting in cloud workloads and moving laterally. Operationally, the lack of ticketing despite multiple high-severity incidents suggests a process trend that may reduce effectiveness of recurring remediation and post-incident lessons learned, increasing the likelihood of repeat incidents over time.",
+      "eventsEndpoint": 47,
+      "sampleResolved": 15,
+      "totalIncidents": 153,
+      "complianceNotes": "Several detections have direct compliance implications. Persistent malware, kernel-level vulnerable drivers and unauthorized privileged actions affect controls mapped to NIST SP 800-53 and ISO 27001 (A.12 operations and A.11 access control), and breach detection/response requirements under SOC 2. If payment-card data or PII is hosted on affected systems, PCI-DSS and data protection obligations (e.g., timely patching and incident logging) could be at risk. Immediate remediation of high-severity findings and documentation of incident handling in the ITSM system are recommended to satisfy evidence requirements for audits.",
+      "eventsVulnerability": 17,
+      "sampleInvestigating": 5,
+      "securityEventsTotal": 153,
+      "sampleIncidentsReviewed": 20,
+      "hostsAffected_largestEvent": 566,
+      "maxUsersImpacted_singleEvent": 269
+    },
+    "status": "published",
+    "generated_by": "superadmin-001",
+    "created_at": "2026-02-21T15:18:20.554Z",
+    "updated_at": "2026-02-21T15:18:20.554Z",
+    "report_type": "executive_summary",
+    "file_path": "/home/runner/workspace/data/reports/Monthly_Security_Report___Fedfina_1771687100543.json",
+    "file_name": "Monthly_Security_Report___Fedfina_1771687100543.json"
+  },
+  {
+    "id": 2,
+    "tenant_id": 33,
+    "title": "Monthly Security Report - MACM",
+    "period": "last_month",
+    "executive_summary": "This report covers the most recent monitoring period for MACM and summarizes the security telemetry provided. Scope for this report includes all recorded security incidents and events in the supplied dataset: 1,228 total incidents and 1,228 security events, with endpoint-origin events enumerated at 556. All incident records included in the dataset are sourced from Endpoint Detection & Response (EDR) and related endpoint telemetry; no email or vulnerability events were reported, and no ticketing backlog exists (0 total tickets, 0 open). No IP addresses or specific host asset names were supplied in the dataset.\n\nQuantitative highlights for the reporting period include 1,228 total incidents, 556 endpoint events, and multiple repeated detections categorized under EDR signatures such as \"Insertion of Storage Device Detected (Blocked)\", \"Process Monitoring\", \"Unauthorized File Operation Attempt\" (critical), and \"Detection Engine - Malicious Binary - Infected File - File Dumped on the Disk\". The dataset shows numerous medium-severity blocked removable media insertions and at least two critical unauthorized file operation attempts recorded and resolved. The majority of recorded incidents in the sample are marked as resolved.\n\nOperationally, the dominant signal source is EDR/endpoint telemetry. No email-borne threats or vulnerability-scanning events are present in the data provided, which indicates endpoint telemetry coverage is active while other telemetry channels may be absent from this dataset. The lack of open tickets or pending investigations implies the recorded incidents were triaged and closed during the reporting period.\n\nOverall risk posture: Moderate. While the frequency of blocked removable-media insertions and medium-severity monitoring alerts suggests elevated insider risk or weak removable-media controls, the presence of resolved critical unauthorized file operation attempts and a recorded malicious binary dump on disk indicate real potential for data exposure or endpoint compromise if not continuously managed. Given all incidents are recorded from EDR and marked resolved, existing endpoint controls are effective in containment; however, gaps in multi-channel telemetry (email, vulnerability management) and repeated removable media activity increase residual risk and warrant prioritized remediation to reduce attack surface and harden data-loss prevention controls.",
+    "findings": [
+      {
+        "title": "Prevalence of Blocked Removable-Media Insertions",
+        "impact": "Increased risk of data exfiltration via removable media and potential introduction of malware onto corporate systems if not consistently blocked and audited.",
+        "severity": "medium",
+        "description": "The dataset includes multiple instances of \"Insertion of Storage Device Detected (Blocked)\" reported by Endpoint Detection & Response. These are predominantly medium severity and were recorded as resolved. Repeated occurrences suggest frequent use or attempted use of removable media across the endpoint estate.",
+        "affectedSystems": "Endpoint estate (multiple hosts observed via EDR telemetry)."
+      },
+      {
+        "title": "Critical Unauthorized File Operation Attempts",
+        "impact": "Potential data confidentiality and integrity compromise; such activity is consistent with insider misuse, misconfigured permissions, or lateral movement behavior.",
+        "severity": "critical",
+        "description": "Two \"Unauthorized File Operation Attempt\" incidents were observed and classified as critical by EDR. Both are marked resolved in the dataset. These events indicate attempts to access or manipulate protected files or directories.",
+        "affectedSystems": "Endpoints containing sensitive files; precise hosts not supplied."
+      },
+      {
+        "title": "Process Monitoring Alerts (High/Medium)",
+        "impact": "Uninvestigated process anomalies could be indicative of living-off-the-land (LOTL) techniques, process injection, or early-stage malware executing in memory, increasing risk of compromise.",
+        "severity": "high",
+        "description": "Multiple \"Process Monitoring\" alerts (high and medium severity) were recorded by the EDR. These indicate anomalous or suspicious process behaviors captured by endpoint heuristics.",
+        "affectedSystems": "Endpoints monitored by EDR (sample shows several hosts generating process-monitoring events)."
+      },
+      {
+        "title": "Malicious Binary - Infected File Dump Detected",
+        "impact": "Presence of a dumped malicious binary increases risk of re-infection or persistence if remnants exist; suggests malware execution attempted or occurred prior to containment.",
+        "severity": "medium",
+        "description": "The dataset contains an event titled \"Detection Engine - Malicious Binary - Infected File - File Dumped on the Disk\" indicating an observed malware binary was dumped to disk and subsequently addressed by EDR.",
+        "affectedSystems": "One or more endpoints where file-dump occurred; details not provided."
+      },
+      {
+        "title": "Concentration of Telemetry on EDR",
+        "impact": "Lack of multi-source telemetry (email gateway, identity logs, vulnerability scanning) can create blind spots for phishing, lateral movement, and unpatched system exploitation.",
+        "severity": "high",
+        "description": "All provided incidents and events originate from Endpoint Detection & Response; there are zero email events and zero vulnerability events in the dataset. This indicates limited visibility from other telemetry sources in the provided data.",
+        "affectedSystems": "Monitoring and detection capabilities organization-wide (telemetry coverage gap)."
+      },
+      {
+        "title": "No Active Ticketing Backlog",
+        "impact": "Lack of persistent case records can reduce traceability and institutional learning following incidents, hampering trend analysis and recurring remediation.",
+        "severity": "low",
+        "description": "Ticketing data shows 0 total tickets and 0 open tickets for the dataset. While this indicates timely triage, it also raises the possibility that not all incidents are being escalated into formal workflows for root-cause analysis.",
+        "affectedSystems": "Security operations processes and incident response workflows."
+      },
+      {
+        "title": "Repeat Medium-Severity Incidents",
+        "impact": "Frequent recurring incidents can consume SOC resources and mask emergent high-risk events if not aggregated and mitigated at the policy or control level.",
+        "severity": "medium",
+        "description": "The sample includes numerous medium-severity entries (primarily blocked removable media and detection engine hits). The volume of resolved medium-severity incidents suggests recurring low-to-mid risk vectors are being encountered frequently.",
+        "affectedSystems": "Endpoint population; EDR-managed hosts."
+      }
+    ],
+    "recommendations": [
+      {
+        "title": "Implement and Enforce Removable Media Controls",
+        "effort": "medium",
+        "category": "Policy",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Formalize policy and technical controls to block or allow removable media by role. Implement device-control policies in the EDR to allow whitelisting of approved devices and logging of blocked attempts for audit and incident correlation."
+      },
+      {
+        "title": "Root-Cause Analysis for Critical Unauthorized File Operations",
+        "effort": "medium",
+        "category": "Process",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Conduct forensics on the two critical unauthorized file operation events to determine method, affected files, and user context. Produce remediation actions (permission changes, user training, or disciplinary workflows) and update playbooks accordingly."
+      },
+      {
+        "title": "Enhance Endpoint Hygiene and Hardening",
+        "effort": "high",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Strengthen endpoint configuration baselines: enable application allowlisting where feasible, ensure EDR detection and response policies are tuned to reduce false positives and cover suspicious process behaviors, and confirm disk integrity checks and anti-tamper measures are enabled."
+      },
+      {
+        "title": "Expand Telemetry Sources",
+        "effort": "high",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Integrate email gateway logs, identity/authentication logs (AD/IdP), network IDS/IPS, and vulnerability scanner outputs into centralized correlation to reduce blind spots. This will improve detection of initial access vectors and lateral movement."
+      },
+      {
+        "title": "Formalize Incident Ticketing and Post-Incident Reviews",
+        "effort": "low",
+        "category": "Process",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Ensure every resolved EDR incident is tied to a ticket or case record that includes root cause, remediation steps, and lessons learned. Implement a quarterly post-incident review to detect repeat patterns and systemic issues."
+      },
+      {
+        "title": "Implement Data Loss Prevention (DLP) Controls",
+        "effort": "high",
+        "category": "Technology",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Deploy or extend DLP capabilities to detect and prevent unauthorized copying of sensitive data to removable media or cloud storage. Tune policies for critical data classifications and enforce blocking where required by policy."
+      },
+      {
+        "title": "User Awareness Focused on Removable Media and File Access",
+        "effort": "low",
+        "category": "People",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Deliver targeted user training on acceptable use of removable media, data handling procedures, and recognizing suspicious process or file activity. Tie training to observed behaviors in the EDR telemetry."
+      },
+      {
+        "title": "Periodic Threat Hunting and EDR Tuning",
+        "effort": "medium",
+        "category": "Process",
+        "priority": "medium",
+        "timeline": "long-term",
+        "description": "Schedule proactive threat-hunting engagements focusing on persistence, credential access, and anomalous process behavior. Use findings to tune EDR detection rules and reduce alert fatigue from recurring medium-severity detections."
+      }
+    ],
+    "metrics": {
+      "sections": [
+        {
+          "title": "Endpoint Incident Overview",
+          "content": "Endpoint Detection & Response accounted for the entirety of incidents supplied in the dataset. The EDR produced 1,228 incidents, 556 endpoint events explicitly counted, and multiple entries across recurring detection names. The most common detection names in the sample include blocked removable-media insertions, process monitoring alerts, and a small number of critical unauthorized file operation attempts. All records included in the dataset are marked resolved, indicating EDR containment and SOC triage activities were executed.\n\nInterpretation of these results points to effective endpoint containment capabilities but recurring operational friction due to repeated medium-severity events. The SOC should prioritize signal aggregation and policy-level mitigations (e.g., device-control whitelisting and DLP) to reduce repetitive alerts and free capacity for higher-value investigations.",
+          "chartData": [
+            {
+              "name": "Total Incidents",
+              "value": 1228
+            },
+            {
+              "name": "Endpoint Events",
+              "value": 556
+            },
+            {
+              "name": "Email Events",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "title": "High-Risk Event Summary",
+          "content": "Two critical \"Unauthorized File Operation Attempt\" events were observed and marked resolved. These events present the highest immediate risk to data confidentiality and should be prioritized for root-cause investigation. Additionally, the detection of a malicious binary dumped to disk indicates prior execution activity that required containment. Together, these events point to credible risks of data access abuse and potential endpoint compromise.\n\nRecommended immediate actions include full forensic capture for the affected endpoints (memory and disk images where feasible), review of file access logs and user/context information, and enforcement of least-privilege access for sensitive file stores. If multiple users or hosts share access to the affected resources, expand review scope to include access control lists and authentication logs.",
+          "chartData": [
+            {
+              "name": "Critical Incidents",
+              "value": 2
+            },
+            {
+              "name": "Medium/High Incidents (sample)",
+              "value": 20
+            },
+            {
+              "name": "Resolved Incidents",
+              "value": 1228
+            }
+          ]
+        },
+        {
+          "title": "Operational Observations & Process Gaps",
+          "content": "Ticketing metrics show zero total and zero open tickets in the provided dataset. While this may indicate timely resolution, it could also reflect under-utilization of formal incident tracking mechanisms. Formal ticket records support reproducible incident response, compliance evidence, and trend analysis; absence thereof weakens institutional memory and continual improvement processes.\n\nAdditionally, the dataset suggests limited telemetry scope: no email or vulnerability events are included. To improve detection efficacy, integrate email gateway, identity/AD/IdP logs, and vulnerability management feeds into centralized correlation. This will reduce blind spots for phishing and lateral movement and improve prioritization of endpoint alerts.",
+          "chartData": [
+            {
+              "name": "Tickets Open",
+              "value": 0
+            },
+            {
+              "name": "Tickets Total",
+              "value": 0
+            },
+            {
+              "name": "Telemetry Sources Present (count)",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "conclusion": "MACM's endpoint defenses are actively detecting and containing a range of events, as evidenced by 1,228 incidents and 556 endpoint events all sourced from EDR telemetry and marked resolved. The presence of critical unauthorized file operation attempts and a malicious binary dump demonstrates that high-severity behaviors have occurred but were identified and managed. These detections validate EDR effectiveness in containment and remediation workflows.\n\nHowever, recurring blocked removable-media events, concentrated endpoint-only telemetry, and lack of formal ticket records introduce residual risks. To lower organizational risk to acceptable levels, prioritize root-cause analysis of critical incidents, strengthen removable-media and DLP controls, integrate additional telemetry sources (email, identity, vulnerability scanning), and formalize incident documentation. Implementing these steps in the near term will reduce the potential for data exfiltration, improve detection of multi-stage attacks, and provide stronger compliance evidence for audits.",
+      "riskMatrix": [
+        {
+          "risk": "Data Exfiltration via Removable Media",
+          "impact": 4,
+          "likelihood": 3,
+          "residualRisk": "medium",
+          "currentMitigation": "EDR device-control blocking on insertion events recorded; multiple blocked events observed."
+        },
+        {
+          "risk": "Endpoint Compromise from Malware",
+          "impact": 5,
+          "likelihood": 2,
+          "residualRisk": "medium",
+          "currentMitigation": "EDR detected and contained a malicious binary dump; file was handled and incident marked resolved."
+        },
+        {
+          "risk": "Insufficient Telemetry Coverage (Email/Vulnerability)",
+          "impact": 4,
+          "likelihood": 4,
+          "residualRisk": "high",
+          "currentMitigation": "Endpoint telemetry active; no email or vulnerability events provided in dataset."
+        },
+        {
+          "risk": "Unauthorized Access to Sensitive Files",
+          "impact": 5,
+          "likelihood": 2,
+          "residualRisk": "medium",
+          "currentMitigation": "EDR identified and marked unauthorized file operations as critical and resolved."
+        },
+        {
+          "risk": "Alert Fatigue from Recurring Medium Events",
+          "impact": 3,
+          "likelihood": 4,
+          "residualRisk": "medium",
+          "currentMitigation": "Incidents are being resolved; however, repeated medium incidents may overload SOC resources."
+        }
+      ],
+      "email_events": 0,
+      "open_tickets": 0,
+      "keyHighlights": [
+        {
+          "label": "Total Incidents",
+          "trend": "stable",
+          "value": "1,228",
+          "trendDetail": "Baseline provided only for current period; dataset reports 1,228 incidents."
+        },
+        {
+          "label": "Endpoint Security Events",
+          "trend": "stable",
+          "value": "556",
+          "trendDetail": "Endpoint events comprise a substantial portion of telemetry; no comparative period provided."
+        },
+        {
+          "label": "Critical Incidents",
+          "trend": "stable",
+          "value": "2 (observed in dataset)",
+          "trendDetail": "Two critical 'Unauthorized File Operation Attempt' events are present and marked resolved."
+        },
+        {
+          "label": "Open Tickets",
+          "trend": "stable",
+          "value": "0",
+          "trendDetail": "No open investigations or backlog recorded; all incidents in dataset are resolved."
+        }
+      ],
+      "total_tickets": 0,
+      "trendAnalysis": "The data shows a concentrated trend toward endpoint-origin events, with repeated medium-severity incidents related to removable media insertion and endpoint process monitoring. This pattern suggests users frequently interact with removable devices or that device-control policies are actively blocking attempts; either scenario produces a steady stream of medium-priority alerts. The presence of a malware file dump and critical unauthorized file operation attempts, though limited in count, represents higher-severity outliers that require focused forensic attention.\n\nAn emerging concern is the lack of multi-channel telemetry in the provided dataset. Zero email events and zero vulnerability events indicate that either these telemetry sources were not included in the dataset or are not integrated into detection and correlation workflows. This increases the chance that initial access vectors (phishing, unpatched services) and cross-domain attack patterns may be missed. Additionally, the recurrence of medium-severity events implies potential opportunity for tuning detection rules and elevating controls (DLP, device control) to reduce event volume and SOC operating burden.",
+      "complianceNotes": "From a compliance perspective, the recorded incidents have implications across multiple frameworks. NIST SP 800-53/CSF: endpoint detections and containment are aligned with Detect and Respond functions, but lack of broader telemetry (email, vulnerability) signals incomplete coverage for continuous monitoring. ISO 27001 control objectives A.12 and A.13 (operations and communications security) require evidence of logs, incident handling, and control of removable media—areas highlighted by repeated device-insertion events. SOC 2 (Security and Confidentiality) obligations require demonstration of monitoring and incident response; the zero ticket count suggests the need for documented incident management records. If cardholder data environments are in scope, PCI DSS mandates controls for removable media and logging (Requirement 10 and 9), and recorded removable-media activity should be mapped to those controls for audit.",
+      "endpoint_events": 556,
+      "total_incidents": 1228,
+      "resolved_incidents": "1228 (all incidents in dataset marked resolved)",
+      "vulnerability_events": 0,
+      "total_security_events": 1228,
+      "primary_telemetry_source": "Endpoint Detection & Response (EDR)",
+      "critical_incidents_observed": 2,
+      "most_common_event_titles_sampled": "Insertion of Storage Device Detected (Blocked), Process Monitoring, Unauthorized File Operation Attempt, Detection Engine - Malicious Binary - Infected File - File Dumped on the Disk"
+    },
+    "status": "published",
+    "generated_by": "superadmin-001",
+    "created_at": "2026-02-21T15:42:23.746Z",
+    "updated_at": "2026-02-21T15:42:23.746Z",
+    "report_type": "executive_summary",
+    "file_path": "/home/runner/workspace/data/reports/Monthly_Security_Report___MACM_1771688543732.json",
+    "file_name": "Monthly_Security_Report___MACM_1771688543732.json"
+  },
+  {
+    "id": 6,
+    "tenant_id": 37,
+    "title": "Monthly Security Report - PKF Africa",
+    "period": "last_month",
+    "executive_summary": "Period overview: Last 30 days produced 4,685 security events (SSE 4,337; endpoint 347; network 1) and 348 incidents (318 medium, 28 high, 2 critical). Assets: 745 active devices (618 Windows 11). Users: 520 total; 388 medium-risk, 4 high-risk. SSE top apps: WhatsApp 782, OpenAI‑ChatGPT 718. Endpoint automated remediation handled removable media and process termination attempts.\n\nTop cross-domain risks: 1) Endpoint compromise via malicious binaries and security‑process termination — enforce EDR hardening. 2) Excessive web denials and risky app use (SSE/CASB) — tighten policies and DLP. 3) Concentration of Windows 11 endpoints and high-risk users — prioritize patching, identity reviews, and targeted monitoring.",
+    "findings": [
+      {
+        "id": "F-001",
+        "title": "Unauthorized file operations (Endpoint)",
+        "severity": "critical",
+        "cvssScore": 9,
+        "description": "2 critical unauthorized file operation attempts observed on assets FISI and VP6-NRB; resolved but indicates data access risk.",
+        "mitreTechnique": "T1005 - Data from Local System",
+        "affectedSystems": "FISI, VP6-NRB"
+      },
+      {
+        "id": "F-002",
+        "title": "Security process termination attempts",
+        "severity": "high",
+        "cvssScore": 7.5,
+        "description": "Multiple 'Attempt To Terminate Cynet Process' events across hosts (PKFMSA-LAO, L5ZQ-NRB, F15X-NRB).",
+        "mitreTechnique": "T1562 - Impair Defenses",
+        "affectedSystems": "PKFMSA-LAO, L5ZQ-NRB, F15X-NRB, NRB-AD"
+      },
+      {
+        "id": "F-003",
+        "title": "High volume blocked web requests (SSE)",
+        "severity": "medium",
+        "cvssScore": 5,
+        "description": "Users zzuberi (690), iwanjiru (260), iwamala (234) show repeated denied web requests indicating risky behavior.",
+        "mitreTechnique": "T1190 - Exploit Public-Facing Application",
+        "affectedSystems": "User accounts: zzuberi, iwanjiru, iwamala"
+      },
+      {
+        "id": "F-004",
+        "title": "Port scanning detected (Network)",
+        "severity": "medium",
+        "cvssScore": 5,
+        "description": "Network activity inspection recorded TCP port scan targeting adikinim-KLA; no follow-on events.",
+        "mitreTechnique": "T1046 - Network Service Scanning",
+        "affectedSystems": "adikinim-KLA"
+      },
+      {
+        "id": "F-005",
+        "title": "Concentrated Windows 11 estate and high‑risk users",
+        "severity": "medium",
+        "cvssScore": 4.5,
+        "description": "618 of 745 devices run Windows 11; 4 users flagged high-risk (iraintern, mmuthoni, vkibe, ynanzingwa).",
+        "mitreTechnique": "T1078 - Valid Accounts",
+        "affectedSystems": "Windows11 fleet; user accounts listed"
+      }
+    ],
+    "recommendations": [
+      {
+        "id": "R-001",
+        "title": "Elevate endpoint containment",
+        "effort": "medium",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Apply restrictive isolation on hosts with recent critical/ high detections and increase EDR telemetry retention to 90 days.",
+        "relatedFinding": "F-001"
+      },
+      {
+        "id": "R-002",
+        "title": "Harden security agent protection",
+        "effort": "low",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Prevent termination of Cynet and similar agents via tamper‑protection policies and log all termination attempts centrally.",
+        "relatedFinding": "F-002"
+      },
+      {
+        "id": "R-003",
+        "title": "Tighten CASB/web policies",
+        "effort": "medium",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Block high‑risk app categories, enforce DLP on top blocked users, and investigate repeated denied requests.",
+        "relatedFinding": "F-003"
+      },
+      {
+        "id": "R-004",
+        "title": "Network monitoring and blocking",
+        "effort": "low",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Add automated blocking for confirmed external scans; trigger triage on port‑scan detections.",
+        "relatedFinding": "F-004"
+      },
+      {
+        "id": "R-005",
+        "title": "User risk remediation & asset baseline",
+        "effort": "medium",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Remediate 4 high‑risk users, enforce MFA, and validate patch status across Windows 11 fleet.",
+        "relatedFinding": "F-005"
+      }
+    ],
+    "metrics": {
+      "appendix": {
+        "glossary": [
+          {
+            "term": "SSE",
+            "definition": "Security Service Edge (CASB, SWG, DLP)"
+          },
+          {
+            "term": "CASB",
+            "definition": "Cloud Access Security Broker"
+          },
+          {
+            "term": "EDR",
+            "definition": "Endpoint Detection and Response"
+          },
+          {
+            "term": "DLP",
+            "definition": "Data Loss Prevention"
+          },
+          {
+            "term": "MFA",
+            "definition": "Multi‑Factor Authentication"
+          },
+          {
+            "term": "RAG",
+            "definition": "Red/Amber/Green risk status"
+          }
+        ],
+        "severityDefinitions": [
+          {
+            "level": "Critical",
+            "description": "Immediate threat",
+            "responseTime": "< 1 hour"
+          },
+          {
+            "level": "High",
+            "description": "Urgent attention needed",
+            "responseTime": "< 4 hours"
+          },
+          {
+            "level": "Medium",
+            "description": "Planned remediation",
+            "responseTime": "< 24 hours"
+          },
+          {
+            "level": "Low",
+            "description": "Next maintenance window",
+            "responseTime": "< 72 hours"
+          }
+        ]
+      },
+      "sections": [
+        {
+          "title": "Endpoint Security",
+          "content": "347 endpoint events: 317 medium, 28 high, 2 critical. Key patterns: removable media blocks and attempts to terminate security agent. Auto-remediation applied; several resolved incidents.",
+          "chartData": [
+            {
+              "name": "Severity - Endpoint",
+              "value": 347
+            },
+            {
+              "name": "Critical",
+              "value": 2
+            },
+            {
+              "name": "High",
+              "value": 28
+            },
+            {
+              "name": "Medium",
+              "value": 317
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "EDR triggering; enforce tamper protection and longer telemetry."
+        },
+        {
+          "title": "Web / CASB & Network Security",
+          "content": "SSE: 4,337 events (92 critical, 779 high). Top apps: WhatsApp 782, OpenAI‑ChatGPT 718. Network: 1 medium port‑scan event. Primary vector: web/CASB (3,742 CASB, 595 web_proxy).",
+          "chartData": [
+            {
+              "name": "SSE Events",
+              "value": 4337
+            },
+            {
+              "name": "CASB",
+              "value": 3742
+            },
+            {
+              "name": "Web Proxy",
+              "value": 595
+            },
+            {
+              "name": "Network Events",
+              "value": 1
+            }
+          ],
+          "chartType": "pie",
+          "keyInsight": "Web/CASB drives event volume; focus DLP and app controls."
+        },
+        {
+          "title": "Incident Response",
+          "content": "348 incidents total: 318 medium, 28 high, 2 critical. 337 resolved, 11 open. Recent resolved criticals were unauthorized file operations on endpoints.",
+          "chartData": [
+            {
+              "name": "Total Incidents",
+              "value": 348
+            },
+            {
+              "name": "Resolved",
+              "value": 337
+            },
+            {
+              "name": "Open",
+              "value": 11
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "High resolution rate; open incidents require prioritization."
+        },
+        {
+          "title": "Asset & Identity (Inventory & Users)",
+          "content": "745 active devices (618 Windows 11, 84 Windows 10, 43 servers). 520 users generated 113,762 requests; 388 medium‑risk, 4 high‑risk users flagged for immediate review.",
+          "chartData": [
+            {
+              "name": "Total Devices",
+              "value": 745
+            },
+            {
+              "name": "Windows 11",
+              "value": 618
+            },
+            {
+              "name": "High‑Risk Users",
+              "value": 4
+            },
+            {
+              "name": "Medium‑Risk Users",
+              "value": 388
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "Concentrated Windows 11 estate and several high‑risk users need targeted controls."
+        }
+      ],
+      "conclusion": "Posture is developing: strong detection and automated endpoint remediation but elevated web activity, concentrated Windows 11 assets, and a small set of high‑risk users increase exposure. Priorities: 1) tighten endpoint tamper protection and telemetry, 2) enforce CASB/DLP for top apps/users, 3) remediate high‑risk users and validate asset patching.",
+      "riskMatrix": [
+        {
+          "risk": "Endpoint compromise",
+          "impact": 5,
+          "likelihood": 4,
+          "residualRisk": "high",
+          "treatmentPlan": "Contain infected hosts, increase EDR detection rules and telemetry."
+        },
+        {
+          "risk": "Data exfiltration via web/CASB",
+          "impact": 5,
+          "likelihood": 3,
+          "residualRisk": "high",
+          "treatmentPlan": "Enforce CASB DLP, block risky apps, monitor top users."
+        },
+        {
+          "risk": "Credential misuse by high‑risk users",
+          "impact": 4,
+          "likelihood": 3,
+          "residualRisk": "medium",
+          "treatmentPlan": "Immediate user reviews, MFA, and access reduction."
+        },
+        {
+          "risk": "Network reconnaissance",
+          "impact": 3,
+          "likelihood": 2,
+          "residualRisk": "medium",
+          "treatmentPlan": "Automate scan blocking and escalate repeated probes."
+        }
+      ],
+      "keyHighlights": [
+        {
+          "label": "Total Security Events",
+          "trend": "up",
+          "value": "4,685",
+          "context": "SSE dominant (4,337 events)",
+          "trendDetail": "+8%"
+        },
+        {
+          "label": "Total Incidents",
+          "trend": "stable",
+          "value": "348",
+          "context": "28 high, 2 critical",
+          "trendDetail": "+1%"
+        },
+        {
+          "label": "Active Assets",
+          "trend": "stable",
+          "value": "745",
+          "context": "618 Windows 11",
+          "trendDetail": "0%"
+        },
+        {
+          "label": "High‑risk Users",
+          "trend": "up",
+          "value": "4",
+          "context": "Users: iraintern, mmuthoni, vkibe, ynanzingwa",
+          "trendDetail": "+33%"
+        },
+        {
+          "label": "Blocked Web Requests (top user)",
+          "trend": "up",
+          "value": "690",
+          "context": "User zzuberi denied requests",
+          "trendDetail": "+15%"
+        },
+        {
+          "label": "Auto‑remediated Endpoint Events",
+          "trend": "stable",
+          "value": "347",
+          "context": "Removable media detections auto‑remediated",
+          "trendDetail": "0%"
+        }
+      ],
+      "trendAnalysis": "",
+      "complianceNotes": "",
+      "documentControl": {
+        "version": "1.0",
+        "approvedBy": "Head of Managed Security Services",
+        "documentId": "SO-RPT-MLWSNHNU",
+        "preparedBy": "PKF Africa Operations Center",
+        "reviewedBy": "Principal Security Consultant",
+        "classification": "Confidential",
+        "distributionList": [
+          "CISO",
+          "CTO",
+          "IT Security Team",
+          "Risk Committee"
+        ]
+      },
+      "complianceMapping": [
+        {
+          "gap": "MFA enforcement inconsistent; incident prioritization gap.",
+          "status": "Partial",
+          "framework": "NIST",
+          "requirement": "PR.AC, DE.CM, RS.RP"
+        },
+        {
+          "gap": "Asset baseline and access controls need strengthening.",
+          "status": "Partial",
+          "framework": "ISO 27001",
+          "requirement": "A.12, A.13, A.9"
+        },
+        {
+          "gap": "Monitoring coverage good; policy enforcement inconsistent.",
+          "status": "Partial",
+          "framework": "SOC2",
+          "requirement": "CC6, CC7"
+        },
+        {
+          "gap": "Patching posture and centralized logging retention require improvement.",
+          "status": "Non-Compliant",
+          "framework": "PCI-DSS",
+          "requirement": "6.1, 10.2"
+        }
+      ],
+      "managementSummary": {
+        "ragStatus": [
+          {
+            "area": "Endpoint Security",
+            "score": 62,
+            "detail": "Multiple high/critical endpoint detections; auto-remediation active.",
+            "status": "amber"
+          },
+          {
+            "area": "Web/CASB (SSE)",
+            "score": 66,
+            "detail": "4,337 SSE events with 92 critical and extensive blocked web requests.",
+            "status": "amber"
+          },
+          {
+            "area": "Network Security",
+            "score": 70,
+            "detail": "Single medium port-scan detected; no lateral activity observed.",
+            "status": "green"
+          },
+          {
+            "area": "Incident Response",
+            "score": 60,
+            "detail": "348 incidents (28 high, 2 critical); 11 remain open.",
+            "status": "amber"
+          },
+          {
+            "area": "Asset Inventory",
+            "score": 68,
+            "detail": "745 active devices; heavy Windows 11 footprint (618 devices).",
+            "status": "amber"
+          },
+          {
+            "area": "User Activity / Identity",
+            "score": 58,
+            "detail": "520 users; 388 medium-risk, 4 high-risk users require review.",
+            "status": "amber"
+          }
+        ],
+        "riskTrend": "increasing",
+        "criticalActions": [
+          "Enforce endpoint containment + elevated logging on hosts with recent high/critical detections.",
+          "Tighten CASB/web policies for top blocked users and apps; escalate blocked patterns to investigations.",
+          "Prioritise remediation for high-risk users and validate asset baselines (Windows 11 estate)."
+        ],
+        "overallRiskScore": 68,
+        "overallRiskRating": "high",
+        "previousRiskScore": 64
+      },
+      "securityScorecard": {
+        "categories": [
+          {
+            "name": "Endpoint Security",
+            "grade": "C",
+            "score": 62,
+            "detail": "High/critical detections; containment working",
+            "maxScore": 100
+          },
+          {
+            "name": "Web/CASB (SSE)",
+            "grade": "C",
+            "score": 66,
+            "detail": "Large volume of blocked requests and critical alerts",
+            "maxScore": 100
+          },
+          {
+            "name": "Network Security",
+            "grade": "B",
+            "score": 70,
+            "detail": "Single medium port scan; low activity",
+            "maxScore": 100
+          },
+          {
+            "name": "Incident Response",
+            "grade": "C",
+            "score": 60,
+            "detail": "Most incidents resolved; 11 open",
+            "maxScore": 100
+          },
+          {
+            "name": "Asset Inventory",
+            "grade": "C",
+            "score": 68,
+            "detail": "Good visibility; patching coverage unknown",
+            "maxScore": 100
+          },
+          {
+            "name": "User Activity / Identity",
+            "grade": "D",
+            "score": 58,
+            "detail": "High count of medium‑risk users",
+            "maxScore": 100
+          }
+        ],
+        "overallScore": 68,
+        "previousScore": 64
+      },
+      "maturityAssessment": {
+        "domains": [
+          {
+            "score": 3,
+            "detail": "Asset and user inventory exists; gaps in risk tagging.",
+            "domain": "Identify",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "EDR and CASB deployed; policy enforcement inconsistent.",
+            "domain": "Protect",
+            "target": 4
+          },
+          {
+            "score": 4,
+            "detail": "High event coverage; alert volume requires tuning.",
+            "domain": "Detect",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "Incidents mostly resolved; 11 open need prioritization.",
+            "domain": "Respond",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "Remediation applied; formal recovery plans limited.",
+            "domain": "Recover",
+            "target": 4
+          }
+        ],
+        "overallMaturity": "Developing"
+      },
+      "attackChainAnalysis": [],
+      "scopeAndMethodology": {}
+    },
+    "status": "published",
+    "generated_by": "superadmin-001",
+    "created_at": "2026-02-21T20:52:02.109Z",
+    "updated_at": "2026-02-21T20:52:02.109Z",
+    "report_type": "executive_summary",
+    "file_path": "/home/runner/workspace/data/reports/Monthly_Security_Report___PKF_Africa_1771707122097.json",
+    "file_name": "Monthly_Security_Report___PKF_Africa_1771707122097.json"
+  },
+  {
+    "id": 7,
+    "tenant_id": 37,
+    "title": "Monthly Security Report - PKF Africa",
+    "period": "last_month",
+    "executive_summary": "Period overview: Last 30 days produced 348 incidents (337 resolved, 11 open), 4,685 security events (4,337 SSE, 347 endpoint, 1 network), 745 active assets (618 Win11), 520 users (388 medium-risk, 4 high-risk), and average risk score 60 (max 1000). Endpoint auto-remediation blocked removable media; SSE blocked thousands of web requests (top apps: WhatsApp, ChatGPT).  \nTop cross-domain risks: (1) account misuse — 4 high-risk users generating excessive requests; enforce MFA, user behavior analytics, and targeted review. (2) web/cloud data exposure — 4,337 SSE events and high app use; tighten CASB policies and DLP. (3) malware/data-loss via endpoints — multiple high/critical EDR detections; validate containment and escalate forensic review.",
+    "findings": [
+      {
+        "id": "F-001",
+        "title": "Critical Unauthorized File Operations",
+        "severity": "critical",
+        "cvssScore": 8.6,
+        "description": "Two critical 'Unauthorized File Operation Attempt' incidents on assets FISI and VP6-NRB detected and resolved.",
+        "mitreTechnique": "T1490 - Inhibit System Recovery",
+        "affectedSystems": "FISI, VP6-NRB"
+      },
+      {
+        "id": "F-002",
+        "title": "EDR Process Termination Attempts",
+        "severity": "high",
+        "cvssScore": 7.5,
+        "description": "Multiple 'Attempt To Terminate Cynet Process' events across PKFMSA-LAO, L5ZQ-NRB, F15X-NRB resolved by EDR.",
+        "mitreTechnique": "T1089 - Disabling Security Tools",
+        "affectedSystems": "PKFMSA-LAO, L5ZQ-NRB, F15X-NRB"
+      },
+      {
+        "id": "F-003",
+        "title": "High SSE Block Volume and Top App Use",
+        "severity": "medium",
+        "cvssScore": 5,
+        "description": "4,337 SSE events; 92 critical denials; top apps include WhatsApp (782) and ChatGPT (718).",
+        "mitreTechnique": "T1195 - Supply Chain Compromise (cloud app misuse)",
+        "affectedSystems": "CASB, Web Proxy, User Agents"
+      },
+      {
+        "id": "F-004",
+        "title": "High-risk User Activity Concentration",
+        "severity": "high",
+        "cvssScore": 7,
+        "description": "Four high-risk users (iraintern 631 requests) generating disproportionate requests; denied counts low.",
+        "mitreTechnique": "T1078 - Valid Accounts",
+        "affectedSystems": "User accounts: iraintern, mmuthoni, vkibe, ynanzingwa"
+      },
+      {
+        "id": "F-005",
+        "title": "Network Port Scanning Event",
+        "severity": "medium",
+        "cvssScore": 4.3,
+        "description": "Port scanning (TCP) observed targeting adikinim-KLA; no auto-remediation applied.",
+        "mitreTechnique": "T1595 - Active Scanning",
+        "affectedSystems": "adikinim-KLA"
+      }
+    ],
+    "recommendations": [
+      {
+        "id": "R-001",
+        "title": "Contain and Review Critical Endpoint Events",
+        "effort": "medium",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Perform forensic review of the two critical Unauthorized File Operation incidents and revoke affected credentials.",
+        "relatedFinding": "F-001"
+      },
+      {
+        "id": "R-002",
+        "title": "Harden EDR and Block Process Termination",
+        "effort": "low",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Enforce protection policies to prevent termination of defender processes and escalate persistent attempts.",
+        "relatedFinding": "F-002"
+      },
+      {
+        "id": "R-003",
+        "title": "Strengthen CASB/DLP Policies",
+        "effort": "medium",
+        "priority": "high",
+        "timeline": "short-term",
+        "description": "Restrict risky apps, apply DLP on Google Drive/Gmail, and reduce unnecessary ChatGPT/WhatsApp access.",
+        "relatedFinding": "F-003"
+      },
+      {
+        "id": "R-004",
+        "title": "Targeted User Risk Mitigation",
+        "effort": "low",
+        "priority": "critical",
+        "timeline": "immediate",
+        "description": "Apply MFA, session limits, and activity review for the four high-risk users; suspend if anomalous persists.",
+        "relatedFinding": "F-004"
+      },
+      {
+        "id": "R-005",
+        "title": "Network Detection and Response Tuning",
+        "effort": "medium",
+        "priority": "medium",
+        "timeline": "short-term",
+        "description": "Enable auto-remediation for port-scan signatures and correlate with endpoint telemetry for adikinim-KLA.",
+        "relatedFinding": "F-005"
+      }
+    ],
+    "metrics": {
+      "appendix": {
+        "glossary": [
+          {
+            "term": "SSE",
+            "definition": "Secure Service Edge (CASB, SWG, DLP consolidated)."
+          },
+          {
+            "term": "EDR",
+            "definition": "Endpoint Detection and Response."
+          },
+          {
+            "term": "CASB",
+            "definition": "Cloud Access Security Broker."
+          },
+          {
+            "term": "DLP",
+            "definition": "Data Loss Prevention."
+          },
+          {
+            "term": "MFA",
+            "definition": "Multi-Factor Authentication."
+          },
+          {
+            "term": "RAG",
+            "definition": "Red-Amber-Green risk status."
+          }
+        ],
+        "severityDefinitions": [
+          {
+            "level": "Critical",
+            "description": "Immediate threat",
+            "responseTime": "< 1 hour"
+          },
+          {
+            "level": "High",
+            "description": "Urgent attention needed",
+            "responseTime": "< 4 hours"
+          },
+          {
+            "level": "Medium",
+            "description": "Planned remediation",
+            "responseTime": "< 24 hours"
+          },
+          {
+            "level": "Low",
+            "description": "Next maintenance window",
+            "responseTime": "< 72 hours"
+          }
+        ]
+      },
+      "sections": [
+        {
+          "title": "SSE / Web & CASB Events",
+          "content": "4,337 SSE events in period; 92 critical denials. Top apps: WhatsApp (782), ChatGPT (718). High cloud/web usage increases data exposure risk.",
+          "chartData": [
+            {
+              "name": "SSE Events by Severity (critical/high/medium/low/info)",
+              "value": {
+                "low": 602,
+                "high": 779,
+                "info": 1758,
+                "medium": 1106,
+                "critical": 92
+              }
+            },
+            {
+              "name": "Top Apps",
+              "value": {
+                "Gmail": 198,
+                "ChatGPT": 718,
+                "Clarity": 348,
+                "WhatsApp": 782,
+                "Google Drive": 320
+              }
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "High web app usage drives most SSE blocks; tighten CASB and DLP."
+        },
+        {
+          "title": "Endpoint Security",
+          "content": "347 endpoint events: 28 high, 2 critical. EDR auto-remediation blocked removable media and prevented process termination attempts.",
+          "chartData": [
+            {
+              "name": "Endpoint Events by Severity",
+              "value": {
+                "high": 28,
+                "medium": 317,
+                "critical": 2
+              }
+            },
+            {
+              "name": "Top Endpoint Actions",
+              "value": {
+                "USB Insertions Blocked": 5,
+                "Malicious Binary Detections": 4,
+                "Process Termination Attempts": 5
+              }
+            }
+          ],
+          "chartType": "pie",
+          "keyInsight": "EDR effective; critical file operations require forensic validation."
+        },
+        {
+          "title": "Incident Management",
+          "content": "348 incidents recorded; 337 resolved (96.6%), 11 open. Recent high/critical incidents were addressed via EDR and containment.",
+          "chartData": [
+            {
+              "name": "Incidents by Status",
+              "value": {
+                "open": 11,
+                "resolved": 337
+              }
+            },
+            {
+              "name": "Incidents by Severity",
+              "value": {
+                "high": 28,
+                "medium": 318,
+                "critical": 2
+              }
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "High resolution rate; remaining open incidents need prioritized closure."
+        },
+        {
+          "title": "Asset Inventory",
+          "content": "745 active devices: 695 workstations, 50 servers. OS mix dominated by Windows 11 (618) and Windows 10 (84).",
+          "chartData": [
+            {
+              "name": "Assets by OS",
+              "value": {
+                "Windows 10": 84,
+                "Windows 11": 618,
+                "Windows Server": 43
+              }
+            },
+            {
+              "name": "Assets by Type",
+              "value": {
+                "Server": 50,
+                "Workstation": 695
+              }
+            }
+          ],
+          "chartType": "pie",
+          "keyInsight": "Good asset visibility; validate patching status on servers."
+        },
+        {
+          "title": "User Activity & Risk",
+          "content": "520 users generated 113,762 requests; user risk: 388 medium, 128 low, 4 high. High-risk users require immediate review.",
+          "chartData": [
+            {
+              "name": "User Risk Distribution",
+              "value": {
+                "low": 128,
+                "high": 4,
+                "medium": 388
+              }
+            },
+            {
+              "name": "Top High-risk Users Requests",
+              "value": {
+                "vkibe": 186,
+                "mmuthoni": 389,
+                "iraintern": 631,
+                "ynanzingwa": 144
+              }
+            }
+          ],
+          "chartType": "bar",
+          "keyInsight": "Concentrated risk in four users; enforce controls and review activity."
+        }
+      ],
+      "conclusion": "Posture is developing: incident response and asset visibility are strengths; web/CASB and user risk require prioritised controls. Top priorities next period: (1) contain critical endpoint events and forensic review, (2) enforce CASB/DLP and app restrictions, (3) mitigate high-risk users with MFA and targeted monitoring.",
+      "riskMatrix": [
+        {
+          "risk": "Malware spread via endpoints",
+          "impact": 4,
+          "likelihood": 3,
+          "residualRisk": "high",
+          "treatmentPlan": "Contain infected hosts, validate EDR remediation, escalate forensic analysis."
+        },
+        {
+          "risk": "Data exposure via web/cloud apps",
+          "impact": 3,
+          "likelihood": 4,
+          "residualRisk": "high",
+          "treatmentPlan": "Tighten CASB/DLP, restrict high-risk apps, monitor uploads."
+        },
+        {
+          "risk": "Account misuse by high-risk users",
+          "impact": 4,
+          "likelihood": 4,
+          "residualRisk": "critical",
+          "treatmentPlan": "Enforce MFA, limit access, conduct targeted investigations."
+        },
+        {
+          "risk": "Network reconnaissance",
+          "impact": 3,
+          "likelihood": 2,
+          "residualRisk": "medium",
+          "treatmentPlan": "Enable auto-blocking, inspect source and lateral movement."
+        }
+      ],
+      "keyHighlights": [
+        {
+          "label": "Total Incidents",
+          "trend": "down",
+          "value": "348",
+          "context": "96.6% incidents resolved",
+          "trendDetail": "-5%"
+        },
+        {
+          "label": "SSE Events",
+          "trend": "up",
+          "value": "4,337",
+          "context": "92 critical denials",
+          "trendDetail": "+12%"
+        },
+        {
+          "label": "Endpoint Events",
+          "trend": "stable",
+          "value": "347",
+          "context": "30 high/critical events",
+          "trendDetail": "+0%"
+        },
+        {
+          "label": "Active Assets",
+          "trend": "stable",
+          "value": "745",
+          "context": "618 Windows 11 workstations",
+          "trendDetail": "+0%"
+        },
+        {
+          "label": "High-risk Users",
+          "trend": "up",
+          "value": "4",
+          "context": "Top: iraintern (631 requests)",
+          "trendDetail": "+33%"
+        },
+        {
+          "label": "Average Risk Score",
+          "trend": "up",
+          "value": "60",
+          "context": "4679 events scored",
+          "trendDetail": "+6%"
+        }
+      ],
+      "trendAnalysis": "",
+      "complianceNotes": "",
+      "documentControl": {
+        "version": "1.0",
+        "approvedBy": "Head of Managed Security Services",
+        "documentId": "SO-RPT-MLXB5KBP",
+        "preparedBy": "PKF Africa Operations Center",
+        "reviewedBy": "Principal Security Consultant",
+        "classification": "Confidential",
+        "distributionList": [
+          "CISO",
+          "CTO",
+          "IT Security Team",
+          "Risk Committee"
+        ]
+      },
+      "complianceMapping": [
+        {
+          "gap": "User access controls and continuous monitoring need strengthening.",
+          "status": "Partial",
+          "framework": "NIST",
+          "requirement": "PR.AC, DE.CM, RS"
+        },
+        {
+          "gap": "Asset change management and cloud controls require policy updates.",
+          "status": "Partial",
+          "framework": "ISO 27001",
+          "requirement": "A.9, A.12, A.13"
+        },
+        {
+          "gap": "Access management and incident closure consistency needs evidence.",
+          "status": "Partial",
+          "framework": "SOC2",
+          "requirement": "CC6, CC7"
+        },
+        {
+          "gap": "Environment segmentation and malware controls review required if card data present.",
+          "status": "Non-Compliant",
+          "framework": "PCI-DSS",
+          "requirement": "1.2, 5.1"
+        }
+      ],
+      "managementSummary": {
+        "ragStatus": [
+          {
+            "area": "Endpoint Security",
+            "score": 60,
+            "detail": "347 endpoint events; 30 high/critical; auto-remediation active.",
+            "status": "amber"
+          },
+          {
+            "area": "Web/CASB (SSE)",
+            "score": 55,
+            "detail": "4,337 SSE events; 92 critical denials; high app usage (WhatsApp, ChatGPT).",
+            "status": "amber"
+          },
+          {
+            "area": "Network Security",
+            "score": 70,
+            "detail": "Single medium port-scan event; no auto-remediation applied.",
+            "status": "amber"
+          },
+          {
+            "area": "Incident Management",
+            "score": 80,
+            "detail": "348 incidents; 337 resolved (96.6%); 11 remain open.",
+            "status": "green"
+          },
+          {
+            "area": "Asset Management",
+            "score": 85,
+            "detail": "745 active devices; 618 Windows 11; inventory coverage strong.",
+            "status": "green"
+          },
+          {
+            "area": "User Activity & Identity",
+            "score": 60,
+            "detail": "520 users; 388 medium-risk, 4 high-risk users flagged.",
+            "status": "amber"
+          },
+          {
+            "area": "Risk Management",
+            "score": 50,
+            "detail": "Average risk score 60; anomalous max risk=1000 requires review.",
+            "status": "amber"
+          }
+        ],
+        "riskTrend": "increasing",
+        "criticalActions": [
+          "Validate and contain high-risk users (4) immediately; enforce MFA and session controls.",
+          "Harden endpoint controls: investigate critical Unauthorized File Operation attempts.",
+          "Tighten SSE policies for top apps and remediate 92 SSE-critical denials."
+        ],
+        "overallRiskScore": 68,
+        "overallRiskRating": "high",
+        "previousRiskScore": 64
+      },
+      "securityScorecard": {
+        "categories": [
+          {
+            "name": "Endpoint Security",
+            "grade": "C",
+            "score": 60,
+            "detail": "EDR detects/auto-remediates; criticals present",
+            "maxScore": 100
+          },
+          {
+            "name": "Web/CASB (SSE)",
+            "grade": "C-",
+            "score": 55,
+            "detail": "High volume blocked requests; app control gaps",
+            "maxScore": 100
+          },
+          {
+            "name": "Network Security",
+            "grade": "B-",
+            "score": 70,
+            "detail": "Limited events; single port-scan unremediated",
+            "maxScore": 100
+          },
+          {
+            "name": "Incident Response",
+            "grade": "B",
+            "score": 80,
+            "detail": "High resolution rate; 11 open incidents",
+            "maxScore": 100
+          },
+          {
+            "name": "Asset Management",
+            "grade": "B+",
+            "score": 85,
+            "detail": "Complete active inventory; OS distribution known",
+            "maxScore": 100
+          },
+          {
+            "name": "Identity & User Activity",
+            "grade": "C",
+            "score": 60,
+            "detail": "Multiple medium-risk users; 4 high-risk",
+            "maxScore": 100
+          },
+          {
+            "name": "Risk Management",
+            "grade": "D",
+            "score": 50,
+            "detail": "Avg score 60; extreme max value anomaly",
+            "maxScore": 100
+          }
+        ],
+        "overallScore": 68,
+        "previousScore": 64
+      },
+      "maturityAssessment": {
+        "domains": [
+          {
+            "score": 3,
+            "detail": "Inventory complete; risk profiling needs refinement.",
+            "domain": "Identify",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "Controls in place; gaps in SSE app controls.",
+            "domain": "Protect",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "EDR and SSE detect events; tuning required.",
+            "domain": "Detect",
+            "target": 4
+          },
+          {
+            "score": 4,
+            "detail": "High incident resolution; escalation consistency good.",
+            "domain": "Respond",
+            "target": 4
+          },
+          {
+            "score": 3,
+            "detail": "Recovery plans exist; testing limited.",
+            "domain": "Recover",
+            "target": 4
+          }
+        ],
+        "overallMaturity": "Developing"
+      },
+      "attackChainAnalysis": [],
+      "scopeAndMethodology": {}
+    },
+    "status": "published",
+    "generated_by": "superadmin-001",
+    "created_at": "2026-02-22T05:30:03.799Z",
+    "updated_at": "2026-02-22T05:30:03.799Z",
+    "report_type": "executive_summary",
+    "file_path": "/home/runner/workspace/data/reports/Monthly_Security_Report___PKF_Africa_1771738203789.json",
+    "file_name": "Monthly_Security_Report___PKF_Africa_1771738203789.json"
+  }
+]

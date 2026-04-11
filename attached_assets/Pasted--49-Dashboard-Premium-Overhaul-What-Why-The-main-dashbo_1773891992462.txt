@@ -1,0 +1,65 @@
+#49 - Dashboard Premium Overhaul
+What & Why
+The main dashboard at /dashboard needs three connected improvements:
+
+Threat Radar fix + placement — The radar currently shows "Total Threats: 0" because the API uses a 7-day window while tenant security event data is seeded at ~30-day-old timestamps. The radar also only lives on the /threat-map page; it should be a first-class widget on the dashboard itself, scoped to the tenant's own incidents and security events (not global threat data).
+
+Executive Intelligence Briefing → CISO Dashboard — The AI-generated briefing component exists in Executive Summary mode but is absent from the CISO Dashboard mode. The CISO Dashboard is the most strategic view — the briefing belongs prominently there.
+
+Dashboard widget curation — The four Overview sub-modes (Executive Summary, CISO Dashboard, SOC Operations, Threat Landscape) each need a focused, high-signal widget set. Redundant, low-value, or placeholder widgets should be removed; premium widgets should be elevated.
+
+Done looks like
+Threat Radar (real data)
+Radar API window extended from 7 days to 30 days — the radar now shows real tenant-scoped security event data
+"Total Threats" shows actual counts from the tenant's security_events and incidents tables
+The radar is rendered as a card widget in all four Overview sub-modes of the dashboard (compact variant, not full-page size), alongside the existing mini threat map
+Auto-refreshes every 60 seconds on the dashboard
+CISO Dashboard
+Executive Intelligence Briefing appears as the top card in CISO Dashboard mode — directly below the KPI metrics strip
+The briefing card in CISO mode shows the full AI-generated situation report, threat level badge, top threat scorecard, and key recommendations (same component, no truncation)
+CISO Dashboard layout (top-to-bottom): KPIs → Executive Briefing → NIST Radar + Attack Vector Radar (side by side) → Threat Vector Bar + MITRE Heatmap → Top Threat Actors + Security Coverage
+Dashboard widget curation per mode
+Executive Summary (what a CEO/Board sees):
+
+Keep: Security Posture gauge, Incident Trend chart, AI briefing summary (condensed), Mini Threat Map
+Add: Attack Vector Radar (compact) replacing the raw events/control pie chart
+Remove: Raw "Events by Control" pie (too technical), "Log & Event Metrics" (operational noise), "Remediation Actions" (operational)
+Elevate: Week-over-week sparklines for MTTD/MTTR/SLA — keep these prominent
+CISO Dashboard:
+
+Keep: KPI metrics strip, NIST CSF radar, MITRE heatmap, Top Threat Actors, Security Coverage
+Add: Executive Intelligence Briefing (top, full width), Attack Vector Radar (alongside NIST radar)
+Restructure: Two-column layout for NIST radar + Attack Vector Radar side-by-side
+SOC Operations:
+
+Keep: MTTD/MTTR/MTTC/SLA cards, Severity Trend line chart, Top Log Sources, Event Severity Distribution
+Add: Attack Vector Radar (compact, top-right), Real-time alert velocity indicator
+Remove: Duplicate severity breakdown cards that overlap with the trend chart
+Threat Landscape:
+
+Keep: MITRE ATT&CK Tactics Matrix, Cyber Kill Chain progression
+Add: Attack Vector Radar (full size, as primary visual alongside Kill Chain)
+Elevate: Make the Kill Chain progression more visual with filled stage indicators
+Out of scope
+Adding new AI-generated content (only reposition/reuse existing Executive Briefing)
+Changes to the CAASM module or individual domain tabs (Assets, Cloud, Web & Data, Users)
+Rebuilding the widget picker/customization system
+Tasks
+Fix radar API data window — Change the /api/threat-radar/:tenantId endpoint from 7-day to 30-day lookback. Verify it returns real event counts from the tenant's security_events table (not hardcoded/global data). Also add a fallback: if 30 days returns 0, try 90 days, so the radar always shows available data.
+
+Add Attack Vector Radar to dashboard — Import the ThreatRadar component into dashboard.tsx. Add it as a compact widget card in all four Overview sub-modes. The compact variant uses a smaller SVG viewBox but the same rotating sweep animation and sector blips.
+
+Add Executive Intelligence Briefing to CISO Dashboard — Import and render the ExecutiveBriefing component as the first full-width card in the CISO Dashboard mode (after the KPI metrics strip). Reuse the existing component and its API call — no new backend work needed.
+
+Curate Executive Summary widgets — Remove "Events by Control" pie and low-signal log metrics cards. Ensure the Security Posture gauge, Incident Trend, Mini Threat Map, and sparkline KPIs remain prominent and well-spaced.
+
+Curate CISO Dashboard layout — Restructure to: KPIs → Briefing → [NIST Radar | Attack Vector Radar] → [Threat Vector Bar | MITRE Heatmap] → [Top Threat Actors | Security Coverage]. Ensure all existing data cards are retained, just reordered.
+
+Curate SOC Operations and Threat Landscape — Add the compact radar to SOC mode. In Threat Landscape, add the full radar as a primary visual next to Kill Chain. Remove duplicate severity-breakdown cards from SOC mode.
+
+Relevant files
+client/src/pages/dashboard.tsx
+client/src/components/threat-map/ThreatRadar.tsx
+client/src/components/executive-briefing.tsx
+client/src/lib/dashboard-config.ts
+server/routes.ts:31821-31905

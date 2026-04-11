@@ -1,0 +1,63 @@
+{{- if .Values.receiver.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "secureops.fullname" . }}-sigma-rules
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: sigma-engine
+data:
+  brute_force.yml: |
+    title: Brute Force Authentication Attempt
+    status: production
+    description: Detects multiple failed authentication attempts from a single source
+    logsource:
+      product: authentication
+      service: login
+    detection:
+      selection:
+        action: "blocked"
+        severity:
+          - "high"
+          - "critical"
+      condition: selection
+    level: high
+    tags:
+      - attack.credential_access
+      - attack.t1110
+  impossible_travel.yml: |
+    title: Impossible Travel Detection
+    status: production
+    description: Detects logins from geographically distant locations in short time
+    logsource:
+      product: authentication
+      service: login
+    detection:
+      selection:
+        eventType: "identity"
+        action: "allowed"
+      condition: selection
+    level: high
+    tags:
+      - attack.initial_access
+      - attack.t1078
+  privilege_escalation.yml: |
+    title: Cloud Privilege Escalation
+    status: production
+    description: Detects privilege escalation attempts in cloud environments
+    logsource:
+      product: cloud
+      service: audit
+    detection:
+      selection:
+        eventType: "cloud"
+        severity:
+          - "critical"
+          - "high"
+      condition: selection
+    level: critical
+    tags:
+      - attack.privilege_escalation
+      - attack.t1548
+{{- end }}

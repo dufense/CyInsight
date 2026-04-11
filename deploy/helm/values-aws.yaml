@@ -1,0 +1,104 @@
+# =============================================================================
+# Cyber Command Center — AWS EKS Helm Override Values
+# =============================================================================
+# Usage:
+#   helm upgrade --install secureops ./deploy/helm/secureops \
+#     -f deploy/helm/secureops/values.yaml \
+#     -f deploy/helm/values-aws.yaml \
+#     --set secrets.databaseUrl="$DATABASE_URL" \
+#     --set secrets.sessionSecret="$SESSION_SECRET"
+# =============================================================================
+
+cloudProvider: aws
+
+global:
+  storageClass: gp3
+
+# ── Ingress — AWS Load Balancer Controller ─────────────────────────────────
+# Requires: https://kubernetes-sigs.github.io/aws-load-balancer-controller/
+receiver:
+  ingress:
+    className: alb
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/certificate-arn: ""   # set to your ACM ARN
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+      alb.ingress.kubernetes.io/group.name: secureops
+
+management:
+  ingress:
+    className: alb
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/certificate-arn: ""   # set to your ACM ARN
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+      alb.ingress.kubernetes.io/group.name: secureops
+      # Sticky sessions via ALB target group stickiness (cookie-based)
+      alb.ingress.kubernetes.io/target-group-attributes: stickiness.enabled=true,stickiness.lb_cookie.duration_seconds=86400
+
+# ── Storage — EBS gp3 (hot) + S3 (cold/archive) ───────────────────────────
+dataPlane:
+  persistence:
+    storageClassName: gp3    # gp3 EBS volumes via EBS CSI driver
+
+# ── Object Storage — Amazon S3 ─────────────────────────────────────────────
+objectStorage:
+  provider: s3
+  bucket: secureops-events
+  region: us-east-1          # override per deployment region
+  endpoint: ""               # leave empty for AWS S3 (not MinIO)
+
+# ── Service Account — IRSA (IAM Roles for Service Accounts) ───────────────
+# Set the IAM role ARN for the secureops service account so pods get
+# automatic S3 / Secrets Manager access without embedded credentials.
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: ""   # set to arn:aws:iam::<account>:role/secureops-role
+
+# ── cert-manager — Let's Encrypt via Route 53 DNS validation ──────────────
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+
+# ── Kafka — Amazon MSK (external) ──────────────────────────────────────────
+# Disable the in-cluster Kafka and point at MSK brokers.
+kafkaKraft:
+  enabled: false
+
+kafkaExternal:
+  enabled: true
+  brokers: ""                # set to MSK bootstrap broker string
+  securityProtocol: SASL_SSL
+  saslMechanism: SCRAM-SHA-512
+  saslJaasConfig: ""         # org.apache.kafka.common.security.scram.ScramLoginModule required ...
+  sslEnabled: true
+
+# ── Redis — Amazon ElastiCache ─────────────────────────────────────────────
+# Disable in-cluster Redis and use ElastiCache endpoint via REDIS_URL env var.
+redis:
+  enabled: false
+
+# ── OpenSearch — Amazon OpenSearch Service ─────────────────────────────────
+# Disable in-cluster OpenSearch and use managed service via env var.
+opensearch:
+  enabled: false
+
+# ── Network Policies ───────────────────────────────────────────────────────
+networkPolicies:
+  enabled: true
+
+# ── Secrets — AWS Secrets Manager via External Secrets Operator ───────────
+# Alternatively mount secrets directly from Secrets Manager with ESO.
+# See: https://external-secrets.io/latest/provider/aws-secrets-manager/
+secrets:
+  create: false
+  existingSecret: secureops-secrets

@@ -1,0 +1,72 @@
+{
+  "_meta": {
+    "spf": null,
+    "dkim": null,
+    "saas": "office365_emails",
+    "dmarc": null,
+    "state": "remediated",
+    "actions": [
+      {
+        "actionType": "add_graymail_header",
+        "createTime": "2026-03-20T15:04:22.466475Z",
+        "relatedEntityId": "23f6333762d74affb66c9f8a5b189062"
+      }
+    ],
+    "eventId": "23f6333762d74affb66c9f8a5b189062",
+    "subject": "",
+    "entityId": "8ef4176d5844707b60c7bde1ef6a74d8",
+    "platform": "Check Point Harmony Email",
+    "eventType": "graymail",
+    "customerId": "pkfgroup1",
+    "senderDomain": "cpatrendlines.com",
+    "recipientDomain": "",
+    "confidenceIndicator": "graymail"
+  },
+  "asset": "",
+  "action": "add_graymail_header",
+  "sender": "special.offer@cpatrendlines.com",
+  "target": null,
+  "threat": "Graymail detected in an email from special.offer@cpatrendlines.com - 'Balance Is Not a Myth — It’s a Method' (dkabeberi@ke.pkfea.com's mailbox)",
+  "attacker": "special.offer@cpatrendlines.com",
+  "severity": "medium",
+  "eventType": "email",
+  "logSource": "Checkpoint HEC",
+  "occurredAt": "2026-03-20T15:04:21.352712+00:00",
+  "rawPayload": {
+    "data": "#{\"label\": \"Graymail\", \"entity_id\": \"8ef4176d5844707b60c7bde1ef6a74d8\", \"entity_type\": \"avanan_ap_scan\"} detected in an email from #{\"label\": \"special.offer@cpatrendlines.com\", \"entity_id\": \"ext:special.offer@cpatrendlines.com\", \"entity_type\": \"office365_emails_user\", \"disable_link\": true} - '#{\"label\": \"Balance Is Not a Myth — It’s a Method\", \"entity_id\": \"8ef4176d5844707b60c7bde1ef6a74d8\", \"entity_type\": \"office365_emails_email\"}' (#{\"label\": \"dkabeberi@ke.pkfea.com\", \"entity_id\": \"48dd0e4c-9a04-4df9-895f-c9902a40e0c6\", \"entity_type\": \"office365_emails_user\"}'s mailbox)",
+    "saas": "office365_emails",
+    "type": "graymail",
+    "state": "remediated",
+    "actions": [
+      {
+        "actionType": "add_graymail_header",
+        "createTime": "2026-03-20T15:04:22.466475Z",
+        "relatedEntityId": "23f6333762d74affb66c9f8a5b189062"
+      }
+    ],
+    "eventId": "23f6333762d74affb66c9f8a5b189062",
+    "entityId": "8ef4176d5844707b60c7bde1ef6a74d8",
+    "severity": "2",
+    "customerId": "pkfgroup1",
+    "entityLink": "https://portal.checkpoint.com/dashboard/email&collaboration/CGS1?route=cHJvZmlsZS9vZmZpY2UzNjVfZW1haWxzX2VtYWlsLzhlZjQxNzZkNTg0NDcwN2I2MGM3YmRlMWVmNmE3NGQ4",
+    "description": "Graymail detected in an email from special.offer@cpatrendlines.com - 'Balance Is Not a Myth — It’s a Method' (dkabeberi@ke.pkfea.com's mailbox)",
+    "eventCreated": "2026-03-20T15:04:21.352712+00:00",
+    "senderAddress": "special.offer@cpatrendlines.com",
+    "additionalData": null,
+    "confidenceIndicator": "graymail",
+    "availableEventActions": null
+  },
+  "sourceType": "Check Point Harmony Email",
+  "description": "Graymail detected in an email from special.offer@cpatrendlines.com - 'Balance Is Not a Myth — It’s a Method' (dkabeberi@ke.pkfea.com's mailbox)",
+  "mitreTactic": null,
+  "sigmaMatches": [
+    {
+      "ruleId": "2aa1440c-9ae9-4d92-84a7-a9e5f5e31695",
+      "severity": "high",
+      "ruleTitle": "Suspicious Activity in Shell Commands",
+      "mitreTactic": "Execution",
+      "mitreTechnique": "T1059.004"
+    }
+  ],
+  "mitreTechnique": null
+}

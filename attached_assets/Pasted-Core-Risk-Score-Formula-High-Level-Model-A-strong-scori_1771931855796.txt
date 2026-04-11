@@ -1,0 +1,386 @@
+Core Risk Score Formula (High-Level Model)
+
+A strong scoring formula should look like:
+
+Risk Score =
+(Threat Intel Weight × TI Score)
++ (Behavior Weight × Behavior Score)
++ (Exposure Weight × Exposure Score)
++ (Vulnerability Weight × Vulnerability Score)
++ (Control Gap Weight × Control Gap Score)
++ (Business Criticality Weight × Impact Score)
+
+
+Normalize everything to 0–100.
+
+2️⃣ Risk Factors by Object Type
+🖥 A) Asset Risk Score (Server / Endpoint / Cloud)
+1. Threat Intelligence Signals
+
+IP/domain on threat feeds
+
+Associated with C2 infrastructure
+
+Ransomware group infrastructure match
+
+Dark web chatter mentioning asset
+
+ASN reputation
+
+2. Vulnerability Factors
+
+CVSS score
+
+Exploit available in the wild
+
+Exploit trending (KEV catalog)
+
+Unpatched critical vulnerabilities
+
+Age of vulnerability
+
+3. Exposure Factors
+
+Publicly exposed?
+
+Open ports?
+
+Internet-facing service?
+
+Shadow IT detection?
+
+Cloud misconfiguration?
+
+4. Behavioral Indicators
+
+Unusual outbound traffic
+
+Beaconing pattern
+
+Lateral movement activity
+
+Privilege escalation attempts
+
+Abnormal process execution
+
+5. Security Control Coverage
+
+EDR installed?
+
+Vulnerability agent installed?
+
+Logging enabled?
+
+MFA enforced?
+
+Network segmentation applied?
+
+Backup available?
+
+⚠ Control Gap increases risk.
+
+6. Business Criticality
+
+Tier 1 system?
+
+Handles PII / PCI / PHI?
+
+Production vs Dev?
+
+Revenue impact?
+
+👤 B) User Risk Score
+1. Identity & Behavior
+
+Impossible travel
+
+Failed login spikes
+
+Admin role?
+
+Dormant but active?
+
+Off-hours access
+
+2. Email & Phishing Interaction
+
+Clicked malicious link?
+
+Downloaded attachment?
+
+Reported phishing?
+
+Repeated risky behavior?
+
+3. Privilege Level
+
+Global admin?
+
+Service account?
+
+Shared account?
+
+Privileged group member?
+
+4. Endpoint Hygiene
+
+Using compliant device?
+
+Using personal device?
+
+MFA enabled?
+
+EDR active?
+
+5. Threat Intel Enrichment
+
+Email in breach database?
+
+Credentials found on dark web?
+
+Associated domain reputation?
+
+🌐 C) URL Risk Score
+1. Threat Intelligence
+
+Blacklisted?
+
+Newly registered domain?
+
+DGA pattern?
+
+Hosted on bulletproof ASN?
+
+Phishing kit detected?
+
+2. Technical Indicators
+
+SSL certificate validity?
+
+Mismatch CN?
+
+Suspicious TLD?
+
+Typosquatting detection?
+
+3. Behavioral Indicators
+
+Redirect chain?
+
+Drive-by download?
+
+Script obfuscation?
+
+Suspicious JavaScript?
+
+4. Internal Impact
+
+Number of users clicked?
+
+High-privilege users involved?
+
+Repeated internal hits?
+
+📧 D) Email Address Risk Score
+1. External Reputation
+
+On spam feeds?
+
+Found in breach data?
+
+Known BEC domain?
+
+Domain age?
+
+2. Content Indicators
+
+Spoofing detected?
+
+Display name mismatch?
+
+Impersonation pattern?
+
+3. User Interaction
+
+Link click rate
+
+Attachment opened?
+
+Multiple recipients?
+
+Targeted executive?
+
+🌍 E) Domain Risk Score
+1. Domain Intelligence
+
+Age of domain
+
+WHOIS privacy?
+
+ASN hosting reputation
+
+Malware hosting history
+
+Phishing campaigns linked?
+
+2. Brand Abuse Signals
+
+Typosquatting
+
+Lookalike domain
+
+Homograph attack
+
+3. Infrastructure Analysis
+
+Shared hosting with malicious sites?
+
+Fast flux?
+
+DNS anomalies?
+
+Passive DNS change rate?
+
+3️⃣ Control-Based Risk Adjustment (Critical)
+
+Your platform should reduce risk if strong controls exist.
+
+Example:
+
+If:
+
+EDR installed & healthy → -10 risk
+
+MFA enforced → -15 risk
+
+Network segmented → -5 risk
+
+Immutable backup present → -10 risk
+
+If missing → add risk.
+
+This makes your model control-aware and maturity-sensitive.
+
+4️⃣ Threat Intel Weighting Strategy
+
+Not all intel signals are equal.
+
+Example weights:
+
+Signal Type	Weight
+Active exploitation observed	25
+Known ransomware infrastructure	20
+Dark web credential leak	15
+OSINT mention	5
+Passive DNS anomaly	8
+
+Make weights dynamic based on:
+
+Recency
+
+Source confidence
+
+Correlation count
+
+5️⃣ Recency & Time Decay Model
+
+Risk should decay over time.
+
+Use exponential decay:
+
+Adjusted Score = Base Score × e^(-λ × Days)
+
+
+Recent activity = higher weight
+Old activity = decays gradually
+
+This prevents permanent high-risk scoring.
+
+6️⃣ Correlation Multiplier (Very Important)
+
+If multiple signals align:
+
+Example:
+
+User clicked phishing
+
+Endpoint beaconing
+
+Domain malicious
+
+Credential found on dark web
+
+Add correlation multiplier:
+
+If correlated_signals > 3:
+Risk × 1.3
+
+
+This avoids isolated false positives.
+
+7️⃣ Contextual Amplifiers
+
+Increase risk if:
+
+Asset is Tier 1
+
+User is executive
+
+Asset processes PII
+
+Domain targets your brand
+
+System internet-facing
+
+8️⃣ Example Final Risk Bands
+Score	Risk Level
+0–20	Low
+21–40	Moderate
+41–60	High
+61–80	Critical
+81–100	Severe
+9️⃣ Advanced Enhancements
+
+If you want enterprise-grade sophistication:
+
+Graph-based risk scoring (entity relationships)
+
+Peer group baseline deviation
+
+ML anomaly score as separate dimension
+
+Attack path simulation weighting
+
+MITRE ATT&CK mapping influence
+
+🔟 Dashboard Best Practice
+
+For each entity show:
+
+Overall Risk Score
+
+Top 5 Contributing Factors
+
+Control Gaps
+
+Threat Intel Matches
+
+Historical Trend
+
+Correlated Alerts
+
+Suggested Action
+
+🔥 What Makes Your Model Powerful
+
+Your platform becomes differentiated when:
+
+Risk score reflects controls maturity
+
+Time decay prevents stale alerts
+
+Correlation increases precision
+
+Threat intel dynamically adjusts score
+
+Business context modifies impact

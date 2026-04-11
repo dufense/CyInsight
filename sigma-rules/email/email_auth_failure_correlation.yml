@@ -1,0 +1,37 @@
+title: Email Authentication Failure with Suspicious Confidence
+id: sigma-email-checkpoint-007
+status: stable
+level: high
+description: Detects emails where authentication checks (SPF, DKIM, DMARC) fail alongside a suspicious or malicious confidence indicator. This combination strongly suggests spoofed sender identity, a hallmark of phishing, BEC, and targeted social engineering attacks.
+author: Cyber Command Center
+date: 2024/01/15
+logsource:
+  category: email
+  product: checkpoint_harmony_email
+detection:
+  selection:
+    eventType: email
+  keywords:
+    - spf fail
+    - dkim fail
+    - dmarc fail
+    - spf=fail
+    - dkim=fail
+    - dmarc=fail
+    - authentication failed
+    - spoofed
+    - sender verification failed
+    - suspicious
+    - malicious
+  condition: selection AND keywords
+falsepositives:
+  - Misconfigured legitimate mail servers
+  - Forwarded email chains that break DKIM alignment
+tags:
+  - attack.initial_access
+  - attack.t1566
+  - attack.t1534
+mitre:
+  tactic: Initial Access
+  technique: T1566.001
+  technique_name: Spearphishing Attachment

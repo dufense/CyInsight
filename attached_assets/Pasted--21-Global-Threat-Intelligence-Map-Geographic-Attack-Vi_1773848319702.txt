@@ -1,0 +1,43 @@
+#21 - Global Threat Intelligence Map — Geographic Attack Visualization
+What & Why
+Every world-class SOC platform ships a geographic threat map as a signature visual element:
+
+Palo Alto AutoFocus / XSIAM: Live global threat map with attack flows
+IBM QRadar: Global threat activity visualization
+Darktrace: Real-time network activity globe
+Fortinet FortiView: Geographic threat map with drill-down
+We have threat intelligence IOC data with country codes and geolocation context already stored in security_events and threat_intel_iocs tables. We simply have no visual map to show it. Adding a world-threat map is the single most visually stunning feature we can add — it immediately communicates "enterprise SOC platform" to any visitor or demo viewer.
+
+Done looks like
+A "Threat Map" tab or dedicated page accessible from the Threat Intelligence section and/or the main dashboard
+World map visualization (SVG-based using a D3-compatible world GeoJSON, no external API needed) rendered on a dark canvas with glowing country fills
+Attack arcs: Animated curved lines flowing from attacker source country → target country, color-coded by severity (red = critical, orange = high, yellow = medium, blue = low). Arcs fade in and out with a smooth pulse animation.
+Country heat fill: Countries with active threats have a subtle glow/fill (darker red = more attacks). Countries with no observed attacks remain in dark gray.
+Live stats panel (left sidebar on the map): Total events in last 24h, unique attacker countries, top 5 source countries (with flags emoji and counts), top 5 targeted countries, top attack technique
+Hovering a country shows a tooltip: country name, flag, # attacks sourced from / targeted to this country in last 30 days, top techniques, top IOC types
+Clicking a country opens a detail panel: lists the top 10 IOCs originating from that country (IP, type, reputation badge, last seen), top 5 incidents involving this country, and a "Filter Incidents" shortcut link
+Time range selector: Last 1h / 6h / 24h / 7 days / 30 days — changing it refreshes arc data
+Auto-refresh: Every 30 seconds, new attack arcs animate in for recent events
+The map is also embedded as a card on the main Security Dashboard tab
+Out of scope
+Real-time streaming (polling every 30s is sufficient)
+3D globe rendering (WebGL/Three.js) — 2D SVG map only
+Paid geolocation API (use pre-bundled country centroid coordinates)
+Mobile touch-optimized map interactions
+Tasks
+GeoJSON + country centroids data — Bundle a lightweight world countries TopoJSON/GeoJSON file (Natural Earth 110m resolution, ~120KB) and a country-centroids.ts file mapping ISO country codes to { lat, lon, name, flag }. These are static files baked into the frontend bundle — no API calls.
+
+Backend: attack arc data endpoint — Add GET /api/threat-map/arcs?tenantId=&hours=24 in server/routes.ts. Query security_events (and threat_intel_iocs if available) for events with non-null source country code in the specified window. Group by (source_country, target_country, severity), count events. Return array of { from: countryCode, to: countryCode, count: number, severity: string } — capped at 200 arcs. Also return { topSources, topTargets, totalEvents, uniqueCountries } summary stats.
+
+SVG World Map renderer — Create client/src/components/threat-map/WorldMap.tsx that renders countries as SVG paths from the GeoJSON using a simple Mercator projection implemented in pure TypeScript (no D3 dependency). Countries are rendered as <path> elements with fill based on threat intensity. Map supports viewBox-based zoom and pan via mouse wheel + drag.
+
+Attack arc animation — Render arcs as SVG <path> elements with quadratic bezier curves between country centroids. Each arc uses a <animateMotion> or CSS stroke-dashoffset animation to create a moving dot along the attack path. Arcs appear at different stagger intervals to look like a live feed. Severity maps to arc color and glow intensity (CSS drop-shadow filter).
+
+Country interaction (hover + click) — On hover, highlight the country fill and show a dark <Tooltip> card. On click, open a shadcn <Sheet> panel on the right side showing country IOC list and incident links. The panel fetches GET /api/threat-map/country/:code?tenantId= which returns top IOCs and incidents for that country.
+
+Stats sidebar — Left column beside the map (or overlaid top-left on dark background): shows live stats with animated count-up numbers. Top 5 source countries rendered as a mini bar list with country flags (emoji). Auto-refreshes with the map.
+
+Page + dashboard embed — Create client/src/pages/threat-map.tsx with PageHero and the full map view. Also add a compact version <ThreatMapMini /> (fixed height 300px, no sidebar, fewer arcs) embedded in the Threat Intelligence dashboard tab and the main Security Dashboard.
+
+Relevant files
+client/src/pages/threat-intel.tsx client/src/pages/dashboard.tsx client/src/App.tsx client/src/components/page-hero.tsx client/src/components/app-sidebar.tsx server/routes.ts server/storage.ts shared/schema.ts

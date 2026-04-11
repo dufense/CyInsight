@@ -1,0 +1,15 @@
+Tasks
+Backend: Intent router + query dispatcher — Create server/aria-copilot.ts with an intent classification layer (uses OpenAI) that maps natural-language queries to one of ~15 structured handlers (incidents summary, MITRE stats, IOC list, MTTR metrics, user risk scores, ticket SLAs, etc.). Each handler queries the DB via storage and formats a structured JSON response with answer (prose), data (table rows or metric cards), and links (route shortcuts).
+
+Backend: REST endpoint — Add POST /api/copilot/query to server/routes.ts that accepts { question: string, tenantId: number }, calls the intent router, and streams/returns the ARIA response. Rate-limited to 20 req/min per user. Requires auth.
+
+Frontend: AriaCopilot component — Create client/src/components/aria-copilot.tsx as a floating panel: a circular glowing button bottom-right; clicks toggle a 420px-wide slide-in glass-morphism panel. Panel has a header with ARIA logo + "Online" status dot, message thread, input textarea, and send button. Messages styled as chat bubbles (user = right/blue, ARIA = left/dark). ARIA responses render markdown-lite: bold headings, inline metric badges, and link buttons.
+
+Frontend: Data renderers in ARIA — ARIA responses can include a data.type field: "metrics" renders a 2-column stat grid (number + label cards), "table" renders a compact dark-themed table, "links" renders action button chips. These are rendered below the prose in the ARIA message bubble.
+
+Frontend: Quick-prompt chips — When the chat is empty, show 5 clickable chip buttons ("Today's briefing", "Top threats this week", "Open critical incidents", "MITRE coverage gap", "SLA status") that auto-fill the input. These contextually change based on the current page.
+
+Global mount — Mount <AriaCopilot /> in client/src/App.tsx outside the router so it persists across all page navigations. Z-index above page content but below modals.
+
+Relevant files
+client/src/App.tsx server/routes.ts server/ai-soc-analyst.ts server/ai-provider.ts server/storage.ts client/src/lib/tenant-context.tsx

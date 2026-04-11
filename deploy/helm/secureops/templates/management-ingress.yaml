@@ -1,0 +1,50 @@
+{{- if and .Values.management.enabled .Values.management.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "secureops.fullname" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    plane: management
+  annotations:
+    {{- if .Values.certManager.enabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.certManager.issuer }}
+    {{- end }}
+    {{- if eq .Values.cloudProvider "aws" }}
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    {{- else if eq .Values.cloudProvider "azure" }}
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    {{- else if eq .Values.cloudProvider "gcp" }}
+    kubernetes.io/ingress.class: gce
+    networking.gke.io/managed-certificates: {{ include "secureops.fullname" . }}-management-cert
+    {{- else }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    {{- end }}
+    {{- with .Values.management.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.management.ingress.className }}
+  {{- if .Values.management.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.management.ingress.host }}
+      secretName: {{ .Values.management.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.management.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "secureops.fullname" . }}-management
+                port:
+                  number: {{ .Values.management.service.port }}
+{{- end }}

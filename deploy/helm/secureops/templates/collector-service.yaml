@@ -1,0 +1,31 @@
+{{- if .Values.collector.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secureops.fullname" . }}-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secureops.labels" . | nindent 4 }}
+    component: collector
+spec:
+  type: {{ .Values.collector.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.collector.service.port }}
+      targetPort: http
+    {{- if .Values.collector.syslog.enabled }}
+    - name: syslog-udp
+      port: {{ .Values.collector.syslog.udpPort }}
+      targetPort: syslog-udp
+      protocol: UDP
+    - name: syslog-tcp
+      port: {{ .Values.collector.syslog.tcpPort }}
+      targetPort: syslog-tcp
+    - name: syslog-tls
+      port: {{ .Values.collector.syslog.tlsPort }}
+      targetPort: syslog-tls
+    {{- end }}
+  selector:
+    {{- include "secureops.selectorLabels" . | nindent 4 }}
+    component: collector
+{{- end }}

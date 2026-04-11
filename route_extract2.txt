@@ -1,0 +1,305 @@
+      res.status(status).json({ message: error.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // THREAT RADAR — Live attack vector distribution across 10 sectors
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get("/api/threat-radar/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      if (!tenantId || isNaN(tenantId)) return res.status(400).json({ message: "tenantId required" });
+
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const cacheKey = `threat-radar:${tenantIds.sort().join(",")}`;
+      const cached = getCached(cacheKey);
+      if (cached) return res.json(cached);
+
+      // Define all 10 sectors (order matters — matches front-end 36° spacing)
+      const SECTORS = [
+        { vector: "email",         label: "Email",         eventTypes: ["email"] },
+        { vector: "endpoint",      label: "Endpoint",      eventTypes: ["endpoint"] },
+        { vector: "network",       label: "Network",       eventTypes: ["network"] },
+        { vector: "web",           label: "Web",           eventTypes: ["sse"] },
+        { vector: "web_app",       label: "Web App",       eventTypes: ["waf"] },
+        { vector: "cloud",         label: "Cloud",         eventTypes: ["casb", "cloud"] },
+        { vector: "identity",      label: "Identity",      eventTypes: ["identity"] },
+        { vector: "data",          label: "Data",          eventTypes: ["dlp"] },
+        { vector: "vulnerability", label: "Vulnerability", eventTypes: ["vulnerability"] },
+        // AI sector handled separately via incidents table
+        { vector: "ai",            label: "AI",            eventTypes: [] },
+      ] as const;
+
+      // Query 1: security_events grouped by event_type for the 9 non-AI sectors
+      const eventsResult = await pool.query(
+        `SELECT
+           event_type,
+           COUNT(*)::int AS cnt,
+           severity,
+           COUNT(*) OVER (PARTITION BY event_type) AS type_total
+         FROM security_events
+         WHERE tenant_id = ANY($1)
+           AND occurred_at >= NOW() - INTERVAL '30 days'
+           AND event_type IN ('email','endpoint','network','sse','waf','casb','cloud','identity','dlp','vulnerability')
+         GROUP BY event_type, severity
+         ORDER BY event_type, COUNT(*) DESC`,
+        [tenantIds]
+      );
+
+      // Query 2: AI sector from incidents (category or incident_type ILIKE '%ai%', exclude AI agents)
+      const aiResult = await pool.query(
+        `SELECT
+           COUNT(*)::int AS cnt,
+           severity
+         FROM incidents
+         WHERE tenant_id = ANY($1)
+           AND created_at >= NOW() - INTERVAL '30 days'
+           AND (
+             category ILIKE '%ai%'
+             OR incident_type ILIKE '%ai%'
+             OR incident_type ILIKE '%prompt injection%'
+             OR incident_type ILIKE '%model poison%'
+             OR incident_type ILIKE '%adversarial%'
+           )
+           AND title NOT ILIKE '%ai analysis%'
+           AND title NOT ILIKE '%ai agent%'
+           AND source NOT ILIKE '%ai analyst%'
+           AND source NOT ILIKE '%ai soc%'
+         GROUP BY severity
+         ORDER BY COUNT(*) DESC`,
+        [tenantIds]
+      );
+
+      // Query 3: Top sub-type per event_type (most common threat value)
+      const subTypeResult = await pool.query(
+        `SELECT DISTINCT ON (event_type)
+           event_type,
+           threat AS sub_type,
+           COUNT(*) AS cnt
+         FROM security_events
+         WHERE tenant_id = ANY($1)
+           AND occurred_at >= NOW() - INTERVAL '30 days'
+           AND threat IS NOT NULL AND threat <> ''
+           AND event_type IN ('email','endpoint','network','sse','waf','casb','cloud','identity','dlp','vulnerability')
+         GROUP BY event_type, threat
+         ORDER BY event_type, COUNT(*) DESC`,
+        [tenantIds]
+      );
+
+      // Build lookup maps
+      type SevCount = { sev: string; cnt: number };
+      const eventsByType = new Map<string, SevCount[]>();
+      for (const row of eventsResult.rows) {
+        const list = eventsByType.get(row.event_type) || [];
+        list.push({ sev: row.severity, cnt: Number(row.cnt) });
+        eventsByType.set(row.event_type, list);
+      }
+
+      const subTypeByType = new Map<string, string>();
+      for (const row of subTypeResult.rows) {
+        subTypeByType.set(row.event_type, row.sub_type);
+      }
+
+      const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
+      function pickDominantSev(sevCounts: SevCount[]): string {
+        for (const sev of SEV_ORDER) {
+          if (sevCounts.some(s => s.sev === sev && s.cnt > 0)) return sev;
+        }
+        return "none";
+      }
+
+      // Assemble AI sector
+      const aiSevCounts: SevCount[] = aiResult.rows.map((r: any) => ({ sev: r.severity, cnt: Number(r.cnt) }));
+      const aiCount = aiSevCounts.reduce((s, r) => s + r.cnt, 0);
+
+      // Try extended 90-day window if 30-day yields all zeros
+      let fallbackUsed = false;
+      const total30 = eventsResult.rows.reduce((s: number, r: any) => s + Number(r.cnt), 0) + aiCount;
+
+      let eventsResultFinal = eventsResult;
+      let aiResultFinal = aiResult;
+      let subTypeResultFinal = subTypeResult;
+
+      if (total30 === 0) {
+        fallbackUsed = true;
+        const [ev90, ai90, st90] = await Promise.all([
+          pool.query(
+            `SELECT event_type, COUNT(*)::int AS cnt, severity
+             FROM security_events
+             WHERE tenant_id = ANY($1)
+               AND occurred_at >= NOW() - INTERVAL '90 days'
+               AND event_type IN ('email','endpoint','network','sse','waf','casb','cloud','identity','dlp','vulnerability')
+             GROUP BY event_type, severity ORDER BY event_type, COUNT(*) DESC`,
+            [tenantIds]
+          ),
+          pool.query(
+            `SELECT COUNT(*)::int AS cnt, severity
+             FROM incidents
+             WHERE tenant_id = ANY($1)
+               AND created_at >= NOW() - INTERVAL '90 days'
+               AND (category ILIKE '%ai%' OR incident_type ILIKE '%ai%'
+                 OR incident_type ILIKE '%prompt injection%' OR incident_type ILIKE '%model poison%')
+               AND title NOT ILIKE '%ai analysis%' AND title NOT ILIKE '%ai agent%'
+             GROUP BY severity ORDER BY COUNT(*) DESC`,
+            [tenantIds]
+          ),
+          pool.query(
+            `SELECT DISTINCT ON (event_type)
+               event_type, threat AS sub_type, COUNT(*) AS cnt
+             FROM security_events
+             WHERE tenant_id = ANY($1)
+               AND occurred_at >= NOW() - INTERVAL '90 days'
+               AND threat IS NOT NULL AND threat <> ''
+             GROUP BY event_type, threat ORDER BY event_type, COUNT(*) DESC`,
+            [tenantIds]
+          ),
+        ]);
+        eventsResultFinal = ev90;
+        aiResultFinal = ai90;
+        subTypeResultFinal = st90;
+
+        eventsByType.clear();
+        for (const row of ev90.rows) {
+          const list = eventsByType.get(row.event_type) || [];
+          list.push({ sev: row.severity, cnt: Number(row.cnt) });
+          eventsByType.set(row.event_type, list);
+        }
+        subTypeByType.clear();
+        for (const row of st90.rows) subTypeByType.set(row.event_type, row.sub_type);
+      }
+
+      // Build final sectors array
+      const aiSevCountsFinal: SevCount[] = (fallbackUsed ? aiResultFinal : aiResult).rows.map(
+        (r: any) => ({ sev: r.severity, cnt: Number(r.cnt) })
+      );
+
+      const result = SECTORS.map(sector => {
+        if (sector.vector === "ai") {
+          const count = aiSevCountsFinal.reduce((s, r) => s + r.cnt, 0);
+          return {
+            vector: "ai",
+            label: "AI",
+            count,
+            dominantSeverity: aiSevCountsFinal.length > 0 ? pickDominantSev(aiSevCountsFinal) : "none",
+            topSubType: null,
+          };
+        }
+
+        // Merge all event_type rows for this sector (e.g. cloud merges casb + cloud)
+        const allSevCounts: SevCount[] = [];
+        for (const et of sector.eventTypes) {
+          const rows = eventsByType.get(et) || [];
+          for (const row of rows) {
+            const existing = allSevCounts.find(s => s.sev === row.sev);
+            if (existing) existing.cnt += row.cnt;
+            else allSevCounts.push({ ...row });
+          }
+        }
+
+        const count = allSevCounts.reduce((s, r) => s + r.cnt, 0);
+        const topSubType = sector.eventTypes.map(et => subTypeByType.get(et)).find(Boolean) || null;
+
+        return {
+          vector: sector.vector,
+          label: sector.label,
+          count,
+          dominantSeverity: count > 0 ? pickDominantSev(allSevCounts) : "none",
+          topSubType,
+        };
+      });
+
+      const payload = {
+        sectors: result,
+        windowDays: fallbackUsed ? 90 : 30,
+        fallbackUsed,
+      };
+
+      setCache(cacheKey, payload);
+      return res.json(payload);
+    } catch (error: any) {
+      const status = (error as any).status || 500;
+      res.status(status).json({ message: error.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // INCIDENT INVESTIGATION CANVAS
+  // ─────────────────────────────────────────────────────────────────────────
+  app.get("/api/incidents/:id/graph", isAuthenticated, async (req: any, res) => {
+    try {
+      const incidentId = parseInt(req.params.id);
+
+      const incidentRes = await pool.query(
+        `SELECT * FROM incidents WHERE id = $1 LIMIT 1`,
+        [incidentId]
+      );
+      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
+      const incident = incidentRes.rows[0];
+
+      const access = await assertTenantAccess(req, incident.tenant_id);
+
+      const eventsRes = await pool.query(
+        `SELECT id, event_type, severity, threat, target, attacker, asset, description, 
+                threat_vector, mitre_tactic, mitre_technique, action, source_type, occurred_at, country
+         FROM security_events
+         WHERE tenant_id = $1
+         AND occurred_at BETWEEN $2 AND $3
+         ORDER BY occurred_at ASC LIMIT 100`,
+        [
+          incident.tenant_id,
+          new Date(new Date(incident.created_at).getTime() - 2 * 3600000),
+          new Date(new Date(incident.created_at).getTime() + 24 * 3600000),
+        ]
+      );
+
+      const nodes: any[] = [];
+      const edges: any[] = [];
+      const nodeSet = new Set<string>();
+
+      function addNode(id: string, label: string, type: string, severity?: string) {
+        if (!nodeSet.has(id)) {
+          nodeSet.add(id);
+          nodes.push({ id, label, type, severity: severity || "medium" });
+        }
+      }
+
+      for (const e of eventsRes.rows) {
+        if (e.attacker && e.attacker.length < 100) addNode(`ip:${e.attacker}`, e.attacker, "attacker", "high");
+        if (e.target && e.target.length < 100) addNode(`asset:${e.target}`, e.target, "asset", e.severity);
+        if (e.asset && e.asset.length < 100) addNode(`asset:${e.asset}`, e.asset, "asset", e.severity);
+        if (e.attacker && e.target) {
+          edges.push({ from: `ip:${e.attacker}`, to: `asset:${e.target}`, label: e.mitre_tactic || e.action || "attacked", eventId: e.id });
+        }
+        if (e.attacker && e.asset) {
+          edges.push({ from: `ip:${e.attacker}`, to: `asset:${e.asset}`, label: e.action || "targeted", eventId: e.id });
+        }
+      }
+
+      if (incident.source_ip) addNode(`ip:${incident.source_ip}`, incident.source_ip, "attacker", "critical");
+      if (incident.destination_ip) addNode(`asset:${incident.destination_ip}`, incident.destination_ip, "asset", "high");
+
+      const rawIocData = incident.ioc_data as any;
+      const iocArr: any[] = Array.isArray(rawIocData)
+        ? rawIocData
+        : (rawIocData?.indicators && Array.isArray(rawIocData.indicators))
+          ? rawIocData.indicators
+          : [];
+      for (const ioc of iocArr.slice(0, 10)) {
+        addNode(`ioc:${ioc.value}`, ioc.value, "ioc", ioc.reputation === "malicious" ? "high" : "medium");
+        if (incident.source_ip) edges.push({ from: `ip:${incident.source_ip}`, to: `ioc:${ioc.value}`, label: "used IOC" });
+      }
+
+      res.json({
+        incident,
+        nodes,
+        edges: edges.slice(0, 100),
+        timeline: eventsRes.rows,
+      });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────

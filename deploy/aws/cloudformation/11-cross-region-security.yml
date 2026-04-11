@@ -1,0 +1,178 @@
+##############################################################################
+# Cyber Command Center -- Cross-Region Security Stack
+#
+# Deployed once in the management plane region (ap-south-1) AFTER:
+#   - ccc-vpc (01-vpc.yml) is deployed
+#   - ccc-dp-vpc-mumbai (10-data-plane-ha-vpc.yml) is deployed
+#
+# This stack bridges the management plane to all three data planes:
+#
+# 1. Mumbai VPC Peering (intra-region, same AWS account)
+#    - Adds routes to management VPC private route tables so the management
+#      plane can reach the Mumbai data plane's internal ALB via peering.
+#    - The peering connection itself is created by ccc-dp-vpc-mumbai (same
+#      account + region means it is auto-accepted).
+#    - PeeringConnectionId must be copied from the ccc-dp-vpc-mumbai stack
+#      Outputs tab (VpcPeeringConnectionId).
+#
+# 2. Bahrain + Kenya EIP Registry (cross-region)
+#    - Stores management plane NAT Gateway EIPs in SSM so deploy-all.sh
+#      can read them and inject them as ManagementNatEip1/2 when deploying
+#      Bahrain and Kenya data plane stacks (07-data-plane-ecs.yml).
+#    - Bahrain/Kenya data plane ALBs only accept HTTPS from these EIPs.
+#
+# Cross-region connectivity topology:
+#
+#   Management VPC (ap-south-1, 10.10.0.0/16)
+#       |
+#       +──VPC Peering pcx-xxxxx──> Mumbai DP VPC (ap-south-1, 10.20.0.0/16)
+#       |                             Internal ALB, private routing
+#       |
+#       +──NAT EIP 1 (x.x.x.1)────> Bahrain DP ALB (me-south-1) -- internet-facing
+#       +──NAT EIP 2 (x.x.x.2)────> Kenya DP ALB   (af-south-1) -- internet-facing
+#
+# Prerequisites:
+#   - ccc-vpc stack deployed (01-vpc.yml)
+#   - ccc-dp-vpc-mumbai stack deployed (10-data-plane-ha-vpc.yml)
+#     with PeeringRequesterVpcId = management VPC ID
+#
+# Deploy:
+#   export PEERING_ID=$(aws cloudformation describe-stacks \
+#     --stack-name ccc-dp-vpc-mumbai --region ap-south-1 \
+#     --query "Stacks[0].Outputs[?OutputKey=='VpcPeeringConnectionId'].OutputValue" \
+#     --output text)
+#
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/11-cross-region-security.yml \
+#     --stack-name ccc-cross-region-security \
+#     --region ap-south-1 \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       ManagementVpcStackName=ccc-vpc \
+#       MumbaiDataPlaneVpcStackName=ccc-dp-vpc-mumbai \
+#       PeeringConnectionId=${PEERING_ID}
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center -- Cross-Region Security (Peering Routes + NAT EIP Registry)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  ManagementVpcStackName:
+    Type: String
+    Default: ccc-vpc
+    Description: CloudFormation stack name of the management plane VPC (01-vpc.yml).
+
+  MumbaiDataPlaneVpcStackName:
+    Type: String
+    Default: ccc-dp-vpc-mumbai
+    Description: >-
+      CloudFormation stack name of the Mumbai data plane VPC (10-data-plane-ha-vpc.yml).
+      Used to read the Mumbai VPC CIDR for management-side route table entries.
+
+  PeeringConnectionId:
+    Type: String
+    Description: >-
+      VPC Peering connection ID created by the ccc-dp-vpc-mumbai stack.
+      Retrieve from that stack's Outputs (VpcPeeringConnectionId).
+      Example: pcx-0123456789abcdef0
+
+Resources:
+
+  # ── Management VPC routes to Mumbai data plane ───────────────────────────────
+  # The peering connection was initiated by ccc-dp-vpc-mumbai and auto-accepted
+  # (same account + region). These route entries make the Mumbai data plane's
+  # private CIDR reachable from the management plane ECS tasks.
+  MgmtToMumbaiRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue: !Sub "${ManagementVpcStackName}-PrivateRouteTable1Id"
+      DestinationCidrBlock:
+        Fn::ImportValue: !Sub "${MumbaiDataPlaneVpcStackName}-VpcCidr"
+      VpcPeeringConnectionId: !Ref PeeringConnectionId
+
+  MgmtToMumbaiRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue: !Sub "${ManagementVpcStackName}-PrivateRouteTable2Id"
+      DestinationCidrBlock:
+        Fn::ImportValue: !Sub "${MumbaiDataPlaneVpcStackName}-VpcCidr"
+      VpcPeeringConnectionId: !Ref PeeringConnectionId
+
+  # ── SSM Parameters: Management NAT EIPs for Bahrain/Kenya data planes ────────
+  # deploy-all.sh reads these before deploying Bahrain/Kenya data plane stacks
+  # and passes them as ManagementNatEip1/2 parameters to 07-data-plane-ecs.yml.
+  # The Bahrain/Kenya ALB security groups restrict HTTPS ingress to these IPs.
+  MgmtNatEip1SSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/ccc/${EnvironmentName}/mgmt-nat-eip-1"
+      Type: String
+      Value:
+        Fn::ImportValue: !Sub "${ManagementVpcStackName}-NatEip1"
+      Description: "CCC management NAT EIP 1 -- allowlist for Bahrain/Kenya data plane ALBs"
+      Tags:
+        Project: CyberCommandCenter
+
+  MgmtNatEip2SSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/ccc/${EnvironmentName}/mgmt-nat-eip-2"
+      Type: String
+      Value:
+        Fn::ImportValue: !Sub "${ManagementVpcStackName}-NatEip2"
+      Description: "CCC management NAT EIP 2 -- allowlist for Bahrain/Kenya data plane ALBs"
+      Tags:
+        Project: CyberCommandCenter
+
+Outputs:
+
+  PeeringConnectionId:
+    Description: VPC Peering connection ID (management <-> Mumbai data plane)
+    Value: !Ref PeeringConnectionId
+    Export:
+      Name: !Sub "${AWS::StackName}-PeeringConnectionId"
+
+  MgmtNatEip1:
+    Description: >-
+      Management plane NAT EIP 1.
+      Pass as ManagementNatEip1 when deploying Bahrain/Kenya data plane stacks.
+    Value:
+      Fn::ImportValue: !Sub "${ManagementVpcStackName}-NatEip1"
+    Export:
+      Name: !Sub "${AWS::StackName}-MgmtNatEip1"
+
+  MgmtNatEip2:
+    Description: >-
+      Management plane NAT EIP 2.
+      Pass as ManagementNatEip2 when deploying Bahrain/Kenya data plane stacks.
+    Value:
+      Fn::ImportValue: !Sub "${ManagementVpcStackName}-NatEip2"
+    Export:
+      Name: !Sub "${AWS::StackName}-MgmtNatEip2"
+
+  MgmtNatEipSsmPath1:
+    Description: SSM parameter path for management NAT EIP 1
+    Value: !Sub "/ccc/${EnvironmentName}/mgmt-nat-eip-1"
+    Export:
+      Name: !Sub "${AWS::StackName}-MgmtNatEipSsmPath1"
+
+  MgmtNatEipSsmPath2:
+    Description: SSM parameter path for management NAT EIP 2
+    Value: !Sub "/ccc/${EnvironmentName}/mgmt-nat-eip-2"
+    Export:
+      Name: !Sub "${AWS::StackName}-MgmtNatEipSsmPath2"
+
+  MumbaiDataPlaneCidr:
+    Description: Mumbai data plane VPC CIDR (10.20.0.0/16 default)
+    Value:
+      Fn::ImportValue: !Sub "${MumbaiDataPlaneVpcStackName}-VpcCidr"
+    Export:
+      Name: !Sub "${AWS::StackName}-MumbaiDataPlaneCidr"
