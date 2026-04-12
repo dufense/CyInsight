@@ -38,7 +38,7 @@
 # GRC Shield lessons applied:
 #   - No em-dashes in GroupDescription
 #   - Fn::ImportValue syntax (not !ImportValue !Sub)
-#   - RuntimePlatform: X86_64
+#   - RuntimePlatform: configurable via CpuArchitecture parameter (X86_64 | ARM64, default X86_64)
 #   - HealthCheckGracePeriodSeconds: 180
 #   - FARGATE_SPOT 4:1 weight
 #
@@ -271,6 +271,30 @@ Parameters:
       "0" = SSL optional (verified by app via PGSSLMODE=verify-ca + CA bundle).
       "1" = DB engine rejects non-SSL connections (requires CA bundle in clients).
 
+  CpuArchitecture:
+    Type: String
+    Default: X86_64
+    AllowedValues: [X86_64, ARM64]
+    Description: >-
+      CPU architecture for the ECS Fargate task. X86_64 (default) uses Intel/AMD
+      instances. ARM64 targets AWS Graviton instances (~20% lower cost).
+      Must match the architecture of the container image pushed to ECR.
+
+  # ── Tiered Storage — Hot / Cold boundary ─────────────────────────────────────
+  # HOT_RETENTION_DAYS controls the ClickHouse → S3 cold-tier eviction boundary.
+  # Events older than this value (in days) are aged out of ClickHouse and read
+  # from the S3 archive bucket via Athena in the Forensic Investigation Console.
+  # Must match the same parameter used in the RetentionManager service and the
+  # management plane (06-management-ecs.yml).
+  HotRetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 7
+    MaxValue: 365
+    Description: >-
+      Number of days events are kept in ClickHouse hot tier before being archived
+      to S3 cold storage. Injected as HOT_RETENTION_DAYS env var. Default: 90.
+
 Conditions:
   HasClickHouse:          !Not [!Equals [!Ref ClickHouseStackName, ""]]
   HasDataPlaneRDS:        !Not [!Equals [!Ref DataPlaneRDSStackName, ""]]
@@ -439,6 +463,23 @@ Resources:
                     - "${BucketArn}/*"
                     - BucketArn:
                         Fn::ImportValue: !Sub "${DataLakeStackName}-ProcessedBucketArn"
+              # ── Cold-tier archive bucket (Task #160: S3 cold-tier pipeline) ─────
+              # RetentionManager exports aged-out events from ClickHouse to this
+              # bucket as NDJSON.gz under year=YYYY/month=MM/tenant_id=N/ prefixes.
+              # The data-plane also needs read access for Athena-based forensic queries.
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource:
+                  - Fn::ImportValue: !Sub "${DataLakeStackName}-ArchiveBucketArn"
+                  - !Sub
+                    - "${BucketArn}/*"
+                    - BucketArn:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-ArchiveBucketArn"
         - PolicyName: GlueAccess
           PolicyDocument:
             Version: "2012-10-17"
@@ -464,8 +505,17 @@ Resources:
                   - athena:StartQueryExecution
                   - athena:GetQueryExecution
                   - athena:GetQueryResults
+                  - athena:StopQueryExecution
                 Resource:
+                  # Standard security analytics workgroup
                   - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/ccc-security-analytics-${EnvironmentName}"
+                  # Forensic Investigation Console workgroup (Task #162)
+                  # Separate workgroup with dedicated result bucket and per-query cost controls.
+                  # Imported from 05-data-lake.yml AthenaForensicsWorkgroup resource.
+                  - !Sub
+                    - "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${WgName}"
+                    - WgName:
+                        Fn::ImportValue: !Sub "${DataLakeStackName}-AthenaForensicsWorkgroupName"
         - PolicyName: MSKConsumerAndProducer
           PolicyDocument:
             Version: "2012-10-17"
@@ -524,7 +574,7 @@ Resources:
       ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
       TaskRoleArn: !GetAtt ECSTaskRole.Arn
       RuntimePlatform:
-        CpuArchitecture: X86_64
+        CpuArchitecture: !Ref CpuArchitecture
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
         - Name: data-plane
@@ -572,6 +622,22 @@ Resources:
             - Name: ATHENA_WORKGROUP
               Value:
                 Fn::ImportValue: !Sub "${DataLakeStackName}-AthenaWorkgroupName"
+            # ── Cold-tier Storage Pipeline (Task #160) ───────────────────────────
+            # S3_ARCHIVE_BUCKET: destination for RetentionManager NDJSON.gz exports.
+            # Key pattern: year=YYYY/month=MM/tenant_id=<id>/events-<ts>-<id>.ndjson.gz
+            - Name: S3_ARCHIVE_BUCKET
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-ArchiveBucketName"
+            # HOT_RETENTION_DAYS: boundary between ClickHouse hot tier and S3 cold tier.
+            # Events older than this are read via Athena; younger events hit ClickHouse.
+            - Name: HOT_RETENTION_DAYS
+              Value: !Sub "${HotRetentionDays}"
+            # ── Forensic Investigation Console (Task #162) ───────────────────────
+            # FORENSICS_ATHENA_WORKGROUP: dedicated Athena workgroup for forensic queries.
+            # Isolated from operational analytics; has its own result bucket and cost controls.
+            - Name: FORENSICS_ATHENA_WORKGROUP
+              Value:
+                Fn::ImportValue: !Sub "${DataLakeStackName}-AthenaForensicsWorkgroupName"
             # ── ClickHouse OLAP cluster (optional; injected when HasClickHouse) ──
             - !If
               - HasClickHouse
