@@ -657,7 +657,7 @@ interface DataPlaneRegionHealth {
     dbConnected: boolean;
     kafkaLag: number | null;
     kafkaConnected: boolean;
-    openSearchStatus: string;
+    clickHouseStatus: string;
     storageConnected: boolean;
     storageUsedGB: number;
     storageCapacityGB: number;
@@ -795,10 +795,10 @@ function RegionHealthCards({ data }: { data: DataPlaneHealthResponse }) {
                 <div className="rounded-md bg-muted/50 p-2 text-center">
                   <div className="flex items-center justify-center gap-1 mb-1">
                     <Server className="w-3 h-3 text-muted-foreground" />
-                    <span className="text-[10px] text-muted-foreground">OpenSearch</span>
+                    <span className="text-[10px] text-muted-foreground">ClickHouse</span>
                   </div>
                   <div className="text-sm font-bold">
-                    <StatusBadge status={region.health.openSearchStatus === "green" ? "healthy" : region.health.openSearchStatus === "yellow" ? "warning" : "disconnected"} />
+                    <StatusBadge status={region.health.clickHouseStatus === "connected" ? "healthy" : region.health.clickHouseStatus === "degraded" ? "warning" : "disconnected"} />
                   </div>
                 </div>
                 <div className="rounded-md bg-muted/50 p-2 text-center">

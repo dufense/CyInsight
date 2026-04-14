@@ -1,0 +1,1103 @@
+##############################################################################
+# CyInsight - Cost-Optimized Starter Deployment
+# AWS India (ap-south-1) - Single CloudFormation Stack
+#
+# This template deploys a complete CyInsight platform for ₹30K-45K/month
+# - Combined Management + Data + Receiver planes
+# - Single-AZ RDS for cost savings
+# - Fargate Spot for 60% compute savings
+# - Single-node ClickHouse (replaces legacy OpenSearch)
+#
+# Deploy Time: ~30 minutes
+# Monthly Cost: ~₹30,000-45,000
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/single-stack/cyinsight-starter.yml \
+#     --stack-name cyinsight-starter \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --region ap-south-1 \
+#     --parameter-overrides \
+#       DomainName=yourdomain.com \
+#       CertificateArn=arn:aws:acm:ap-south-1:ACCOUNT:certificate/ID \
+#       DBPassword=YourStrongPassword123!
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CyInsight - Cost-Optimized Starter Deployment (₹30K-45K/month)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Environment name
+
+  DomainName:
+    Type: String
+    Description: Domain name for the application (e.g., app.yourdomain.com)
+    Default: ""
+
+  CertificateArn:
+    Type: String
+    Description: ACM Certificate ARN for HTTPS (required for production)
+    Default: ""
+
+  DBUsername:
+    Type: String
+    Default: cyinsight_admin
+    Description: PostgreSQL master username
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: PostgreSQL master password (min 16 characters). Also used for ClickHouse.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Docker image tag to deploy
+
+  SessionSecret:
+    Type: String
+    NoEcho: true
+    Default: "change-me-in-production"
+    Description: Express session secret
+
+  EnableFargateSpot:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable Fargate Spot for 60-70% compute savings
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  UseFargateSpot: !Equals [!Ref EnableFargateSpot, "true"]
+  UseHTTPS: !And [!Condition HasDomain, !Condition HasCertificate]
+
+Resources:
+
+  # ============================================================================
+  # VPC - 2 AZs (Cost Optimized)
+  # ============================================================================
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-${EnvironmentName}"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-igw-${EnvironmentName}"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets - 2 AZs
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-public-1-${EnvironmentName}"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-public-2-${EnvironmentName}"
+
+  # Private Subnets - 2 AZs (for ECS tasks)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-private-1-${EnvironmentName}"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-private-2-${EnvironmentName}"
+
+  # Database Subnet - Single AZ (cost optimized)
+  DatabaseSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-db-${EnvironmentName}"
+
+  # NAT Gateway - Single (cost optimized instead of 2)
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-nat-eip-${EnvironmentName}"
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-nat-${EnvironmentName}"
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-public-rt-${EnvironmentName}"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-private-rt-${EnvironmentName}"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-db-rt-${EnvironmentName}"
+
+  DatabaseSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnet
+      RouteTableId: !Ref DatabaseRouteTable
+
+  # S3 VPC Endpoint (save NAT costs)
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref DatabaseRouteTable
+
+  # ============================================================================
+  # Security Groups
+  # ============================================================================
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-alb-sg-${EnvironmentName}"
+      GroupDescription: ALB - allow HTTP/HTTPS from internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-alb-sg-${EnvironmentName}"
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-ecs-sg-${EnvironmentName}"
+      GroupDescription: ECS tasks - allow from ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: From ALB
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 10.0.0.0/16
+          Description: Internal VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-ecs-sg-${EnvironmentName}"
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-rds-sg-${EnvironmentName}"
+      GroupDescription: RDS PostgreSQL - allow from ECS only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+          Description: From ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-rds-sg-${EnvironmentName}"
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-redis-sg-${EnvironmentName}"
+      GroupDescription: ElastiCache Redis - allow from ECS only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+          Description: From ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-redis-sg-${EnvironmentName}"
+
+  # ============================================================================
+  # RDS PostgreSQL - Single AZ (Cost Optimized)
+  # ============================================================================
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CyInsight DB subnet group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "cyinsight-db-${EnvironmentName}"
+      DBInstanceClass: db.t3.medium
+      Engine: postgres
+      EngineVersion: "16.3"
+      AllocatedStorage: 100
+      MaxAllocatedStorage: 500
+      StorageType: gp3
+      MultiAZ: false
+      DBName: cyinsight
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      StorageEncrypted: true
+      EnablePerformanceInsights: false
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-db-${EnvironmentName}"
+
+  # ============================================================================
+  # ElastiCache Redis - Single Node (Cost Optimized)
+  # ============================================================================
+
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: CyInsight Redis subnet group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      ClusterName: !Sub "cyinsight-redis-${EnvironmentName}"
+      Engine: redis
+      EngineVersion: "7.1"
+      CacheNodeType: cache.t3.micro
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-redis-${EnvironmentName}"
+
+  # ============================================================================
+  # ClickHouse - Single Node (Cost Optimized, replaces legacy OpenSearch)
+  # ============================================================================
+
+  ClickHouseEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-clickhouse-${EnvironmentName}"
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ClickHouseEFS
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ClickHouseEFS
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-clickhouse-efs-sg-${EnvironmentName}"
+      GroupDescription: EFS for ClickHouse data
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+          Description: From ClickHouse tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-clickhouse-efs-sg-${EnvironmentName}"
+
+  ClickHouseEFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref ClickHouseEFS
+      PosixUser:
+        Uid: 101
+        Gid: 101
+      RootDirectory:
+        Path: /clickhouse
+        CreationInfo:
+          OwnerUid: 101
+          OwnerGid: 101
+          Permissions: "755"
+
+  ClickHouseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-clickhouse-sg-${EnvironmentName}"
+      GroupDescription: ClickHouse service - allow HTTP from ALB and native from self
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8123
+          ToPort: 8123
+          SourceSecurityGroupId: !Ref ClickHouseALBSecurityGroup
+          Description: HTTP API from ALB
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+          Description: Native protocol internal
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-clickhouse-sg-${EnvironmentName}"
+
+  ClickHouseALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-clickhouse-alb-sg-${EnvironmentName}"
+      GroupDescription: ClickHouse ALB - allow HTTP from VPC only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8123
+          ToPort: 8123
+          CidrIp: 10.0.0.0/16
+          Description: HTTP from VPC internal
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-clickhouse-alb-sg-${EnvironmentName}"
+
+  ClickHouseALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "cyinsight-ch-alb-${EnvironmentName}"
+      Scheme: internal
+      Type: application
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref ClickHouseALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+
+  ClickHouseTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "cyinsight-ch-tg-${EnvironmentName}"
+      Port: 8123
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckEnabled: true
+      HealthCheckPath: /ping
+      HealthCheckPort: "8123"
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      SuccessCode: "200"
+
+  ClickHouseListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ClickHouseALB
+      Port: 8123
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ClickHouseTargetGroup
+
+  ClickHouseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/cyinsight-clickhouse-${EnvironmentName}"
+      RetentionInDays: 7
+
+  ClickHouseTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "cyinsight-clickhouse-task-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ClickHouseLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+        - PolicyName: EFSClientAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt ClickHouseEFS.Arn
+
+  ClickHouseTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "cyinsight-clickhouse-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 2048
+      Memory: 4096
+      ExecutionRoleArn: !Ref ClickHouseTaskRole
+      TaskRoleArn: !Ref ClickHouseTaskRole
+      Volumes:
+        - Name: clickhouse-data
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref ClickHouseEFS
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref ClickHouseEFSAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: clickhouse
+          Image: clickhouse/clickhouse-server:24.8
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8123
+              Protocol: tcp
+            - ContainerPort: 9000
+              Protocol: tcp
+          Environment:
+            - Name: CLICKHOUSE_DB
+              Value: ccc
+            - Name: CLICKHOUSE_USER
+              Value: default
+            - Name: CLICKHOUSE_PASSWORD
+              Value: !Ref DBPassword
+          MountPoints:
+            - SourceVolume: clickhouse-data
+              ContainerPath: /var/lib/clickhouse
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ClickHouseLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: clickhouse
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 262144
+              HardLimit: 262144
+
+  ClickHouseService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ClickHouseListener
+      - EFSMountTarget1
+      - EFSMountTarget2
+    Properties:
+      ServiceName: !Sub "cyinsight-clickhouse-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ClickHouseTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ClickHouseSecurityGroup
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: clickhouse
+          ContainerPort: 8123
+          TargetGroupArn: !Ref ClickHouseTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+
+  # ============================================================================
+  # S3 Bucket for Data Storage
+  # ============================================================================
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cyinsight-data-${AWS::AccountId}-${EnvironmentName}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "cyinsight-data-${EnvironmentName}"
+
+  # ============================================================================
+  # ECS Cluster & IAM
+  # ============================================================================
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "cyinsight-${EnvironmentName}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - !If
+          - UseFargateSpot
+          - CapacityProvider: FARGATE_SPOT
+            Weight: 4
+            Base: 1
+          - CapacityProvider: FARGATE
+            Weight: 1
+            Base: 1
+        - !If
+          - UseFargateSpot
+          - CapacityProvider: FARGATE
+            Weight: 1
+            Base: 0
+          - !Ref AWS::NoValue
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "cyinsight-execution-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref AppSecrets
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "cyinsight-task-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+        - PolicyName: S3DataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+
+  # ============================================================================
+  # Secrets Manager
+  # ============================================================================
+
+  AppSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "cyinsight/app-secrets-${EnvironmentName}"
+      Description: CyInsight application secrets
+      SecretString: !Sub |
+        {
+          "DATABASE_URL": "postgresql://${DBUsername}:${DBPassword}@${RDSInstance.Endpoint.Address}:5432/cyinsight?sslmode=require",
+          "SESSION_SECRET": "${SessionSecret}",
+          "CLICKHOUSE_URL": "http://${ClickHouseALB.DNSName}:8123",
+          "CLICKHOUSE_USER": "default",
+          "CLICKHOUSE_PASSWORD": "${DBPassword}",
+          "CLICKHOUSE_DATABASE": "ccc",
+          "S3_BUCKET": "${DataBucket}"
+        }
+
+  # ============================================================================
+  # CloudWatch Log Group
+  # ============================================================================
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/cyinsight-${EnvironmentName}"
+      RetentionInDays: 7
+
+  # ============================================================================
+  # ECS Task Definition
+  # ============================================================================
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: RDSInstance
+    Properties:
+      Family: !Sub "cyinsight-${EnvironmentName}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 2048
+      Memory: 4096
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: cyinsight-app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cyinsight:${ImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "5000"
+            - Name: PLANE
+              Value: combined
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: DB_SSL_CA
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: PGSSLMODE
+              Value: require
+            - Name: NODE_EXTRA_CA_CERTS
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "${AppSecrets}:DATABASE_URL::"
+            - Name: SESSION_SECRET
+              ValueFrom: !Sub "${AppSecrets}:SESSION_SECRET::"
+            - Name: CLICKHOUSE_URL
+              ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_URL::"
+            - Name: CLICKHOUSE_USER
+              ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_USER::"
+            - Name: CLICKHOUSE_PASSWORD
+              ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_PASSWORD::"
+            - Name: CLICKHOUSE_DATABASE
+              ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_DATABASE::"
+            - Name: REDIS_URL
+              Value: !Join [":", [!GetAtt RedisCluster.RedisEndpoint.Address, "6379"]]
+            - Name: S3_BUCKET
+              ValueFrom: !Sub "${AppSecrets}:S3_BUCKET::"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65536
+              HardLimit: 65536
+
+  # ============================================================================
+  # Application Load Balancer
+  # ============================================================================
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "cyinsight-alb-${EnvironmentName}"
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "cyinsight-tg-${EnvironmentName}"
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckPath: /healthz
+      HealthCheckPort: "5000"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - UseHTTPS
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref ALBTargetGroup
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseHTTPS
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ============================================================================
+  # ECS Service
+  # ============================================================================
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListenerHTTP
+    Properties:
+      ServiceName: !Sub "cyinsight-${EnvironmentName}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      EnableExecuteCommand: true
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: cyinsight-app
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ============================================================================
+  # Auto Scaling
+  # ============================================================================
+
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: ECSService
+    Properties:
+      MinCapacity: 2
+      MaxCapacity: 6
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "cyinsight-cpu-scaling-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # ============================================================================
+  # CloudWatch Alarms
+  # ============================================================================
+
+  AlarmHighCPU:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-high-cpu-${EnvironmentName}"
+      AlarmDescription: ECS CPU utilization above 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmDBConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-db-connections-${EnvironmentName}"
+      AlarmDescription: RDS connections above 80% of max
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+
+  ApplicationURL:
+    Description: Application URL
+    Value: !If
+      - UseHTTPS
+      - !Sub "https://${DomainName}"
+      - !Sub "http://${ALB.DNSName}"
+
+  ALBDNSName:
+    Description: ALB DNS Name (for DNS configuration)
+    Value: !GetAtt ALB.DNSName
+
+  DatabaseEndpoint:
+    Description: RDS Database Endpoint
+    Value: !GetAtt RDSInstance.Endpoint.Address
+
+  ClickHouseEndpoint:
+    Description: ClickHouse ALB Endpoint
+    Value: !GetAtt ClickHouseALB.DNSName
+
+  S3BucketName:
+    Description: S3 Data Bucket
+    Value: !Ref DataBucket
+
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Description: ECS Service Name
+    Value: !GetAtt ECSService.Name

@@ -185,8 +185,9 @@ export class ClickHouseClient {
    */
   async ingestEvent(event: IngestEventPayload): Promise<void> {
     const parsed = new URL(this.url);
+    // Insert into the canonical single-node table (no distributed engine in starter stack)
     const insertSql =
-      `INSERT INTO ${this.database}.security_events_distributed ` +
+      `INSERT INTO ${this.database}.security_events ` +
       `(event_id, tenant_id, source_type, severity, event_type, host, ` +
       `src_ip, dst_ip, user_name, process_name, mitre_tactic, mitre_technique, ` +
       `kill_chain_phase, confidence_score, data_region, raw_event, ` +
@@ -294,7 +295,7 @@ export class ClickHouseClient {
         toUInt64(countMerge(cnt))                    AS count,
         severity,
         source_type                                  AS sourceType
-      FROM ${this.database}.mv_hourly_event_counts
+      FROM ${this.database}.security_events_hourly_stats
       WHERE ${where}
       GROUP BY hour, severity, source_type
       ORDER BY hour DESC
@@ -325,7 +326,7 @@ export class ClickHouseClient {
         toUInt64(countIf(severity = 'medium'))     AS medium,
         toUInt64(countIf(severity = 'low'))        AS low,
         round(avg(confidence_score), 1)            AS avgConfidence
-      FROM ${this.database}.security_events_distributed
+      FROM ${this.database}.security_events
       WHERE ${where}
     `;
     const rows = await this.queryRows<EventStats>(sql);
@@ -374,7 +375,7 @@ export class ClickHouseClient {
 
     const [countRows, rows] = await Promise.all([
       this.queryRows<{ total: string }>(
-        `SELECT count() AS total FROM ${this.database}.security_events_distributed WHERE ${where}`,
+        `SELECT count() AS total FROM ${this.database}.security_events WHERE ${where}`,
       ),
       this.queryRows(
         `SELECT
@@ -393,7 +394,7 @@ export class ClickHouseClient {
           confidence_score,
           data_region,
           formatDateTime(ingested_at, '%Y-%m-%dT%H:%M:%SZ')    AS ingested_at
-        FROM ${this.database}.security_events_distributed
+        FROM ${this.database}.security_events
         WHERE ${where}
         ORDER BY ingested_at DESC
         LIMIT ${limit} OFFSET ${offset}`,
@@ -424,7 +425,7 @@ export class ClickHouseClient {
         groupArray(DISTINCT source_type)     AS source_types,
         max(confidence_score)                AS max_confidence,
         max(ingested_at)                     AS last_seen
-      FROM ${this.database}.security_events_distributed
+      FROM ${this.database}.security_events
       WHERE tenant_id = ${tenantId}
         AND ingested_at >= '${since}'
         AND iocs != '[]'

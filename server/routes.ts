@@ -1212,7 +1212,7 @@ export async function registerRoutes(
         },
         {
           name: "storage",
-          description: "Event persistence, incident generation, OpenSearch indexing",
+          description: "Event persistence, incident generation, ClickHouse indexing",
           status: kafkaAvailable ? "healthy" : "standalone",
           url: process.env.STORAGE_SERVICE_URL || null,
           topics: { produces: [], consumes: ["secureops.events.alerts"] },
@@ -1264,7 +1264,7 @@ export async function registerRoutes(
           { stage: 2, service: "normalizer", input: "secureops.events.raw", output: "secureops.events.normalized" },
           { stage: 3, service: "detection-engine", input: "secureops.events.normalized", output: "secureops.events.enriched" },
           { stage: 4, service: "enrichment", input: "secureops.events.enriched", output: "secureops.events.alerts" },
-          { stage: 5, service: "storage", input: "secureops.events.alerts", output: "PostgreSQL / OpenSearch" },
+          { stage: 5, service: "storage", input: "secureops.events.alerts", output: "PostgreSQL / ClickHouse" },
         ],
         timestamp: new Date().toISOString(),
       });
@@ -35934,8 +35934,8 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
 
         const dbLatencyMs = await probeRegionDb(region.dbConnectionString);
         const kafkaLag = null; // N/A — Kafka consumer-lag metrics require broker-side API access
-        // OpenSearch endpoint is not separately configured per region — report null (unknown)
-        const openSearchStatus: string | null = null;
+        // ClickHouse is the single source of truth for security events in the starter stack.
+        const clickHouseStatus = health?.storageConnected ? "connected" : "disconnected";
         const storageUsedGB = 0; // N/A — real usage requires cloud-provider storage API
         const storageCapacityGB: number | null = null; // N/A — not probed
 
@@ -35955,7 +35955,7 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
             dbConnected: health?.dbConnected || false,
             kafkaLag,
             kafkaConnected: health?.kafkaConnected || false,
-            openSearchStatus,
+            clickHouseStatus,
             storageConnected: health?.storageConnected || false,
             storageUsedGB,
             storageCapacityGB,
