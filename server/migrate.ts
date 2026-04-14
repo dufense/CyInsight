@@ -159,6 +159,377 @@ export async function runMigrations() {
     } finally { client3.release(); }
   }
 
+  // Ensure graph_nodes, graph_edges, and is_template columns exist on playbooks table (SOAR Visual Editor)
+  try {
+    const client4 = await pool.connect();
+    try {
+      await client4.query(`
+        ALTER TABLE playbooks
+          ADD COLUMN IF NOT EXISTS graph_nodes jsonb DEFAULT '[]'::jsonb,
+          ADD COLUMN IF NOT EXISTS graph_edges jsonb DEFAULT '[]'::jsonb,
+          ADD COLUMN IF NOT EXISTS is_template boolean NOT NULL DEFAULT false;
+      `);
+    } finally { client4.release(); }
+  } catch (err: any) {
+    console.error("Playbooks graph column migration error (non-fatal):", err.message);
+  }
+
+  // ─── Add first-class parse/AI fields to security_events (#157) ──────────────
+  try {
+    const clientAI = await pool.connect();
+    try {
+      await clientAI.query(`
+        ALTER TABLE security_events ADD COLUMN IF NOT EXISTS parse_confidence INTEGER;
+        ALTER TABLE security_events ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT false;
+        ALTER TABLE security_events ADD COLUMN IF NOT EXISTS ai_reasoning TEXT;
+        ALTER TABLE security_events ADD COLUMN IF NOT EXISTS raw_log TEXT;
+        ALTER TABLE security_events ADD COLUMN IF NOT EXISTS device_fingerprint_id INTEGER;
+      `);
+    } finally { clientAI.release(); }
+  } catch (err: any) {
+    console.error("security_events AI fields migration error (non-fatal):", err.message);
+  }
+
+  // ─── Extend event_type enum with web, database, ot_iot (#157) ────────────────
+  try {
+    const client5a = await pool.connect();
+    try {
+      await client5a.query(`
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'web';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'database';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'ot_iot';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'privilege_escalation';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'lateral_movement';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'defense_evasion';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'failed_auth';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'data_exfiltration';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'ransomware';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+        DO $$ BEGIN
+          ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'malware';
+        EXCEPTION WHEN others THEN null;
+        END $$;
+      `);
+    } finally { client5a.release(); }
+  } catch (err: any) {
+    console.error("event_type enum extension error (non-fatal):", err.message);
+  }
+
+  // ─── Universal Log Ingestion & Parsing tables (#157) ─────────────────────────
+  try {
+    const client5 = await pool.connect();
+    try {
+      await client5.query(`
+        DO $$ BEGIN
+          CREATE TYPE "public"."log_source_type" AS ENUM(
+            'firewall','ids_ips','waf','proxy','edr','email_gateway',
+            'database_monitor','casb','cloud','ot_iot','network_tap',
+            'siem','identity','vulnerability_scanner','custom'
+          );
+        EXCEPTION WHEN duplicate_object THEN null;
+        END $$;
+
+        DO $$ BEGIN
+          CREATE TYPE "public"."log_source_protocol" AS ENUM(
+            'syslog_udp','syslog_tcp','syslog_tls','http_webhook','cef','leef',
+            'json','xml','plaintext','file_upload','api_pull'
+          );
+        EXCEPTION WHEN duplicate_object THEN null;
+        END $$;
+
+        CREATE TABLE IF NOT EXISTS log_sources (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          name VARCHAR(255) NOT NULL,
+          source_type log_source_type DEFAULT 'custom' NOT NULL,
+          protocol log_source_protocol DEFAULT 'json' NOT NULL,
+          host VARCHAR(255),
+          port INTEGER,
+          expected_format VARCHAR(100),
+          tags TEXT[] DEFAULT '{}',
+          fingerprint_id INTEGER,
+          is_active BOOLEAN DEFAULT true NOT NULL,
+          metadata JSONB DEFAULT '{}',
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS device_fingerprints (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          source_identifier VARCHAR(255) NOT NULL,
+          vendor VARCHAR(200),
+          product VARCHAR(200),
+          log_format VARCHAR(100),
+          event_category VARCHAR(100),
+          detected_fields JSONB DEFAULT '[]',
+          sample_log_lines TEXT[] DEFAULT '{}',
+          ai_confidence INTEGER DEFAULT 0,
+          ai_reasoning TEXT,
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS source_health (
+          id SERIAL PRIMARY KEY,
+          source_id INTEGER NOT NULL REFERENCES log_sources(id) ON DELETE CASCADE,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          events_per_min REAL DEFAULT 0,
+          parse_success_rate REAL DEFAULT 100,
+          last_seen TIMESTAMP,
+          error_rate REAL DEFAULT 0,
+          total_events_today INTEGER DEFAULT 0,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS log_sources_tenant_id_idx ON log_sources(tenant_id);
+        CREATE INDEX IF NOT EXISTS device_fingerprints_tenant_source_idx ON device_fingerprints(tenant_id, source_identifier);
+        CREATE INDEX IF NOT EXISTS source_health_source_id_idx ON source_health(source_id);
+        CREATE INDEX IF NOT EXISTS source_health_tenant_id_idx ON source_health(tenant_id);
+      `);
+    } finally { client5.release(); }
+  } catch (err: any) {
+    console.error("Log ingestion tables migration error (non-fatal):", err.message);
+  }
+
+  // ── Multi-Vector Attack Detection Engine tables (Task #158) ──────────────────
+  try {
+    const clientAttack = await pool.connect();
+    try {
+      await clientAttack.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'detection_feedback_type') THEN
+            CREATE TYPE detection_feedback_type AS ENUM ('true_positive', 'false_positive', 'benign');
+          END IF;
+        END $$;
+      `);
+
+      await clientAttack.query(`
+        CREATE TABLE IF NOT EXISTS attack_detections (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          event_id INTEGER REFERENCES security_events(id) ON DELETE SET NULL,
+          incident_id INTEGER REFERENCES incidents(id) ON DELETE SET NULL,
+          attack_category VARCHAR(100) NOT NULL,
+          sub_type VARCHAR(200),
+          confidence INTEGER NOT NULL DEFAULT 0,
+          severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+          mitre_attack_id VARCHAR(50),
+          mitre_attack_ids TEXT[] DEFAULT '{}',
+          kill_chain_phase VARCHAR(100),
+          explanation TEXT,
+          entities JSONB DEFAULT '{"ips":[],"users":[],"hosts":[],"hashes":[],"domains":[]}',
+          signal_score INTEGER DEFAULT 0,
+          signals JSONB DEFAULT '[]',
+          behavioral_deviation_score INTEGER DEFAULT 0,
+          attack_chain_id VARCHAR(100),
+          raw_context JSONB,
+          detected_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS attack_detections_tenant_idx ON attack_detections(tenant_id);
+        CREATE INDEX IF NOT EXISTS attack_detections_event_idx ON attack_detections(event_id);
+        CREATE INDEX IF NOT EXISTS attack_detections_chain_idx ON attack_detections(attack_chain_id);
+        CREATE INDEX IF NOT EXISTS attack_detections_category_idx ON attack_detections(attack_category);
+        CREATE INDEX IF NOT EXISTS attack_detections_detected_at_idx ON attack_detections(detected_at DESC);
+      `);
+
+      await clientAttack.query(`
+        CREATE TABLE IF NOT EXISTS attack_chain_groups (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          chain_id VARCHAR(100) NOT NULL UNIQUE,
+          title VARCHAR(500) NOT NULL,
+          description TEXT,
+          attack_categories TEXT[] DEFAULT '{}',
+          kill_chain_phases TEXT[] DEFAULT '{}',
+          shared_entities JSONB DEFAULT '{"ips":[],"users":[],"hosts":[],"hashes":[]}',
+          event_ids INTEGER[] DEFAULT '{}',
+          detection_ids INTEGER[] DEFAULT '{}',
+          incident_id INTEGER REFERENCES incidents(id) ON DELETE SET NULL,
+          overall_confidence INTEGER DEFAULT 0,
+          severity VARCHAR(20) DEFAULT 'medium',
+          time_window_minutes INTEGER DEFAULT 60,
+          promoted_to_incident BOOLEAN DEFAULT false,
+          first_event_at TIMESTAMP,
+          last_event_at TIMESTAMP,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS attack_chain_groups_tenant_idx ON attack_chain_groups(tenant_id);
+        CREATE INDEX IF NOT EXISTS attack_chain_groups_updated_idx ON attack_chain_groups(updated_at DESC);
+      `);
+
+      await clientAttack.query(`
+        CREATE TABLE IF NOT EXISTS detection_feedback (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          detection_id INTEGER REFERENCES attack_detections(id) ON DELETE SET NULL,
+          incident_id INTEGER REFERENCES incidents(id) ON DELETE SET NULL,
+          analyst_user_id VARCHAR(255) NOT NULL,
+          feedback_type detection_feedback_type NOT NULL,
+          attack_category VARCHAR(100),
+          original_confidence INTEGER,
+          notes TEXT,
+          used_for_training BOOLEAN DEFAULT false,
+          training_weight REAL DEFAULT 1.0,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS detection_feedback_tenant_idx ON detection_feedback(tenant_id);
+        CREATE INDEX IF NOT EXISTS detection_feedback_detection_idx ON detection_feedback(detection_id);
+      `);
+
+      await clientAttack.query(`
+        CREATE TABLE IF NOT EXISTS category_confidence_thresholds (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          attack_category VARCHAR(100) NOT NULL,
+          min_confidence_threshold INTEGER DEFAULT 40,
+          tp_count INTEGER DEFAULT 0,
+          fp_count INTEGER DEFAULT 0,
+          benign_count INTEGER DEFAULT 0,
+          few_shot_examples JSONB DEFAULT '[]',
+          updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          UNIQUE(tenant_id, attack_category)
+        );
+        CREATE INDEX IF NOT EXISTS category_thresholds_tenant_idx ON category_confidence_thresholds(tenant_id);
+      `);
+
+      console.log("[Migration] Attack detection engine tables created/verified (Task #158)");
+    } catch (e: any) {
+      console.error("[Migration] Attack detection tables error (non-fatal):", e.message);
+    } finally {
+      clientAttack.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] Attack detection pool connection error:", e.message);
+  }
+
+  // ── Integration Autoheal (Task #159) ─────────────────────────────────────
+  try {
+    const clientHeal = await pool.connect();
+    try {
+      await clientHeal.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'heal_failure_type') THEN
+            CREATE TYPE heal_failure_type AS ENUM (
+              'auth_failure', 'endpoint_changed', 'rate_limited', 'schema_changed',
+              'connectivity', 'api_version', 'ssl_error', 'unknown'
+            );
+          END IF;
+        END $$;
+
+        ALTER TABLE security_integrations
+          ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS auto_heal_enabled BOOLEAN NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS last_heal_attempt_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS last_heal_status VARCHAR(50),
+          ADD COLUMN IF NOT EXISTS last_heal_message TEXT;
+
+        CREATE TABLE IF NOT EXISTS integration_heal_logs (
+          id SERIAL PRIMARY KEY,
+          integration_id INTEGER NOT NULL REFERENCES security_integrations(id) ON DELETE CASCADE,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+          platform_key VARCHAR(100) NOT NULL,
+          platform_name VARCHAR(200) NOT NULL,
+          failure_type heal_failure_type NOT NULL,
+          error_message TEXT,
+          heal_strategy VARCHAR(200),
+          config_patch JSONB,
+          succeeded BOOLEAN NOT NULL,
+          result_message TEXT,
+          ai_diagnosis TEXT,
+          consecutive_failures_at_attempt INTEGER DEFAULT 0,
+          attempted_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS heal_logs_integration_idx ON integration_heal_logs(integration_id);
+        CREATE INDEX IF NOT EXISTS heal_logs_tenant_idx ON integration_heal_logs(tenant_id);
+        CREATE INDEX IF NOT EXISTS heal_logs_attempted_idx ON integration_heal_logs(attempted_at DESC);
+      `);
+      console.log("[Migration] Integration autoheal tables created/verified (Task #159)");
+    } catch (e: any) {
+      console.error("[Migration] Autoheal tables error (non-fatal):", e.message);
+    } finally {
+      clientHeal.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] Autoheal pool connection error:", e.message);
+  }
+
+  // ── Log Investigation Console tables (Task #162) ─────────────────────────────
+  try {
+    const clientInv = await pool.connect();
+    try {
+      await clientInv.query(`
+        CREATE TABLE IF NOT EXISTS investigation_sessions (
+          id SERIAL PRIMARY KEY,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          analyst_id VARCHAR(255) NOT NULL,
+          name VARCHAR(255) NOT NULL,
+          description TEXT,
+          source_mode VARCHAR(20) NOT NULL DEFAULT 'live',
+          query_params JSONB DEFAULT '{}',
+          last_run_at TIMESTAMP,
+          result_count INTEGER DEFAULT 0,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS investigation_sessions_tenant_idx ON investigation_sessions(tenant_id);
+        CREATE INDEX IF NOT EXISTS investigation_sessions_analyst_idx ON investigation_sessions(analyst_id);
+
+        CREATE TABLE IF NOT EXISTS investigation_exports (
+          id SERIAL PRIMARY KEY,
+          session_id INTEGER REFERENCES investigation_sessions(id) ON DELETE SET NULL,
+          tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          analyst_id VARCHAR(255) NOT NULL,
+          export_name VARCHAR(255),
+          row_count INTEGER DEFAULT 0,
+          file_hash VARCHAR(64),
+          s3_key VARCHAR(500),
+          query_params JSONB DEFAULT '{}',
+          exported_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS investigation_exports_tenant_idx ON investigation_exports(tenant_id);
+        CREATE INDEX IF NOT EXISTS investigation_exports_session_idx ON investigation_exports(session_id);
+        -- Add bundle_data column idempotently for immutable artifact storage
+        ALTER TABLE investigation_exports ADD COLUMN IF NOT EXISTS bundle_data BYTEA;
+      `);
+      console.log("[Migration] Investigation console tables created/verified (Task #162)");
+    } catch (e: any) {
+      console.error("[Migration] Investigation tables error (non-fatal):", e.message);
+    } finally {
+      clientInv.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] Investigation pool connection error:", e.message);
+  }
+
   try {
     const migrationDb = drizzle(pool);
     await migrate(migrationDb, { migrationsFolder: "./migrations" });
