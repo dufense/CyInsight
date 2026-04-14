@@ -28,6 +28,17 @@ export interface EventRecord {
   normalizedAt?: string;
   enrichedAt?: string;
   correlatedAt?: string;
+  // Enriched ClickHouse columns (mapped from incoming payload)
+  host?: string;
+  srcIp?: string;
+  dstIp?: string;
+  userName?: string;
+  processName?: string;
+  killChainPhase?: string;
+  confidenceScore?: number;
+  dataRegion?: string;
+  normalizedEvent?: Record<string, any>;
+  iocs?: any;
 }
 
 export interface WriteResult {

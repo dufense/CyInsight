@@ -2,7 +2,7 @@ import express from "express";
 import { Pool } from "pg";
 import { EventWriter, type EventRecord } from "./event-writer";
 import { IncidentGenerator } from "./incident-generator";
-import { OpenSearchIndexer } from "./opensearch-indexer";
+import { ClickHouseIndexer } from "./clickhouse-indexer";
 import { RetentionManager } from "./retention";
 
 const app = express();
@@ -10,8 +10,17 @@ const PORT = parseInt(process.env.PORT || "5000", 10);
 const SERVICE_NAME = "storage";
 const KAFKA_BROKERS = process.env.KAFKA_BROKERS || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "";
-const OPENSEARCH_INDEX = process.env.OPENSEARCH_INDEX || "secureops-events";
+
+// ClickHouse Configuration (replaces OpenSearch)
+const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || "";
+const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "ccc";
+const CLICKHOUSE_TABLE = process.env.CLICKHOUSE_TABLE || "security_events";
+const CLICKHOUSE_USER = process.env.CLICKHOUSE_USER || "default";
+const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD || "";
+
+// OpenSearch has been removed from the starter stack; ClickHouse is the
+// single source of truth for security events.
+
 const WRITE_LATENCY_PAUSE_THRESHOLD = parseInt(process.env.BACKPRESSURE_LATENCY_MS || process.env.WRITE_LATENCY_PAUSE_THRESHOLD || "5000", 10);
 
 app.use(express.json({ limit: "50mb" }));
@@ -31,13 +40,19 @@ const pool = new Pool({
 
 const eventWriter = new EventWriter(pool);
 const incidentGenerator = new IncidentGenerator(pool);
-const openSearchIndexer = new OpenSearchIndexer({
-  url: OPENSEARCH_URL,
-  index: OPENSEARCH_INDEX,
-  username: process.env.OPENSEARCH_USERNAME,
-  password: process.env.OPENSEARCH_PASSWORD,
+
+// ClickHouse Indexer (replaces OpenSearch)
+const clickHouseIndexer = new ClickHouseIndexer({
+  url: CLICKHOUSE_URL,
+  database: CLICKHOUSE_DATABASE,
+  table: CLICKHOUSE_TABLE,
+  username: CLICKHOUSE_USER,
+  password: CLICKHOUSE_PASSWORD,
   batchSize: 200,
 });
+
+
+
 const retentionManager = new RetentionManager(pool, {
   hotDays: parseInt(process.env.RETENTION_HOT_DAYS || "90", 10),
   warmDays: parseInt(process.env.RETENTION_WARM_DAYS || "365", 10),
@@ -82,6 +97,17 @@ async function processAlertBatch(messages: any[]): Promise<void> {
         normalizedAt: payload.normalizedAt || null,
         enrichedAt: payload.enrichedAt || null,
         correlatedAt: payload.correlatedAt || null,
+        // enriched ClickHouse columns mapped from payload
+        host: payload.host || payload.hostname || payload.asset || null,
+        srcIp: payload.srcIp || payload.src_ip || payload.attacker || payload.sourceIp || null,
+        dstIp: payload.dstIp || payload.dst_ip || null,
+        userName: payload.userName || payload.user_name || null,
+        processName: payload.processName || payload.process_name || null,
+        killChainPhase: payload.killChainPhase || payload.kill_chain_phase || null,
+        confidenceScore: payload.confidenceScore || payload.confidence_score || payload.riskScore || payload.risk_score || null,
+        dataRegion: payload.dataRegion || payload.data_region || null,
+        normalizedEvent: payload.normalizedEvent || payload.normalized_event || null,
+        iocs: payload.iocs || payload.sigma_matches || null,
       });
     } catch (err: any) {
       errorsCount++;
@@ -113,7 +139,12 @@ async function processAlertBatch(messages: any[]): Promise<void> {
   const incidents = await incidentGenerator.generateFromEvents(events);
   incidentsGenerated += incidents.length;
 
-  await openSearchIndexer.indexBatch(events);
+  // Index to ClickHouse (primary)
+  const chResult = await clickHouseIndexer.indexBatch(events);
+  if (chResult.errors > 0) {
+    console.error(`[${SERVICE_NAME}] ClickHouse indexing errors: ${chResult.errors}`);
+  }
+
 }
 
 async function startKafkaConsumer(): Promise<void> {
@@ -163,7 +194,7 @@ app.get("/health", (_req, res) => {
       consumerPaused,
       eventWriter: eventWriter.getStats(),
       incidentGenerator: incidentGenerator.getStats(),
-      openSearch: openSearchIndexer.getStats(),
+      clickHouse: clickHouseIndexer.getStats(),
     },
   });
 });
@@ -180,7 +211,7 @@ app.get("/metrics", (_req, res) => {
       writeLatencyMs: eventWriter.getWriteLatency(),
       eventWriter: eventWriter.getStats(),
       incidentGenerator: incidentGenerator.getStats(),
-      openSearch: openSearchIndexer.getStats(),
+      clickHouse: clickHouseIndexer.getStats(),
     },
   });
 });
@@ -194,7 +225,10 @@ app.post("/store", async (req, res) => {
     const incidents = await incidentGenerator.generateFromEvents(events);
     incidentsGenerated += incidents.length;
 
-    await openSearchIndexer.indexBatch(events);
+    // Index to ClickHouse (primary)
+    await clickHouseIndexer.indexBatch(events);
+
+
 
     res.json({
       success: true,
@@ -242,7 +276,14 @@ async function startup() {
     console.error(`[${SERVICE_NAME}] Database connection failed: ${err.message}`);
   }
 
-  await openSearchIndexer.connect();
+  // Connect to ClickHouse
+  const chConnected = await clickHouseIndexer.connect();
+  if (chConnected) {
+    console.log(`[${SERVICE_NAME}] ClickHouse indexer ready`);
+  } else {
+    console.warn(`[${SERVICE_NAME}] ClickHouse not configured or unavailable`);
+  }
+
   await startKafkaConsumer();
   retentionManager.startSchedule(24);
 }
