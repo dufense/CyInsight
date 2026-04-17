@@ -454,7 +454,9 @@ Resources:
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-region"
             # ── ClickHouse (injected only when EnableClickHouse=true) ───────────
             # CLICKHOUSE_URL activates the ClickHouse client in server/clickhouse-client.ts.
-            # The URL is per-region (points to this region's NLB); password is shared.
+            # Both URL and password are PER-REGION
+            # (ccc/data-plane/{region}/clickhouse-{url,password}) so each region can
+            # rotate credentials independently and connect to its own regional NLB.
             # Without CLICKHOUSE_URL the app falls back silently to PostgreSQL.
             # Each entry uses a per-item !If/AWS::NoValue so the Secrets list type stays valid
             # when the condition is false.
@@ -466,7 +468,7 @@ Resources:
             - !If
               - ClickHouseEnabled
               - Name: CLICKHOUSE_PASSWORD
-                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-password"
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/clickhouse-password"
               - !Ref AWS::NoValue
             - !If
               - ClickHouseEnabled

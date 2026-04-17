@@ -78,11 +78,15 @@ if confirm "Configure ClickHouse secrets? (skip if not using ClickHouse)"; then
   # NLB DNS produced by clickhouse.yml (e.g. http://ccc-clickhouse-nlb-production.internal:8123).
   put_secret "shared/clickhouse-url" \
     "ClickHouse HTTP endpoint shared by the management plane (e.g. http://ccc-clickhouse-nlb-production.internal:8123)"
-  # Per-region ClickHouse URL — used by each data plane region. If you run a
-  # single shared ClickHouse cluster, set the same URL for every region.
+  # Per-region ClickHouse URL + password — used by each data plane region.
+  # Per-region password lets each region rotate independently. If you run a
+  # single shared ClickHouse cluster, set the same URL & password for every
+  # region (still seeded as the cluster's actual password).
   for region in "${DATA_PLANE_REGIONS[@]}"; do
     put_secret "data-plane/${region}/clickhouse-url" \
       "ClickHouse HTTP endpoint for ${region} (e.g. http://ccc-clickhouse-nlb-production.internal:8123)"
+    put_secret "data-plane/${region}/clickhouse-password" \
+      "ClickHouse password for ${region} data plane (typically same as shared/clickhouse-password)"
   done
 fi
 

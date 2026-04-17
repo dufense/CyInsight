@@ -686,13 +686,38 @@ jobs:
         run: |
           ./deploy/ecs/scripts/validate-secrets.sh --plane clickhouse-pre
 
+      - name: Discover per-region data-plane SG IDs
+        # ClickHouse SG must whitelist every data-plane region's ECS task SG.
+        # We auto-discover from the per-region data-plane CloudFormation
+        # stack outputs; missing stacks (i.e. region not yet deployed) are
+        # left blank, so the corresponding ingress rule is simply skipped.
+        id: dp-sgs
+        env:
+          REGIONS: "in-west-1 us-east-1 ke-east-1 sa-central-1 bh-east-1"
+        run: |
+          set -euo pipefail
+          for r in $REGIONS; do
+            sg=$(aws cloudformation describe-stacks \
+                   --stack-name "ccc-data-plane-${r}" \
+                   --query 'Stacks[0].Outputs[?OutputKey==`DataPlaneSecurityGroupId`].OutputValue' \
+                   --output text 2>/dev/null || echo "")
+            [[ "$sg" == "None" ]] && sg=""
+            # Sanitise region name for env-var key (in-west-1 → IN_WEST_1)
+            key="DATA_PLANE_SG_$(echo "$r" | tr 'a-z-' 'A-Z_')"
+            echo "${key}=${sg}" >> "$GITHUB_ENV"
+            echo "  ${key}=${sg:-<unset>}"
+          done
+
       - name: Deploy ClickHouse stack
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
           ENVIRONMENT:        ${{ needs.build-and-push.outputs.environment }}
           CH_KEY_PAIR:        ${{ secrets.CH_KEY_PAIR }}
           CH_INSTANCE_TYPE:   ${{ vars.CH_INSTANCE_TYPE || 'r6i.xlarge' }}
+          # Legacy single-region fallback retained for back-compat.
           DATA_PLANE_SG_ID:   ${{ vars.DATA_PLANE_SG_ID || '' }}
+          # Per-region SG IDs are discovered above and exported via $GITHUB_ENV;
+          # no additional plumbing needed here.
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack clickhouse
 

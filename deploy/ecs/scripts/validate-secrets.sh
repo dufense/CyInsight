@@ -163,19 +163,24 @@ validate_management() {
 }
 
 validate_data() {
+  # Per-region ClickHouse validation: every secret consumed by the data-plane
+  # ECS task definition (CLICKHOUSE_URL, CLICKHOUSE_PASSWORD) plus the shared
+  # CLICKHOUSE_USER / CLICKHOUSE_DATABASE references that ride along.
+  _check_dp_ch() {
+    local r="$1"
+    log "[Data Plane ClickHouse: ${r}]"
+    check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-url"
+    check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-password"
+    check_secret_path "${PREFIX}/shared/clickhouse-user"
+    check_secret_path "${PREFIX}/shared/clickhouse-database"
+  }
   if [[ -n "${DP_REGION}" ]]; then
     check_data_plane_for_region "${DP_REGION}"
-    if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
-      log "[Data Plane ClickHouse: ${DP_REGION}]"
-      check_secret_path "${PREFIX}/data-plane/${DP_REGION}/clickhouse-url"
-    fi
+    [[ "${ENABLE_CLICKHOUSE}" == "true" ]] && _check_dp_ch "${DP_REGION}"
   else
     for r in "${DATA_PLANE_REGIONS[@]}"; do
       check_data_plane_for_region "${r}"
-      if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
-        log "[Data Plane ClickHouse: ${r}]"
-        check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-url"
-      fi
+      [[ "${ENABLE_CLICKHOUSE}" == "true" ]] && _check_dp_ch "${r}"
     done
   fi
 }
