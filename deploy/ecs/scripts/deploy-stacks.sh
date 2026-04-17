@@ -170,6 +170,12 @@ deploy_clickhouse() {
     "InstanceType=${CH_INSTANCE_TYPE}"
   )
 
+  # VPC CIDR is used as the only allowed source network in the ClickHouse
+  # server-side user ACL (defence-in-depth on top of the EC2 security group).
+  if [[ -n "${VPC_CIDR:-}" ]]; then
+    params+=("VpcCidr=${VPC_CIDR}")
+  fi
+
   if [[ -n "${DATA_PLANE_SG_ID}" ]]; then
     params+=("DataPlaneECSSecurityGroupId=${DATA_PLANE_SG_ID}")
   fi

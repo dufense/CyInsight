@@ -105,6 +105,15 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: Amazon Linux 2023 x86_64 SSM path (auto-resolves to latest)
 
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    Description: |
+      VPC CIDR block. Used as the *only* allowed source network in the
+      ClickHouse server-side user ACL (defence-in-depth on top of the EC2
+      security group). Must match the actual VPC where ClickHouse runs.
+
 Conditions:
   HasDataPlaneECSSG: !Not [!Equals [!Ref DataPlaneECSSecurityGroupId, ""]]
 
@@ -366,27 +375,35 @@ Resources:
             </clickhouse>
             XMLCONF
 
-            # Set password for the configured user (named after CH_USER from secrets).
-            # If CH_USER is "default", the existing default user is overridden.
-            # Otherwise a new named user is created and the default user is locked
-            # (no_password removed, no networks) to enforce auth.
+            # Set password for the "default" ClickHouse user.
+            # Network ACL is restricted to the VPC CIDR (defence-in-depth on top
+            # of the EC2 security group, which already restricts to plane SGs).
+            # We write the XML with a single-quoted heredoc (no shell expansion)
+            # and substitute the hash + CIDR with sed so there is no ambiguity
+            # between CFN substitution and bash parameter expansion.
             CH_PASS_HASH=$(echo -n "$CH_PASSWORD" | sha256sum | awk '{print $1}')
-            CH_USER="${!CH_USER:-default}"
-            cat > /etc/clickhouse-server/users.d/ccc-user.xml << USERXML
+            : "${!CH_USER:=default}"
+            cat > /etc/clickhouse-server/users.d/ccc-user.xml << 'USERXML'
             <clickhouse>
               <users>
-                <${!CH_USER}>
-                  <password_sha256_hex>${!CH_PASS_HASH}</password_sha256_hex>
+                <default>
+                  <password_sha256_hex>__CH_PASS_HASH__</password_sha256_hex>
                   <networks>
-                    <ip>::/0</ip>
+                    <ip>__VPC_CIDR__</ip>
                   </networks>
                   <profile>default</profile>
                   <quota>default</quota>
                   <access_management>1</access_management>
-                </${!CH_USER}>
+                </default>
               </users>
             </clickhouse>
             USERXML
+            sed -i \
+              -e "s|__CH_PASS_HASH__|$CH_PASS_HASH|g" \
+              -e "s|__VPC_CIDR__|${VpcCidr}|g" \
+              /etc/clickhouse-server/users.d/ccc-user.xml
+            chown clickhouse:clickhouse /etc/clickhouse-server/users.d/ccc-user.xml
+            chmod 0640 /etc/clickhouse-server/users.d/ccc-user.xml
 
             echo "=== [6/7] Start and enable ClickHouse ==="
             systemctl enable clickhouse-server
@@ -398,9 +415,13 @@ Resources:
               sleep 2
             done
 
-            # Create CCC database (default to "ccc" if CH_DB is unset)
-            CH_DB="${!CH_DB:-ccc}"
-            clickhouse-client --query "CREATE DATABASE IF NOT EXISTS \`${!CH_DB}\`" || true
+            # Create CCC database (default to "ccc" if CH_DB is unset).
+            # Identifier is backtick-quoted; we sanitise to alphanumerics/_ to
+            # prevent SQL injection via secret value.
+            : "${!CH_DB:=ccc}"
+            CH_DB_SAFE=$(echo "$CH_DB" | tr -cd '[:alnum:]_')
+            [[ -z "$CH_DB_SAFE" ]] && CH_DB_SAFE=ccc
+            clickhouse-client --query "CREATE DATABASE IF NOT EXISTS \`$CH_DB_SAFE\`" || true
 
             echo "=== [7/7] Install and configure CloudWatch Agent ==="
             cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWCONF'

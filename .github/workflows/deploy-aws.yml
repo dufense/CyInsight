@@ -389,8 +389,9 @@ jobs:
       - name: Deploy management plane stack
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
-          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
-          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+          IMAGE_TAG:         ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack management
 
@@ -558,16 +559,18 @@ jobs:
 
       - name: Validate data plane secrets
         env:
-          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
-          SECRETS_PREFIX: ${{ env.SECRETS_PREFIX }}
+          ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX:    ${{ env.SECRETS_PREFIX }}
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
         run: |
           ./deploy/ecs/scripts/validate-secrets.sh --plane data
 
       - name: Deploy all 5 data-plane regions
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
-          IMAGE_TAG:   ${{ needs.build-and-push.outputs.image_tag }}
-          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
+          IMAGE_TAG:         ${{ needs.build-and-push.outputs.image_tag }}
+          ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack data
 
