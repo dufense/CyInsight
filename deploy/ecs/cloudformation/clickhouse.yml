@@ -49,6 +49,23 @@ Parameters:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Private subnet IDs (at least 2 AZs) for NLB + EC2 placement
 
+  ClickHouseSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      The single private subnet that the ClickHouse EC2 instance will be
+      placed in. MUST be one of the subnets passed in PrivateSubnetIds.
+      The EBS data volume's AvailabilityZone is derived from this
+      subnet, so it must match the AZ of this subnet — preventing the
+      "EBS in AZ-A but instance launched in AZ-B" failure that happens
+      when the AZ is hardcoded to GetAZs[0].
+
+  ClickHouseAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: >
+      The Availability Zone of ClickHouseSubnetId. Caller (deploy-stacks.sh)
+      looks this up via "aws ec2 describe-subnets" so it always matches the
+      subnet, eliminating the AZ-coupling fragility.
+
   ManagementECSSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Security group of the management-plane ECS tasks (allowed on port 8123)
@@ -331,7 +348,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AvailabilityZone: !Select [0, !GetAZs !Ref "AWS::Region"]
+      AvailabilityZone: !Ref ClickHouseAvailabilityZone
       Size: !Ref DataVolumeSize
       VolumeType: gp3
       Iops: !Ref DataVolumeIops
@@ -524,10 +541,10 @@ Resources:
               sleep 2
             done
 
-            # Create CCC database (default to "ccc" if CH_DB is unset).
-            # Identifier is backtick-quoted; we sanitise to alphanumerics/_ to
-            # prevent SQL injection via secret value.
-            [[ -z "${!CH_DB:-}" ]] && CH_DB=ccc
+            # Create CCC database. CH_DB already has a "ccc" fallback applied
+            # at the secret-fetch step above (line ~456), so we trust the value
+            # here and only sanitise it for safe backtick quoting (alnum/_ only)
+            # to prevent SQL injection via the secret value.
             CH_DB_SAFE=$(echo "$CH_DB" | tr -cd '[:alnum:]_')
             [[ -z "$CH_DB_SAFE" ]] && CH_DB_SAFE=ccc
             clickhouse-client --query "CREATE DATABASE IF NOT EXISTS \`$CH_DB_SAFE\`" || true
@@ -569,9 +586,11 @@ Resources:
       MinSize: "1"
       MaxSize: "3"
       DesiredCapacity: "1"
-      # Place in first private subnet (same AZ as EBS volume)
+      # Pin to the explicitly-chosen subnet so the ASG launches the
+      # instance in the same AZ as the EBS data volume (see
+      # ClickHouseAvailabilityZone parameter docs).
       VPCZoneIdentifier:
-        - !Select [0, !Ref PrivateSubnetIds]
+        - !Ref ClickHouseSubnetId
       TargetGroupARNs:
         - !Ref ClickHouseNLBTargetGroup
       HealthCheckType: ELB

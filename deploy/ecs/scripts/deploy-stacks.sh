@@ -89,6 +89,13 @@ deploy_prerequisites() {
 
 deploy_management() {
   local image_uri="${ECR_REGISTRY}/ccc-management-plane:${IMAGE_TAG}"
+  # If the ClickHouse stack is deployed, look up its SG so the plane stack
+  # can install an explicit egress rule to it. Empty string when stack is
+  # absent — template treats that as "no explicit egress rule".
+  local ch_sg=""
+  if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
+    ch_sg=$(cfn_output "ccc-clickhouse" "ClickHouseSecurityGroupId" 2>/dev/null || echo "")
+  fi
   cfn_deploy "ccc-management-plane" \
     "deploy/ecs/cloudformation/management-plane.yml" \
     "EnvironmentName=${ENVIRONMENT}" \
@@ -97,7 +104,8 @@ deploy_management() {
     "PrivateSubnetIds=${PRIVATE_SUBNETS}" \
     "CertificateArn=${CERTIFICATE_ARN}" \
     "ImageUri=${image_uri}" \
-    "EnableClickHouse=${ENABLE_CLICKHOUSE}"
+    "EnableClickHouse=${ENABLE_CLICKHOUSE}" \
+    "ClickHouseSecurityGroupId=${ch_sg}"
 
   log "Management Plane ALB DNS:"
   cfn_output "ccc-management-plane" "ALBDNSName"
@@ -108,6 +116,10 @@ deploy_data_plane() {
   local image_uri="${ECR_REGISTRY}/ccc-data-plane:${IMAGE_TAG}"
   local mgmt_sg
   mgmt_sg=$(cfn_output "ccc-management-plane" "ECSSecurityGroupId")
+  local ch_sg=""
+  if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
+    ch_sg=$(cfn_output "ccc-clickhouse" "ClickHouseSecurityGroupId" 2>/dev/null || echo "")
+  fi
 
   cfn_deploy "ccc-data-plane-${dp_region}" \
     "deploy/ecs/cloudformation/data-plane.yml" \
@@ -117,7 +129,8 @@ deploy_data_plane() {
     "PrivateSubnetIds=${PRIVATE_SUBNETS}" \
     "ManagementPlaneSecurityGroupId=${mgmt_sg}" \
     "ImageUri=${image_uri}" \
-    "EnableClickHouse=${ENABLE_CLICKHOUSE}"
+    "EnableClickHouse=${ENABLE_CLICKHOUSE}" \
+    "ClickHouseSecurityGroupId=${ch_sg}"
 
   log "Data Plane (${dp_region}) Internal ALB DNS:"
   cfn_output "ccc-data-plane-${dp_region}" "InternalALBDNSName"
@@ -161,10 +174,31 @@ deploy_clickhouse() {
     exit 1
   fi
 
+  # Pin ClickHouse to a single subnet and look up its AZ so the EBS volume
+  # always lives in the same AZ as the EC2 instance. CH_SUBNET_ID overrides;
+  # otherwise we default to the first entry of PRIVATE_SUBNETS.
+  local ch_subnet="${CH_SUBNET_ID:-}"
+  if [[ -z "${ch_subnet}" ]]; then
+    ch_subnet=$(echo "${PRIVATE_SUBNETS}" | cut -d',' -f1 | xargs)
+  fi
+  local ch_az
+  ch_az=$(aws ec2 describe-subnets \
+            --subnet-ids "${ch_subnet}" \
+            --region "${AWS_REGION:-us-east-1}" \
+            --query 'Subnets[0].AvailabilityZone' \
+            --output text 2>/dev/null || echo "")
+  if [[ -z "${ch_az}" || "${ch_az}" == "None" ]]; then
+    echo "ERROR: could not resolve AvailabilityZone for subnet '${ch_subnet}'." >&2
+    echo "       Set CH_SUBNET_ID to a valid private subnet ID." >&2
+    exit 1
+  fi
+
   local params=(
     "EnvironmentName=${ENVIRONMENT}"
     "VpcId=${VPC_ID}"
     "PrivateSubnetIds=${PRIVATE_SUBNETS}"
+    "ClickHouseSubnetId=${ch_subnet}"
+    "ClickHouseAvailabilityZone=${ch_az}"
     "ManagementECSSecurityGroupId=${MGMT_SG_ID}"
     "KeyPairName=${CH_KEY_PAIR}"
     "InstanceType=${CH_INSTANCE_TYPE}"

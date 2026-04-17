@@ -75,9 +75,20 @@ parse_paths_for_segment() {
   # Always grep for the literal "ccc/" prefix that appears in .env.ecs.example,
   # then substitute the runtime SECRETS_PREFIX. This ensures the parser works
   # correctly even when PREFIX differs from the default "ccc".
+  # ClickHouse paths in .env.ecs.example are documentation-only when
+  # ENABLE_CLICKHOUSE != "true"; filter them out so default deployments
+  # (where the operator has not yet stood up the ClickHouse stack)
+  # don't fail preflight on missing optional secrets. When enabled, the
+  # explicit check_secret_path calls in validate_management/data still
+  # fail loudly if a CH secret is missing.
+  local filter_ch='cat'
+  if [[ "${ENABLE_CLICKHOUSE:-false}" != "true" ]]; then
+    filter_ch='grep -v clickhouse-'
+  fi
   grep -E "^#[[:space:]]+ccc/${segment}/" "${EXAMPLE_FILE}" \
     | awk '{print $2}' \
     | sed "s|^ccc/|${PREFIX}/|" \
+    | ${filter_ch} \
     | grep -v '^$' \
     || true
 }

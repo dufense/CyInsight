@@ -114,9 +114,24 @@ Parameters:
       to exist in Secrets Manager.
       Deploy deploy/ecs/cloudformation/clickhouse.yml first to obtain the NLB URL.
 
+  ClickHouseSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: >
+      (Optional) Security group ID of the ClickHouse cluster (output
+      ClickHouseSecurityGroupId from clickhouse.yml). When provided AND
+      EnableClickHouse=true, an explicit egress rule on TCP 8123 from the
+      data-plane ECS SG to the ClickHouse SG is created. The broad
+      0.0.0.0/0 default-egress already permits this; the explicit rule
+      documents the intended path and survives any future tightening.
+
 Conditions:
-  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasAlertEmail:    !Not [!Equals [!Ref AlertEmail, ""]]
   ClickHouseEnabled: !Equals [!Ref EnableClickHouse, "true"]
+  HasClickHouseSG:
+    !And
+      - !Condition ClickHouseEnabled
+      - !Not [!Equals [!Ref ClickHouseSecurityGroupId, ""]]
 
 Resources:
 
@@ -215,6 +230,20 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "ccc-data-plane-ecs-sg-${DataPlaneRegion}-${EnvironmentName}"
+
+  # Explicit egress to ClickHouse on TCP 8123 — only created when the
+  # ClickHouse SG ID is supplied. Standalone Egress resource to avoid a
+  # circular dep with clickhouse.yml (which references this SG ingress-side).
+  DataPlaneToClickHouseEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HasClickHouseSG
+    Properties:
+      GroupId: !Ref DataPlaneSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      DestinationSecurityGroupId: !Ref ClickHouseSecurityGroupId
+      Description: Data-plane ECS → ClickHouse HTTP (8123)
 
   InternalALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
