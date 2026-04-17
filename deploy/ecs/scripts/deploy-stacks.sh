@@ -206,9 +206,25 @@ deploy_clickhouse() {
 
   # VPC CIDR is used as the only allowed source network in the ClickHouse
   # server-side user ACL (defence-in-depth on top of the EC2 security group).
-  if [[ -n "${VPC_CIDR:-}" ]]; then
-    params+=("VpcCidr=${VPC_CIDR}")
+  # Auto-derive from VPC_ID via the AWS API when VPC_CIDR is not exported,
+  # so deployments on non-10.0.0.0/16 VPCs do not silently break ClickHouse
+  # auth at the user-network-policy layer (CFN default would otherwise be
+  # 10.0.0.0/16 and reject all client connections from other CIDRs).
+  if [[ -z "${VPC_CIDR:-}" ]]; then
+    VPC_CIDR=$(aws ec2 describe-vpcs \
+                 --vpc-ids "${VPC_ID}" \
+                 --region "${AWS_REGION:-us-east-1}" \
+                 --query 'Vpcs[0].CidrBlock' \
+                 --output text 2>/dev/null || echo "")
   fi
+  if [[ -z "${VPC_CIDR}" || "${VPC_CIDR}" == "None" ]]; then
+    echo "ERROR: could not resolve VPC CIDR for VPC_ID='${VPC_ID}'." >&2
+    echo "       The ClickHouse user-network ACL needs the VPC CIDR; either" >&2
+    echo "       export VPC_CIDR explicitly or grant ec2:DescribeVpcs to the" >&2
+    echo "       deployer role." >&2
+    exit 1
+  fi
+  params+=("VpcCidr=${VPC_CIDR}")
 
   # Per-region data-plane SG IDs. Each one is optional — if a region has not
   # yet been deployed, leave the corresponding env var empty and the ingress
