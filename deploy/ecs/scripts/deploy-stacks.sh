@@ -176,8 +176,17 @@ deploy_clickhouse() {
     params+=("VpcCidr=${VPC_CIDR}")
   fi
 
-  if [[ -n "${DATA_PLANE_SG_ID}" ]]; then
-    params+=("DataPlaneECSSecurityGroupId=${DATA_PLANE_SG_ID}")
+  # Per-region data-plane SG IDs. Each one is optional — if a region has not
+  # yet been deployed, leave the corresponding env var empty and the ingress
+  # rule for that region simply won't be created.
+  [[ -n "${DATA_PLANE_SG_IN_WEST_1:-}"    ]] && params+=("DataPlaneSGInWest1=${DATA_PLANE_SG_IN_WEST_1}")
+  [[ -n "${DATA_PLANE_SG_US_EAST_1:-}"    ]] && params+=("DataPlaneSGUsEast1=${DATA_PLANE_SG_US_EAST_1}")
+  [[ -n "${DATA_PLANE_SG_KE_EAST_1:-}"    ]] && params+=("DataPlaneSGKeEast1=${DATA_PLANE_SG_KE_EAST_1}")
+  [[ -n "${DATA_PLANE_SG_SA_CENTRAL_1:-}" ]] && params+=("DataPlaneSGSaCentral1=${DATA_PLANE_SG_SA_CENTRAL_1}")
+  [[ -n "${DATA_PLANE_SG_BH_EAST_1:-}"    ]] && params+=("DataPlaneSGBhEast1=${DATA_PLANE_SG_BH_EAST_1}")
+  # Backwards-compat: DATA_PLANE_SG_ID is treated as in-west-1 for legacy callers.
+  if [[ -n "${DATA_PLANE_SG_ID:-}" && -z "${DATA_PLANE_SG_IN_WEST_1:-}" ]]; then
+    params+=("DataPlaneSGInWest1=${DATA_PLANE_SG_ID}")
   fi
 
   cfn_deploy "ccc-clickhouse" \

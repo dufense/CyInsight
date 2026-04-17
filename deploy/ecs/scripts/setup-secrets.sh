@@ -55,6 +55,10 @@ log "Setting up Secrets Manager entries (prefix: ${PREFIX}/)"
 log "AWS Region: ${AWS_REGION}"
 echo
 
+# Defined up-front so it is in scope for the optional ClickHouse block below
+# (which loops over the same regions to populate per-region clickhouse-url).
+DATA_PLANE_REGIONS=(in-west-1 us-east-1 ke-east-1 sa-central-1 bh-east-1)
+
 # ── Shared Secrets ────────────────────────────────────────────────────────────
 log "[SHARED]"
 put_secret "shared/kafka-brokers"      "MSK Bootstrap Brokers (comma-separated host:port)"

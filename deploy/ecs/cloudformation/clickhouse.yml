@@ -18,7 +18,7 @@
 #         VpcId=vpc-xxxxxxxx \
 #         PrivateSubnetIds="subnet-aaa,subnet-bbb" \
 #         ManagementECSSecurityGroupId=sg-xxxxxxxx \
-#         DataPlaneECSSecurityGroupId=sg-yyyyyyyy \
+#         DataPlaneSGInWest1=sg-yyyyyyyy \
 #         KeyPairName=my-key-pair
 #
 # Outputs:
@@ -53,10 +53,26 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Security group of the management-plane ECS tasks (allowed on port 8123)
 
-  DataPlaneECSSecurityGroupId:
+  DataPlaneSGInWest1:
     Type: String
     Default: ""
-    Description: (Optional) Security group of data-plane ECS tasks (allowed on port 8123)
+    Description: (Optional) Data-plane ECS task SG for in-west-1 region
+  DataPlaneSGUsEast1:
+    Type: String
+    Default: ""
+    Description: (Optional) Data-plane ECS task SG for us-east-1 region
+  DataPlaneSGKeEast1:
+    Type: String
+    Default: ""
+    Description: (Optional) Data-plane ECS task SG for ke-east-1 region
+  DataPlaneSGSaCentral1:
+    Type: String
+    Default: ""
+    Description: (Optional) Data-plane ECS task SG for sa-central-1 region
+  DataPlaneSGBhEast1:
+    Type: String
+    Default: ""
+    Description: (Optional) Data-plane ECS task SG for bh-east-1 region
 
   InstanceType:
     Type: String
@@ -115,7 +131,11 @@ Parameters:
       security group). Must match the actual VPC where ClickHouse runs.
 
 Conditions:
-  HasDataPlaneECSSG: !Not [!Equals [!Ref DataPlaneECSSecurityGroupId, ""]]
+  HasDPSGInWest1:    !Not [!Equals [!Ref DataPlaneSGInWest1,    ""]]
+  HasDPSGUsEast1:    !Not [!Equals [!Ref DataPlaneSGUsEast1,    ""]]
+  HasDPSGKeEast1:    !Not [!Equals [!Ref DataPlaneSGKeEast1,    ""]]
+  HasDPSGSaCentral1: !Not [!Equals [!Ref DataPlaneSGSaCentral1, ""]]
+  HasDPSGBhEast1:    !Not [!Equals [!Ref DataPlaneSGBhEast1,    ""]]
 
 Resources:
 
@@ -196,27 +216,114 @@ Resources:
         - Key: Name
           Value: !Sub "ccc-clickhouse-sg-${EnvironmentName}"
 
-  ClickHouseIngressFromDataPlane:
+  # Per-region data-plane ingress rules (HTTP 8123 + native 9000).
+  # Each region gets its own conditional pair of rules so that operators can
+  # roll out data planes incrementally — only regions whose SG IDs are passed
+  # in get authorised on the ClickHouse SG.
+  CHIngress8123InWest1:
     Type: AWS::EC2::SecurityGroupIngress
-    Condition: HasDataPlaneECSSG
+    Condition: HasDPSGInWest1
     Properties:
       GroupId: !Ref ClickHouseSecurityGroup
       IpProtocol: tcp
       FromPort: 8123
       ToPort: 8123
-      SourceSecurityGroupId: !Ref DataPlaneECSSecurityGroupId
-      Description: ClickHouse HTTP API from data-plane ECS tasks
-
-  ClickHouseNativeIngressFromDataPlane:
+      SourceSecurityGroupId: !Ref DataPlaneSGInWest1
+      Description: ClickHouse HTTP API from data-plane in-west-1
+  CHIngress9000InWest1:
     Type: AWS::EC2::SecurityGroupIngress
-    Condition: HasDataPlaneECSSG
+    Condition: HasDPSGInWest1
     Properties:
       GroupId: !Ref ClickHouseSecurityGroup
       IpProtocol: tcp
       FromPort: 9000
       ToPort: 9000
-      SourceSecurityGroupId: !Ref DataPlaneECSSecurityGroupId
-      Description: ClickHouse native protocol from data-plane ECS tasks
+      SourceSecurityGroupId: !Ref DataPlaneSGInWest1
+      Description: ClickHouse native from data-plane in-west-1
+
+  CHIngress8123UsEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGUsEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref DataPlaneSGUsEast1
+      Description: ClickHouse HTTP API from data-plane us-east-1
+  CHIngress9000UsEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGUsEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref DataPlaneSGUsEast1
+      Description: ClickHouse native from data-plane us-east-1
+
+  CHIngress8123KeEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGKeEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref DataPlaneSGKeEast1
+      Description: ClickHouse HTTP API from data-plane ke-east-1
+  CHIngress9000KeEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGKeEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref DataPlaneSGKeEast1
+      Description: ClickHouse native from data-plane ke-east-1
+
+  CHIngress8123SaCentral1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGSaCentral1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref DataPlaneSGSaCentral1
+      Description: ClickHouse HTTP API from data-plane sa-central-1
+  CHIngress9000SaCentral1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGSaCentral1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref DataPlaneSGSaCentral1
+      Description: ClickHouse native from data-plane sa-central-1
+
+  CHIngress8123BhEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGBhEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref DataPlaneSGBhEast1
+      Description: ClickHouse HTTP API from data-plane bh-east-1
+  CHIngress9000BhEast1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDPSGBhEast1
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref DataPlaneSGBhEast1
+      Description: ClickHouse native from data-plane bh-east-1
 
   # ── EBS Data Volume ──────────────────────────────────────────────────────────
   ClickHouseDataVolume:
@@ -335,15 +442,18 @@ Resources:
               --secret-id "${SecretsPrefix}/shared/clickhouse-password" \
               --query SecretString --output text 2>/dev/null || echo "")
 
-            CH_USER=$(aws secretsmanager get-secret-value \
-              --region "${AWS::Region}" \
-              --secret-id "${SecretsPrefix}/shared/clickhouse-user" \
-              --query SecretString --output text 2>/dev/null || echo "default")
+            # NOTE: shared/clickhouse-user is intentionally NOT read here.
+            # The bootstrap always provisions the standard ClickHouse "default"
+            # user (so the OS package's pre-installed default user is the one
+            # that gets the password). The "user" secret is consumed only by
+            # the application ECS tasks for the client connection string.
 
             CH_DB=$(aws secretsmanager get-secret-value \
               --region "${AWS::Region}" \
               --secret-id "${SecretsPrefix}/shared/clickhouse-database" \
               --query SecretString --output text 2>/dev/null || echo "ccc")
+            # Defensive default in case the secret is empty
+            [[ -z "$CH_DB" ]] && CH_DB=ccc
 
             # Override data paths to EBS volume
             mkdir -p /data/clickhouse/data /data/clickhouse/tmp /data/clickhouse/logs
@@ -382,7 +492,6 @@ Resources:
             # and substitute the hash + CIDR with sed so there is no ambiguity
             # between CFN substitution and bash parameter expansion.
             CH_PASS_HASH=$(echo -n "$CH_PASSWORD" | sha256sum | awk '{print $1}')
-            : "${!CH_USER:=default}"
             cat > /etc/clickhouse-server/users.d/ccc-user.xml << 'USERXML'
             <clickhouse>
               <users>

@@ -72,7 +72,12 @@ on:
         type: boolean
         default: false
       deploy_clickhouse:
-        description: 'Deploy the ClickHouse EC2 + NLB stack (clickhouse.yml). Requires CH_KEY_PAIR secret.'
+        description: 'PHASE 1: Deploy the ClickHouse EC2 + NLB stack (clickhouse.yml). Requires CH_KEY_PAIR secret. After this finishes, manually store the NLB DNS in Secrets Manager, then re-run with enable_clickhouse_in_planes=true.'
+        required: false
+        type: boolean
+        default: false
+      enable_clickhouse_in_planes:
+        description: 'PHASE 2: Inject ClickHouse env vars into management & data-plane ECS task definitions. ONLY enable AFTER deploy_clickhouse has finished AND the URL secrets have been populated in Secrets Manager.'
         required: false
         type: boolean
         default: false
@@ -391,7 +396,9 @@ jobs:
         env:
           IMAGE_TAG:         ${{ needs.build-and-push.outputs.image_tag }}
           ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
-          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
+          # Phase 2 enable: only set after the operator has populated the
+          # ClickHouse URL secret. Driven by enable_clickhouse_in_planes input.
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.enable_clickhouse_in_planes }}
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack management
 
@@ -561,7 +568,9 @@ jobs:
         env:
           ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
           SECRETS_PREFIX:    ${{ env.SECRETS_PREFIX }}
-          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
+          # Data-plane validation includes per-region clickhouse-url secrets
+          # only when we are about to inject them (Phase 2).
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.enable_clickhouse_in_planes }}
         run: |
           ./deploy/ecs/scripts/validate-secrets.sh --plane data
 
@@ -570,7 +579,7 @@ jobs:
         env:
           IMAGE_TAG:         ${{ needs.build-and-push.outputs.image_tag }}
           ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
-          ENABLE_CLICKHOUSE: ${{ github.event.inputs.deploy_clickhouse }}
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.enable_clickhouse_in_planes }}
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack data
 
@@ -689,10 +698,13 @@ jobs:
           echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| NLB URL | \`${NLB_URL}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Next steps:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "1. Store \`${NLB_URL}\` in Secrets Manager at \`ccc/shared/clickhouse-url\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "   and per-region at \`ccc/data-plane/<region>/clickhouse-url\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "2. Re-deploy management and data planes with \`EnableClickHouse=true\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Next steps (Phase 2):**" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Store \`http://${NLB_URL}:8123\` in Secrets Manager at" >> "$GITHUB_STEP_SUMMARY"
+          echo "   \`ccc/shared/clickhouse-url\` AND per-region at" >> "$GITHUB_STEP_SUMMARY"
+          echo "   \`ccc/data-plane/<region>/clickhouse-url\` for every region you operate." >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Re-run this workflow with \`enable_clickhouse_in_planes=true\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "   (and \`deploy_clickhouse=false\`) to inject the ClickHouse env" >> "$GITHUB_STEP_SUMMARY"
+          echo "   vars into management & data-plane ECS task definitions." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Summary job ────────────────────────────────────────────────────────────
   deployment-summary:
