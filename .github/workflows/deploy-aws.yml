@@ -655,9 +655,12 @@ jobs:
       - name: Make scripts executable
         run: chmod +x deploy/ecs/scripts/*.sh
 
-      - name: Validate ClickHouse secrets exist
+      - name: Validate ClickHouse bootstrap secrets exist
+        # Pre-deploy: only check the 3 identity secrets the EC2 UserData reads.
+        # The URL secrets are populated AFTER the stack outputs the NLB DNS, so
+        # validating them here would create a chicken-and-egg dependency.
         run: |
-          ./deploy/ecs/scripts/validate-secrets.sh --plane clickhouse
+          ./deploy/ecs/scripts/validate-secrets.sh --plane clickhouse-pre
 
       - name: Deploy ClickHouse stack
         if: ${{ github.event.inputs.dry_run != 'true' }}

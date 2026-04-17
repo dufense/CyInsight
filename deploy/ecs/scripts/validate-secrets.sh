@@ -58,6 +58,11 @@ PASS=0
 FAIL=0
 MISSING=()
 
+# When ENABLE_CLICKHOUSE=true, ClickHouse paths are required for management/data
+# plane validation. When false (default), they are skipped — keeping non-ClickHouse
+# deployments green.
+ENABLE_CLICKHOUSE="${ENABLE_CLICKHOUSE:-false}"
+
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # ── Parse secret paths from .env.ecs.example ─────────────────────────────────
@@ -137,14 +142,29 @@ validate_management() {
   check_segment "AI Provider"     "ai"
   check_segment "Management Plane" "management"
   check_segment "Storage"         "storage"
+  if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
+    log "[Management ClickHouse]"
+    check_secret_path "${PREFIX}/shared/clickhouse-url"
+    check_secret_path "${PREFIX}/shared/clickhouse-user"
+    check_secret_path "${PREFIX}/shared/clickhouse-password"
+    check_secret_path "${PREFIX}/shared/clickhouse-database"
+  fi
 }
 
 validate_data() {
   if [[ -n "${DP_REGION}" ]]; then
     check_data_plane_for_region "${DP_REGION}"
+    if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
+      log "[Data Plane ClickHouse: ${DP_REGION}]"
+      check_secret_path "${PREFIX}/data-plane/${DP_REGION}/clickhouse-url"
+    fi
   else
     for r in "${DATA_PLANE_REGIONS[@]}"; do
       check_data_plane_for_region "${r}"
+      if [[ "${ENABLE_CLICKHOUSE}" == "true" ]]; then
+        log "[Data Plane ClickHouse: ${r}]"
+        check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-url"
+      fi
     done
   fi
 }
@@ -153,23 +173,28 @@ validate_receiver() {
   check_segment "Shared" "shared"
 }
 
-validate_clickhouse() {
-  # ClickHouse secrets are optional — only checked when explicitly requested.
-  # The 3 shared paths are always required when ClickHouse is enabled.
-  # Per-region clickhouse-url paths are validated for all 5 data-plane regions
-  # (or just the one specified via --region).
-  log "[ClickHouse Shared]"
+validate_clickhouse_pre() {
+  # Pre-deploy ClickHouse validation: only the 3 identity secrets that the
+  # clickhouse.yml EC2 UserData reads at instance bootstrap. The URL secrets
+  # are populated *after* the stack deploys (NLB DNS is a stack output), so
+  # they must not be checked here — doing so would create a circular dep.
+  log "[ClickHouse Bootstrap Secrets]"
   check_secret_path "${PREFIX}/shared/clickhouse-password"
   check_secret_path "${PREFIX}/shared/clickhouse-user"
   check_secret_path "${PREFIX}/shared/clickhouse-database"
-  check_secret_path "${PREFIX}/shared/clickhouse-url"
+}
 
+validate_clickhouse() {
+  # Full ClickHouse validation: identity secrets + URL secrets. Run this only
+  # *after* clickhouse.yml has been deployed and the operator has stored the
+  # NLB DNS in shared/clickhouse-url and per-region data-plane/<r>/clickhouse-url.
+  validate_clickhouse_pre
+  log "[ClickHouse URLs]"
+  check_secret_path "${PREFIX}/shared/clickhouse-url"
   if [[ -n "${DP_REGION}" ]]; then
-    log "[ClickHouse URL: ${DP_REGION}]"
     check_secret_path "${PREFIX}/data-plane/${DP_REGION}/clickhouse-url"
   else
     for r in "${DATA_PLANE_REGIONS[@]}"; do
-      log "[ClickHouse URL: ${r}]"
       check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-url"
     done
   fi
@@ -193,6 +218,9 @@ case "${PLANE}" in
   receiver)
     validate_receiver
     ;;
+  clickhouse-pre)
+    validate_clickhouse_pre
+    ;;
   clickhouse)
     validate_clickhouse
     ;;
@@ -201,7 +229,7 @@ case "${PLANE}" in
     validate_data
     ;;
   *)
-    echo "Unknown plane: ${PLANE}. Use: management | data | receiver | clickhouse | all"
+    echo "Unknown plane: ${PLANE}. Use: management | data | receiver | clickhouse-pre | clickhouse | all"
     exit 1
     ;;
 esac

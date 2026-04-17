@@ -144,6 +144,9 @@ Resources:
                   - cloudwatch:PutMetricData
                   - ec2:DescribeVolumes
                   - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:AttachVolume
+                  - ec2:DetachVolume
                 Resource: "*"
 
   ClickHouseInstanceProfile:
