@@ -37,6 +37,11 @@ DEPLOY_STACK="all"
 DATA_PLANE_REGION=""
 
 DATA_PLANE_REGIONS=(in-west-1 us-east-1 ke-east-1 sa-central-1 bh-east-1)
+ENABLE_CLICKHOUSE="${ENABLE_CLICKHOUSE:-false}"
+MGMT_SG_ID="${MGMT_SG_ID:-}"         # Management ECS SG — required for clickhouse stack
+DATA_PLANE_SG_ID="${DATA_PLANE_SG_ID:-}" # Data-plane ECS SG — optional
+CH_INSTANCE_TYPE="${CH_INSTANCE_TYPE:-r6i.xlarge}"
+CH_KEY_PAIR="${CH_KEY_PAIR:-}"        # EC2 key pair name — required for clickhouse stack
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -130,6 +135,55 @@ deploy_receiver() {
   cfn_output "ccc-receiver-plane" "NLBDNSName"
 }
 
+deploy_clickhouse() {
+  # Required env vars for this function:
+  #   MGMT_SG_ID       — management-plane ECS security group ID
+  #   CH_KEY_PAIR      — EC2 key pair name for break-glass SSH access
+  #
+  # Optional:
+  #   DATA_PLANE_SG_ID  — data-plane ECS security group ID (leave empty to skip)
+  #   CH_INSTANCE_TYPE  — EC2 instance type (default: r6i.xlarge)
+
+  if [[ -z "${MGMT_SG_ID}" ]]; then
+    # Auto-discover from management-plane stack outputs
+    MGMT_SG_ID=$(cfn_output "ccc-management-plane" "ECSSecurityGroupId" 2>/dev/null || echo "")
+  fi
+
+  if [[ -z "${MGMT_SG_ID}" ]]; then
+    echo "ERROR: MGMT_SG_ID is required. Either set it explicitly or deploy management-plane first."
+    exit 1
+  fi
+
+  if [[ -z "${CH_KEY_PAIR}" ]]; then
+    echo "ERROR: CH_KEY_PAIR is required. Set it to an existing EC2 key pair name."
+    exit 1
+  fi
+
+  local params=(
+    "EnvironmentName=${ENVIRONMENT}"
+    "VpcId=${VPC_ID}"
+    "PrivateSubnetIds=${PRIVATE_SUBNETS}"
+    "ManagementECSSecurityGroupId=${MGMT_SG_ID}"
+    "KeyPairName=${CH_KEY_PAIR}"
+    "InstanceType=${CH_INSTANCE_TYPE}"
+  )
+
+  if [[ -n "${DATA_PLANE_SG_ID}" ]]; then
+    params+=("DataPlaneECSSecurityGroupId=${DATA_PLANE_SG_ID}")
+  fi
+
+  cfn_deploy "ccc-clickhouse" \
+    "deploy/ecs/cloudformation/clickhouse.yml" \
+    "${params[@]}"
+
+  log "ClickHouse NLB URL:"
+  cfn_output "ccc-clickhouse" "ClickHouseNLBDNS"
+  log ""
+  log "Next: store the NLB URL in Secrets Manager under ccc/shared/clickhouse-url"
+  log "      (and per-region: ccc/data-plane/<region>/clickhouse-url)"
+  log "      then re-deploy management/data planes with EnableClickHouse=true"
+}
+
 case "${DEPLOY_STACK}" in
   prerequisites)
     deploy_prerequisites
@@ -148,6 +202,9 @@ case "${DEPLOY_STACK}" in
     ;;
   receiver)
     deploy_receiver
+    ;;
+  clickhouse)
+    deploy_clickhouse
     ;;
   all)
     log "=== Step 1/4: Prerequisites (ECR + IAM + S3) ==="
@@ -174,7 +231,7 @@ case "${DEPLOY_STACK}" in
     ;;
   *)
     echo "Unknown stack: ${DEPLOY_STACK}"
-    echo "Use: prerequisites | management | data | receiver | all"
+    echo "Use: prerequisites | management | data | receiver | clickhouse | all"
     exit 1
     ;;
 esac

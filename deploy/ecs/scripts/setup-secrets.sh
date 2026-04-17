@@ -61,6 +61,23 @@ put_secret "shared/kafka-brokers"      "MSK Bootstrap Brokers (comma-separated h
 put_secret "shared/management-plane-url" "Internal URL of the management plane (e.g. http://ccc-management-alb.internal)"
 put_secret "shared/data-plane-url"    "Primary data plane URL (e.g. http://ccc-dp-in-west-1-alb.internal)"
 
+# ── ClickHouse Secrets (optional — skip if not deploying ClickHouse) ──────────
+# These are only required when EnableClickHouse=true in the CloudFormation stacks.
+# The clickhouse.yml EC2 stack also reads clickhouse-user/database/password directly
+# from Secrets Manager during instance bootstrap.
+if confirm "Configure ClickHouse secrets? (skip if not using ClickHouse)"; then
+  log "[CLICKHOUSE]"
+  put_secret "shared/clickhouse-user"     "ClickHouse username (default: default)" "default"
+  put_secret "shared/clickhouse-database" "ClickHouse database name (default: ccc)" "ccc"
+  put_secret "shared/clickhouse-password" "ClickHouse password (strong random string)"
+  # CLICKHOUSE_URL is per data-plane region (http://<nlb-dns>:8123)
+  # If using a single shared ClickHouse NLB, set the same URL for all regions.
+  for region in "${DATA_PLANE_REGIONS[@]}"; do
+    put_secret "data-plane/${region}/clickhouse-url" \
+      "ClickHouse HTTP endpoint for ${region} (e.g. http://ccc-clickhouse-nlb-production.internal:8123)"
+  done
+fi
+
 # ── AI Provider ───────────────────────────────────────────────────────────────
 log "[AI]"
 put_secret "ai/provider"  "AI provider: openai|anthropic|azure|vertex|ollama|huggingface|custom|grok|deepseek|kimi|zai"

@@ -71,6 +71,11 @@ on:
         required: false
         type: boolean
         default: false
+      deploy_clickhouse:
+        description: 'Deploy the ClickHouse EC2 + NLB stack (clickhouse.yml). Requires CH_KEY_PAIR secret.'
+        required: false
+        type: boolean
+        default: false
       skip_build:
         description: 'Skip image build/push (redeploy an existing image tag without rebuilding)'
         required: false
@@ -608,6 +613,80 @@ jobs:
           ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
         run: |
           ./deploy/ecs/scripts/deploy-stacks.sh --stack receiver
+
+  # ── Job 8 (optional): Deploy ClickHouse EC2 + NLB stack ───────────────────
+  # Triggered only when deploy_clickhouse=true (manual dispatch) or
+  # DEPLOY_CLICKHOUSE=true repository variable.
+  # Runs in parallel with deploy-data-planes / deploy-receiver (independent infra).
+  # After this job completes, copy the ClickHouseNLBDNS output to:
+  #   ccc/shared/clickhouse-url  (and per-region ccc/data-plane/<r>/clickhouse-url)
+  # then re-run deploy-management / deploy-data-planes with EnableClickHouse=true.
+  deploy-clickhouse:
+    name: Deploy ClickHouse Stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-and-push, smoke-test]
+    if: |
+      github.event.inputs.deploy_clickhouse == 'true' ||
+      vars.DEPLOY_CLICKHOUSE == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ccc-deploy-clickhouse
+
+      - name: Configure AWS credentials (access keys)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Make scripts executable
+        run: chmod +x deploy/ecs/scripts/*.sh
+
+      - name: Validate ClickHouse secrets exist
+        run: |
+          ./deploy/ecs/scripts/validate-secrets.sh --plane clickhouse
+
+      - name: Deploy ClickHouse stack
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          ENVIRONMENT:        ${{ needs.build-and-push.outputs.environment }}
+          CH_KEY_PAIR:        ${{ secrets.CH_KEY_PAIR }}
+          CH_INSTANCE_TYPE:   ${{ vars.CH_INSTANCE_TYPE || 'r6i.xlarge' }}
+          DATA_PLANE_SG_ID:   ${{ vars.DATA_PLANE_SG_ID || '' }}
+        run: |
+          ./deploy/ecs/scripts/deploy-stacks.sh --stack clickhouse
+
+      - name: Print ClickHouse NLB URL
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          NLB_URL=$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name "ccc-clickhouse" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClickHouseNLBDNS'].OutputValue" \
+            --output text)
+          echo "## ClickHouse Stack Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| NLB URL | \`${NLB_URL}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Next steps:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Store \`${NLB_URL}\` in Secrets Manager at \`ccc/shared/clickhouse-url\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "   and per-region at \`ccc/data-plane/<region>/clickhouse-url\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Re-deploy management and data planes with \`EnableClickHouse=true\`" >> "$GITHUB_STEP_SUMMARY"
 
   # ── Summary job ────────────────────────────────────────────────────────────
   deployment-summary:

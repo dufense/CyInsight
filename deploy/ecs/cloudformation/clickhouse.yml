@@ -1,0 +1,562 @@
+##############################################################################
+# Cyber Command Center — ClickHouse Self-Hosted on EC2 (EBS gp3)
+#
+# Deploys a single-node ClickHouse server on an EC2 instance with:
+#   - gp3 EBS data volume (separate from the root volume)
+#   - Internal Network Load Balancer on TCP port 8123 (HTTP API)
+#   - Dedicated Security Group with ingress only from ECS task SGs
+#   - Auto-recovery via EC2 Auto-Scaling Group (min/desired/max = 1)
+#   - CloudWatch agent for CPU/memory/disk metrics
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file deploy/ecs/cloudformation/clickhouse.yml \
+#     --stack-name ccc-clickhouse \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#         EnvironmentName=production \
+#         VpcId=vpc-xxxxxxxx \
+#         PrivateSubnetIds="subnet-aaa,subnet-bbb" \
+#         ManagementECSSecurityGroupId=sg-xxxxxxxx \
+#         DataPlaneECSSecurityGroupId=sg-yyyyyyyy \
+#         KeyPairName=my-key-pair
+#
+# Outputs:
+#   ClickHouseNLBDNS        — Use as CLICKHOUSE_URL: http://<dns>:8123
+#   ClickHouseSecurityGroupId — Allow additional ingress from your SGs
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cyber Command Center — ClickHouse on EC2 with internal NLB (TCP 8123)"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  SecretsPrefix:
+    Type: String
+    Default: "ccc"
+    Description: Prefix for Secrets Manager paths
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where ClickHouse and the NLB will be placed
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs (at least 2 AZs) for NLB + EC2 placement
+
+  ManagementECSSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the management-plane ECS tasks (allowed on port 8123)
+
+  DataPlaneECSSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: (Optional) Security group of data-plane ECS tasks (allowed on port 8123)
+
+  InstanceType:
+    Type: String
+    Default: r6i.xlarge
+    AllowedValues:
+      - r6i.large
+      - r6i.xlarge
+      - r6i.2xlarge
+      - r6i.4xlarge
+      - m6i.xlarge
+      - m6i.2xlarge
+    Description: EC2 instance type. Memory-optimised (r6i) recommended for ClickHouse.
+
+  DataVolumeSize:
+    Type: Number
+    Default: 500
+    MinValue: 100
+    MaxValue: 16000
+    Description: Size of the ClickHouse data EBS gp3 volume in GiB
+
+  DataVolumeIops:
+    Type: Number
+    Default: 3000
+    MinValue: 3000
+    MaxValue: 16000
+    Description: Provisioned IOPS for the gp3 data volume (3000–16000)
+
+  DataVolumeThroughput:
+    Type: Number
+    Default: 125
+    MinValue: 125
+    MaxValue: 1000
+    Description: Throughput in MiB/s for the gp3 data volume (125–1000)
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access (for break-glass access only)
+
+  ClickHouseVersion:
+    Type: String
+    Default: "24.3"
+    Description: ClickHouse LTS version to install (e.g. 24.3)
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 x86_64 SSM path (auto-resolves to latest)
+
+Conditions:
+  HasDataPlaneECSSG: !Not [!Equals [!Ref DataPlaneECSSecurityGroupId, ""]]
+
+Resources:
+
+  # ── IAM Role for EC2 instance ───────────────────────────────────────────────
+  ClickHouseInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ccc-clickhouse-instance-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: SecretsManagerRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-*"
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeTags
+                Resource: "*"
+
+  ClickHouseInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "ccc-clickhouse-profile-${EnvironmentName}"
+      Roles:
+        - !Ref ClickHouseInstanceRole
+
+  # ── Security Group ───────────────────────────────────────────────────────────
+  ClickHouseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "ccc-clickhouse-sg-${EnvironmentName}"
+      GroupDescription: ClickHouse — allow HTTP API (8123) from ECS task SGs and SSH (22) for break-glass
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8123
+          ToPort: 8123
+          SourceSecurityGroupId: !Ref ManagementECSSecurityGroupId
+          Description: ClickHouse HTTP API from management-plane ECS tasks
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          SourceSecurityGroupId: !Ref ManagementECSSecurityGroupId
+          Description: ClickHouse native protocol from management-plane ECS tasks
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "10.0.0.0/8"
+          Description: SSH break-glass from internal RFC-1918 only
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound (package installs, CloudWatch, SSM)
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-sg-${EnvironmentName}"
+
+  ClickHouseIngressFromDataPlane:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDataPlaneECSSG
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref DataPlaneECSSecurityGroupId
+      Description: ClickHouse HTTP API from data-plane ECS tasks
+
+  ClickHouseNativeIngressFromDataPlane:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDataPlaneECSSG
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref DataPlaneECSSecurityGroupId
+      Description: ClickHouse native protocol from data-plane ECS tasks
+
+  # ── EBS Data Volume ──────────────────────────────────────────────────────────
+  ClickHouseDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs !Ref "AWS::Region"]
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Iops: !Ref DataVolumeIops
+      Throughput: !Ref DataVolumeThroughput
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-data-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+        - Key: SnapshotPolicy
+          Value: daily-retain-7
+
+  # ── Launch Template ───────────────────────────────────────────────────────────
+  ClickHouseLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "ccc-clickhouse-lt-${EnvironmentName}"
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt ClickHouseInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref ClickHouseSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "ccc-clickhouse-${EnvironmentName}"
+              - Key: Project
+                Value: CyberCommandCenter
+              - Key: Role
+                Value: clickhouse
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            exec > >(tee /var/log/clickhouse-init.log) 2>&1
+
+            echo "=== [1/7] System update ==="
+            dnf update -y --quiet
+
+            echo "=== [2/7] Install dependencies ==="
+            dnf install -y awscli jq xfsprogs nvme-cli amazon-cloudwatch-agent --quiet
+
+            echo "=== [3/7] Attach and mount EBS data volume ==="
+            VOLUME_ID="${ClickHouseDataVolume}"
+            INSTANCE_ID=$(curl -sf http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -sf http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+            # Attach EBS volume (idempotent — detach if already on another instance)
+            aws ec2 attach-volume \
+              --region "${AWS::Region}" \
+              --volume-id "$VOLUME_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --device /dev/sdf || true
+
+            # Wait for device to appear (NVMe path varies on Nitro instances)
+            for i in $(seq 1 30); do
+              DEVICE=$(lsblk -o NAME,SERIAL -d | awk "/$(echo $VOLUME_ID | tr -d '-')/{ print \"/dev/\"\$1 }" 2>/dev/null || true)
+              [[ -n "$DEVICE" ]] && break
+              sleep 2
+            done
+            # Fallback to /dev/nvme1n1 if serial detection fails
+            [[ -z "$DEVICE" ]] && DEVICE=/dev/nvme1n1
+
+            # Format if not already xfs
+            if ! blkid "$DEVICE" &>/dev/null; then
+              mkfs.xfs -f "$DEVICE"
+            fi
+            mkdir -p /data/clickhouse
+            echo "$DEVICE /data/clickhouse xfs defaults,nofail 0 2" >> /etc/fstab
+            mount -a
+
+            echo "=== [4/7] Install ClickHouse ${ClickHouseVersion} ==="
+            # ClickHouse official RPM repo
+            dnf install -y yum-utils --quiet
+            cat > /etc/yum.repos.d/clickhouse.repo << 'REPO'
+            [clickhouse-stable]
+            name=ClickHouse Stable
+            baseurl=https://packages.clickhouse.com/rpm/stable/
+            enabled=1
+            gpgcheck=1
+            gpgkey=https://packages.clickhouse.com/rpm/stable/repodata/repomd.xml.key
+            REPO
+            dnf install -y \
+              "clickhouse-server-${ClickHouseVersion}.*" \
+              "clickhouse-client-${ClickHouseVersion}.*" \
+              --quiet || \
+              dnf install -y clickhouse-server clickhouse-client --quiet
+
+            echo "=== [5/7] Configure ClickHouse ==="
+            # Fetch ClickHouse password from Secrets Manager
+            CH_PASSWORD=$(aws secretsmanager get-secret-value \
+              --region "${AWS::Region}" \
+              --secret-id "${SecretsPrefix}/shared/clickhouse-password" \
+              --query SecretString --output text 2>/dev/null || echo "")
+
+            CH_USER=$(aws secretsmanager get-secret-value \
+              --region "${AWS::Region}" \
+              --secret-id "${SecretsPrefix}/shared/clickhouse-user" \
+              --query SecretString --output text 2>/dev/null || echo "default")
+
+            CH_DB=$(aws secretsmanager get-secret-value \
+              --region "${AWS::Region}" \
+              --secret-id "${SecretsPrefix}/shared/clickhouse-database" \
+              --query SecretString --output text 2>/dev/null || echo "ccc")
+
+            # Override data paths to EBS volume
+            mkdir -p /data/clickhouse/data /data/clickhouse/tmp /data/clickhouse/logs
+            chown -R clickhouse:clickhouse /data/clickhouse
+
+            cat > /etc/clickhouse-server/config.d/ccc-overrides.xml << XMLCONF
+            <clickhouse>
+              <!-- Bind to all interfaces so NLB health checks reach it -->
+              <listen_host>0.0.0.0</listen_host>
+              <!-- Move data, tmp, and logs to the EBS volume -->
+              <path>/data/clickhouse/data/</path>
+              <tmp_path>/data/clickhouse/tmp/</tmp_path>
+              <logger>
+                <log>/data/clickhouse/logs/clickhouse-server.log</log>
+                <errorlog>/data/clickhouse/logs/clickhouse-server.err.log</errorlog>
+                <size>500M</size>
+                <count>5</count>
+              </logger>
+              <!-- Tune memory for analytics workloads (80% of total RAM) -->
+              <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+              <!-- Keep 90 days of query log history -->
+              <query_log>
+                <database>system</database>
+                <table>query_log</table>
+                <partition_by>toYYYYMM(event_date)</partition_by>
+                <ttl>event_date + INTERVAL 90 DAY DELETE</ttl>
+                <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+              </query_log>
+            </clickhouse>
+            XMLCONF
+
+            # Set password for the default user (or named user)
+            CH_PASS_HASH=$(echo -n "$CH_PASSWORD" | sha256sum | awk '{print $1}')
+            cat > /etc/clickhouse-server/users.d/ccc-user.xml << USERXML
+            <clickhouse>
+              <users>
+                <default>
+                  <password_sha256_hex>${CH_PASS_HASH}</password_sha256_hex>
+                  <networks>
+                    <ip>::/0</ip>
+                  </networks>
+                  <profile>default</profile>
+                  <quota>default</quota>
+                </default>
+              </users>
+            </clickhouse>
+            USERXML
+
+            echo "=== [6/7] Start and enable ClickHouse ==="
+            systemctl enable clickhouse-server
+            systemctl start clickhouse-server
+
+            # Wait for ClickHouse to be ready (up to 60s)
+            for i in $(seq 1 30); do
+              clickhouse-client --query "SELECT 1" &>/dev/null && break
+              sleep 2
+            done
+
+            # Create CCC database
+            clickhouse-client --query "CREATE DATABASE IF NOT EXISTS ${!CH_DB}" || true
+
+            echo "=== [7/7] Install and configure CloudWatch Agent ==="
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWCONF'
+            {
+              "agent": { "metrics_collection_interval": 60 },
+              "metrics": {
+                "namespace": "CCC/ClickHouse",
+                "append_dimensions": {
+                  "InstanceId": "${!aws:InstanceId}"
+                },
+                "metrics_collected": {
+                  "cpu": { "measurement": ["cpu_usage_idle", "cpu_usage_user", "cpu_usage_system"] },
+                  "mem": { "measurement": ["mem_used_percent", "mem_available"] },
+                  "disk": {
+                    "resources": ["/data/clickhouse"],
+                    "measurement": ["disk_used_percent", "disk_inodes_free"]
+                  }
+                }
+              }
+            }
+            CWCONF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s || true
+
+            echo "=== ClickHouse initialisation complete ==="
+
+  # ── Auto Scaling Group (min=desired=max=1; provides auto-recovery) ───────────
+  ClickHouseASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: ClickHouseDataVolume
+    Properties:
+      AutoScalingGroupName: !Sub "ccc-clickhouse-asg-${EnvironmentName}"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ClickHouseLaunchTemplate
+        Version: !GetAtt ClickHouseLaunchTemplate.LatestVersionNumber
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      # Place in first private subnet (same AZ as EBS volume)
+      VPCZoneIdentifier:
+        - !Select [0, !Ref PrivateSubnetIds]
+      TargetGroupARNs:
+        - !Ref ClickHouseNLBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-${EnvironmentName}"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: CyberCommandCenter
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 0
+        MaxBatchSize: 1
+        PauseTime: PT3M
+        WaitOnResourceSignals: false
+
+  # ── Internal Network Load Balancer ───────────────────────────────────────────
+  ClickHouseNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "ccc-clickhouse-nlb-${EnvironmentName}"
+      Type: network
+      Scheme: internal
+      Subnets: !Ref PrivateSubnetIds
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-nlb-${EnvironmentName}"
+        - Key: Project
+          Value: CyberCommandCenter
+
+  ClickHouseNLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "ccc-ch-http-${EnvironmentName}"
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 8123
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8123"
+      HealthCheckPath: /ping
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub "ccc-clickhouse-http-tg-${EnvironmentName}"
+
+  ClickHouseNLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ClickHouseNLB
+      Protocol: TCP
+      Port: 8123
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ClickHouseNLBTargetGroup
+
+  # ── CloudWatch Alarms ────────────────────────────────────────────────────────
+  ClickHouseCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-cpu-high-${EnvironmentName}"
+      AlarmDescription: ClickHouse CPU usage > 85% for 5 minutes
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ClickHouseASG
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ClickHouseUnhealthyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-clickhouse-unhealthy-${EnvironmentName}"
+      AlarmDescription: ClickHouse NLB target is unhealthy
+      Namespace: AWS/NetworkELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt ClickHouseNLBTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ClickHouseNLB.LoadBalancerFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+
+Outputs:
+
+  ClickHouseNLBDNS:
+    Description: >
+      Internal NLB DNS name for ClickHouse HTTP API.
+      Use as: CLICKHOUSE_URL=http://<dns>:8123
+    Value: !Sub "http://${ClickHouseNLB.DNSName}:8123"
+    Export:
+      Name: !Sub "${AWS::StackName}-ClickHouseNLBDNS"
+
+  ClickHouseSecurityGroupId:
+    Description: Security group ID of the ClickHouse EC2 instance
+    Value: !Ref ClickHouseSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ClickHouseSecurityGroupId"
+
+  ClickHouseDataVolumeId:
+    Description: EBS volume ID for ClickHouse data (DeletionPolicy=Retain)
+    Value: !Ref ClickHouseDataVolume
+    Export:
+      Name: !Sub "${AWS::StackName}-ClickHouseDataVolumeId"
+
+  ClickHouseASGName:
+    Description: Auto Scaling Group name (use for rolling restarts or SSM access)
+    Value: !Ref ClickHouseASG
+    Export:
+      Name: !Sub "${AWS::StackName}-ClickHouseASGName"

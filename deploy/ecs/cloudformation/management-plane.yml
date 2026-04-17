@@ -108,9 +108,20 @@ Parameters:
     Default: ""
     Description: RDS DB Identifier for the management-plane RDS instance (used in operational dashboard; leave empty to skip)
 
+  EnableClickHouse:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to inject CLICKHOUSE_URL and CLICKHOUSE_PASSWORD secrets into the
+      management-plane task definition. Requires ccc/shared/clickhouse-password and
+      ccc/shared/clickhouse-url secrets to exist in Secrets Manager.
+      Deploy deploy/ecs/cloudformation/clickhouse.yml first to obtain the NLB URL.
+
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
   HasRDSIdentifier: !Not [!Equals [!Ref RDSIdentifier, ""]]
+  ClickHouseEnabled: !Equals [!Ref EnableClickHouse, "true"]
 
 Resources:
 
@@ -659,6 +670,20 @@ Resources:
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-bucket"
             - Name: AWS_S3_REGION
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/storage/s3-region"
+            # ── ClickHouse (injected only when EnableClickHouse=true) ───────────
+            # CLICKHOUSE_URL activates the ClickHouse client in server/clickhouse-client.ts.
+            # Without it, the app falls back silently to PostgreSQL for all event queries.
+            !If
+              - ClickHouseEnabled
+              - - Name: CLICKHOUSE_URL
+                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-url"
+                - Name: CLICKHOUSE_PASSWORD
+                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-password"
+                - Name: CLICKHOUSE_DATABASE
+                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-database"
+                - Name: CLICKHOUSE_USER
+                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-user"
+              - !Ref AWS::NoValue
           HealthCheck:
             Command:
               - CMD-SHELL

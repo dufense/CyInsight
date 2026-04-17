@@ -153,6 +153,27 @@ validate_receiver() {
   check_segment "Shared" "shared"
 }
 
+validate_clickhouse() {
+  # ClickHouse secrets are optional — only checked when explicitly requested.
+  # The 3 shared paths are always required when ClickHouse is enabled.
+  # Per-region clickhouse-url paths are validated for all 5 data-plane regions
+  # (or just the one specified via --region).
+  log "[ClickHouse Shared]"
+  check_secret_path "${PREFIX}/shared/clickhouse-password"
+  check_secret_path "${PREFIX}/shared/clickhouse-user"
+  check_secret_path "${PREFIX}/shared/clickhouse-database"
+
+  if [[ -n "${DP_REGION}" ]]; then
+    log "[ClickHouse URL: ${DP_REGION}]"
+    check_secret_path "${PREFIX}/data-plane/${DP_REGION}/clickhouse-url"
+  else
+    for r in "${DATA_PLANE_REGIONS[@]}"; do
+      log "[ClickHouse URL: ${r}]"
+      check_secret_path "${PREFIX}/data-plane/${r}/clickhouse-url"
+    done
+  fi
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 log "=== Cyber Command Center — Secrets Manager Pre-flight Check ==="
 log "Region:      ${AWS_REGION}"
@@ -171,12 +192,15 @@ case "${PLANE}" in
   receiver)
     validate_receiver
     ;;
+  clickhouse)
+    validate_clickhouse
+    ;;
   all)
     validate_management
     validate_data
     ;;
   *)
-    echo "Unknown plane: ${PLANE}. Use: management | data | receiver | all"
+    echo "Unknown plane: ${PLANE}. Use: management | data | receiver | clickhouse | all"
     exit 1
     ;;
 esac
