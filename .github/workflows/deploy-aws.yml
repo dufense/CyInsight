@@ -254,8 +254,12 @@ jobs:
 
       - name: Validate management plane secrets
         env:
-          ENVIRONMENT: ${{ needs.build-and-push.outputs.environment }}
-          SECRETS_PREFIX: ${{ env.SECRETS_PREFIX }}
+          ENVIRONMENT:       ${{ needs.build-and-push.outputs.environment }}
+          SECRETS_PREFIX:    ${{ env.SECRETS_PREFIX }}
+          # Include the shared ClickHouse secret paths in pre-flight when
+          # Phase-2 enablement is requested, so a missing clickhouse-url
+          # fails fast at validation rather than during ECS task launch.
+          ENABLE_CLICKHOUSE: ${{ github.event.inputs.enable_clickhouse_in_planes }}
         run: |
           ./deploy/ecs/scripts/validate-secrets.sh --plane management
 
@@ -534,10 +538,18 @@ jobs:
     name: Deploy Data Planes
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: [build-and-push, smoke-test]
+    # deploy-clickhouse is listed as a soft dep: when it is skipped (the
+    # default), this job still runs; when it runs, this job waits for it so
+    # data planes never come up before the ClickHouse SG ingress rules
+    # authorise them.
+    needs: [build-and-push, smoke-test, deploy-clickhouse]
     if: |
-      github.event.inputs.deploy_data_planes == 'true' ||
-      vars.DEPLOY_DATA_PLANES == 'true'
+      always() &&
+      needs.build-and-push.result == 'success' &&
+      needs.smoke-test.result == 'success' &&
+      (needs.deploy-clickhouse.result == 'success' || needs.deploy-clickhouse.result == 'skipped') &&
+      (github.event.inputs.deploy_data_planes == 'true' ||
+       vars.DEPLOY_DATA_PLANES == 'true')
 
     steps:
       - name: Checkout repository
@@ -698,10 +710,12 @@ jobs:
           echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| NLB URL | \`${NLB_URL}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          # NLB DNS comes from CFN already wrapped as "http://<dns>:8123"
+          # (see clickhouse.yml Outputs block) — do NOT prepend http:// again.
           echo "**Next steps (Phase 2):**" >> "$GITHUB_STEP_SUMMARY"
-          echo "1. Store \`http://${NLB_URL}:8123\` in Secrets Manager at" >> "$GITHUB_STEP_SUMMARY"
-          echo "   \`ccc/shared/clickhouse-url\` AND per-region at" >> "$GITHUB_STEP_SUMMARY"
-          echo "   \`ccc/data-plane/<region>/clickhouse-url\` for every region you operate." >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Store \`${NLB_URL}\` (use the value above as-is) in Secrets" >> "$GITHUB_STEP_SUMMARY"
+          echo "   Manager at \`ccc/shared/clickhouse-url\` AND per-region at" >> "$GITHUB_STEP_SUMMARY"
+          echo "   \`ccc/data-plane/<region>/clickhouse-url\` for every region." >> "$GITHUB_STEP_SUMMARY"
           echo "2. Re-run this workflow with \`enable_clickhouse_in_planes=true\`" >> "$GITHUB_STEP_SUMMARY"
           echo "   (and \`deploy_clickhouse=false\`) to inject the ClickHouse env" >> "$GITHUB_STEP_SUMMARY"
           echo "   vars into management & data-plane ECS task definitions." >> "$GITHUB_STEP_SUMMARY"

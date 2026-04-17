@@ -527,7 +527,7 @@ Resources:
             # Create CCC database (default to "ccc" if CH_DB is unset).
             # Identifier is backtick-quoted; we sanitise to alphanumerics/_ to
             # prevent SQL injection via secret value.
-            : "${!CH_DB:=ccc}"
+            [[ -z "${!CH_DB:-}" ]] && CH_DB=ccc
             CH_DB_SAFE=$(echo "$CH_DB" | tr -cd '[:alnum:]_')
             [[ -z "$CH_DB_SAFE" ]] && CH_DB_SAFE=ccc
             clickhouse-client --query "CREATE DATABASE IF NOT EXISTS \`$CH_DB_SAFE\`" || true
