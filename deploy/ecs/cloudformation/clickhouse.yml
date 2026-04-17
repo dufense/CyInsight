@@ -363,19 +363,24 @@ Resources:
             </clickhouse>
             XMLCONF
 
-            # Set password for the default user (or named user)
+            # Set password for the configured user (named after CH_USER from secrets).
+            # If CH_USER is "default", the existing default user is overridden.
+            # Otherwise a new named user is created and the default user is locked
+            # (no_password removed, no networks) to enforce auth.
             CH_PASS_HASH=$(echo -n "$CH_PASSWORD" | sha256sum | awk '{print $1}')
+            CH_USER="${!CH_USER:-default}"
             cat > /etc/clickhouse-server/users.d/ccc-user.xml << USERXML
             <clickhouse>
               <users>
-                <default>
-                  <password_sha256_hex>${CH_PASS_HASH}</password_sha256_hex>
+                <${!CH_USER}>
+                  <password_sha256_hex>${!CH_PASS_HASH}</password_sha256_hex>
                   <networks>
                     <ip>::/0</ip>
                   </networks>
                   <profile>default</profile>
                   <quota>default</quota>
-                </default>
+                  <access_management>1</access_management>
+                </${!CH_USER}>
               </users>
             </clickhouse>
             USERXML
@@ -390,8 +395,9 @@ Resources:
               sleep 2
             done
 
-            # Create CCC database
-            clickhouse-client --query "CREATE DATABASE IF NOT EXISTS ${!CH_DB}" || true
+            # Create CCC database (default to "ccc" if CH_DB is unset)
+            CH_DB="${!CH_DB:-ccc}"
+            clickhouse-client --query "CREATE DATABASE IF NOT EXISTS \`${!CH_DB}\`" || true
 
             echo "=== [7/7] Install and configure CloudWatch Agent ==="
             cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWCONF'
@@ -428,7 +434,7 @@ Resources:
         LaunchTemplateId: !Ref ClickHouseLaunchTemplate
         Version: !GetAtt ClickHouseLaunchTemplate.LatestVersionNumber
       MinSize: "1"
-      MaxSize: "1"
+      MaxSize: "3"
       DesiredCapacity: "1"
       # Place in first private subnet (same AZ as EBS volume)
       VPCZoneIdentifier:

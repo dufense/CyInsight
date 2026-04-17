@@ -96,7 +96,8 @@ deploy_management() {
     "PublicSubnetIds=${PUBLIC_SUBNETS}" \
     "PrivateSubnetIds=${PRIVATE_SUBNETS}" \
     "CertificateArn=${CERTIFICATE_ARN}" \
-    "ImageUri=${image_uri}"
+    "ImageUri=${image_uri}" \
+    "EnableClickHouse=${ENABLE_CLICKHOUSE}"
 
   log "Management Plane ALB DNS:"
   cfn_output "ccc-management-plane" "ALBDNSName"
@@ -115,7 +116,8 @@ deploy_data_plane() {
     "VpcId=${VPC_ID}" \
     "PrivateSubnetIds=${PRIVATE_SUBNETS}" \
     "ManagementPlaneSecurityGroupId=${mgmt_sg}" \
-    "ImageUri=${image_uri}"
+    "ImageUri=${image_uri}" \
+    "EnableClickHouse=${ENABLE_CLICKHOUSE}"
 
   log "Data Plane (${dp_region}) Internal ALB DNS:"
   cfn_output "ccc-data-plane-${dp_region}" "InternalALBDNSName"
@@ -180,8 +182,9 @@ deploy_clickhouse() {
   cfn_output "ccc-clickhouse" "ClickHouseNLBDNS"
   log ""
   log "Next: store the NLB URL in Secrets Manager under ccc/shared/clickhouse-url"
-  log "      (and per-region: ccc/data-plane/<region>/clickhouse-url)"
-  log "      then re-deploy management/data planes with EnableClickHouse=true"
+  log "      (used by management plane) and per-region under"
+  log "      ccc/data-plane/<region>/clickhouse-url (used by each data plane)."
+  log "      Then re-run with ENABLE_CLICKHOUSE=true to redeploy mgmt/data planes."
 }
 
 case "${DEPLOY_STACK}" in

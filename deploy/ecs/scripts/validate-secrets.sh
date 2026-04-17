@@ -162,6 +162,7 @@ validate_clickhouse() {
   check_secret_path "${PREFIX}/shared/clickhouse-password"
   check_secret_path "${PREFIX}/shared/clickhouse-user"
   check_secret_path "${PREFIX}/shared/clickhouse-database"
+  check_secret_path "${PREFIX}/shared/clickhouse-url"
 
   if [[ -n "${DP_REGION}" ]]; then
     log "[ClickHouse URL: ${DP_REGION}]"

@@ -673,16 +673,27 @@ Resources:
             # ── ClickHouse (injected only when EnableClickHouse=true) ───────────
             # CLICKHOUSE_URL activates the ClickHouse client in server/clickhouse-client.ts.
             # Without it, the app falls back silently to PostgreSQL for all event queries.
-            !If
+            # Each entry uses a per-item !If/AWS::NoValue so the Secrets list type stays valid
+            # when the condition is false.
+            - !If
               - ClickHouseEnabled
-              - - Name: CLICKHOUSE_URL
-                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-url"
-                - Name: CLICKHOUSE_PASSWORD
-                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-password"
-                - Name: CLICKHOUSE_DATABASE
-                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-database"
-                - Name: CLICKHOUSE_USER
-                  ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-user"
+              - Name: CLICKHOUSE_URL
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-url"
+              - !Ref AWS::NoValue
+            - !If
+              - ClickHouseEnabled
+              - Name: CLICKHOUSE_PASSWORD
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-password"
+              - !Ref AWS::NoValue
+            - !If
+              - ClickHouseEnabled
+              - Name: CLICKHOUSE_DATABASE
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-database"
+              - !Ref AWS::NoValue
+            - !If
+              - ClickHouseEnabled
+              - Name: CLICKHOUSE_USER
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-user"
               - !Ref AWS::NoValue
           HealthCheck:
             Command:

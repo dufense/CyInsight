@@ -70,8 +70,12 @@ if confirm "Configure ClickHouse secrets? (skip if not using ClickHouse)"; then
   put_secret "shared/clickhouse-user"     "ClickHouse username (default: default)" "default"
   put_secret "shared/clickhouse-database" "ClickHouse database name (default: ccc)" "ccc"
   put_secret "shared/clickhouse-password" "ClickHouse password (strong random string)"
-  # CLICKHOUSE_URL is per data-plane region (http://<nlb-dns>:8123)
-  # If using a single shared ClickHouse NLB, set the same URL for all regions.
+  # Shared ClickHouse URL — used by the management plane. Set to the internal
+  # NLB DNS produced by clickhouse.yml (e.g. http://ccc-clickhouse-nlb-production.internal:8123).
+  put_secret "shared/clickhouse-url" \
+    "ClickHouse HTTP endpoint shared by the management plane (e.g. http://ccc-clickhouse-nlb-production.internal:8123)"
+  # Per-region ClickHouse URL — used by each data plane region. If you run a
+  # single shared ClickHouse cluster, set the same URL for every region.
   for region in "${DATA_PLANE_REGIONS[@]}"; do
     put_secret "data-plane/${region}/clickhouse-url" \
       "ClickHouse HTTP endpoint for ${region} (e.g. http://ccc-clickhouse-nlb-production.internal:8123)"
