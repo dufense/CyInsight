@@ -758,6 +758,68 @@ export async function runMigrations() {
     }
   }
 
+  // ── ClickHouse ingest outages history (Task #183) ────────────────────────
+  try {
+    const clientCho = await pool.connect();
+    try {
+      await clientCho.query(`
+        CREATE TABLE IF NOT EXISTS clickhouse_ingest_outages (
+          id SERIAL PRIMARY KEY,
+          started_at TIMESTAMP NOT NULL,
+          ended_at TIMESTAMP,
+          duration_seconds INTEGER,
+          threshold_minutes INTEGER NOT NULL,
+          sample_window_seconds INTEGER NOT NULL,
+          notifications_dispatched INTEGER NOT NULL DEFAULT 0,
+          resolved BOOLEAN NOT NULL DEFAULT false,
+          created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS clickhouse_ingest_outages_started_idx
+          ON clickhouse_ingest_outages(started_at DESC);
+        -- Task #187 — extend with reason / per-tenant fields for fast-path outages.
+        ALTER TABLE clickhouse_ingest_outages
+          ADD COLUMN IF NOT EXISTS reason VARCHAR(32) NOT NULL DEFAULT 'stalled_ingest';
+        ALTER TABLE clickhouse_ingest_outages
+          ADD COLUMN IF NOT EXISTS tenant_id INTEGER;
+        ALTER TABLE clickhouse_ingest_outages
+          ADD COLUMN IF NOT EXISTS failure_rate_percent INTEGER;
+        ALTER TABLE clickhouse_ingest_outages
+          ADD COLUMN IF NOT EXISTS attempts INTEGER;
+        CREATE INDEX IF NOT EXISTS clickhouse_ingest_outages_reason_idx
+          ON clickhouse_ingest_outages(reason, started_at DESC);
+      `);
+      console.log("[Migration] clickhouse_ingest_outages table ensured (Task #183 + #187)");
+
+      // Cluster-wide bucket aggregation table for fast-path counters (Task #187).
+      // Each worker upserts its own row per (tenant, minute_bucket) so the
+      // monitor and stats endpoint can SUM across all workers regardless of
+      // which one served the originating request.
+      await clientCho.query(`
+        CREATE TABLE IF NOT EXISTS clickhouse_fast_path_buckets (
+          tenant_id INT NOT NULL,
+          bucket_ts BIGINT NOT NULL,
+          worker_id TEXT NOT NULL,
+          successes INT NOT NULL DEFAULT 0,
+          failures INT NOT NULL DEFAULT 0,
+          recent_failures JSONB NOT NULL DEFAULT '[]'::jsonb,
+          updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant_id, bucket_ts, worker_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ch_fast_path_buckets_ts
+          ON clickhouse_fast_path_buckets(bucket_ts);
+        CREATE INDEX IF NOT EXISTS idx_ch_fast_path_buckets_tenant_ts
+          ON clickhouse_fast_path_buckets(tenant_id, bucket_ts DESC);
+      `);
+      console.log("[Migration] clickhouse_fast_path_buckets table ensured (Task #187)");
+    } catch (e: any) {
+      console.error("[Migration] clickhouse_ingest_outages error (non-fatal):", e.message);
+    } finally {
+      clientCho.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] clickhouse_ingest_outages pool error:", e.message);
+  }
+
   try {
     const migrationDb = drizzle(pool);
     await migrate(migrationDb, { migrationsFolder: "./migrations" });

@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -325,7 +326,7 @@ export default function IncidentsPage() {
   const [detectingRuleForId, setDetectingRuleForId] = useState<number | null>(null);
   const [creatingTicketForId, setCreatingTicketForId] = useState<number | null>(null);
 
-  interface IncidentsResponse { data: Incident[]; total: number; totalPages: number }
+  interface IncidentsResponse { data: Incident[]; total: number; totalPages: number; source?: string; latencyMs?: number }
 
   const incidentsQuery = useQuery<IncidentsResponse>({
     queryKey: ["/api/security-console", currentTenant?.id, "incidents", "all", page, pageSize, severityFilter, statusFilter, classificationFilter, search],
@@ -1081,6 +1082,9 @@ export default function IncidentsPage() {
               title="Refresh" data-testid="btn-refresh-incidents">
               <RefreshCw className="w-3.5 h-3.5" />
             </Button>
+            {incidentsQuery.data?.source && (
+              <DataSourceBadge source={incidentsQuery.data.source} latencyMs={incidentsQuery.data.latencyMs} />
+            )}
           </div>
         }
       />

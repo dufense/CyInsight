@@ -43,6 +43,7 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { AdvancedSearch, MODULE_FIELDS, type SearchQuery } from "@/components/advanced-search";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend,
 } from "recharts";
@@ -430,17 +431,20 @@ export default function EventsPage() {
   });
 
 
-  const timelineQuery = useQuery<any[]>({
+  const timelineQuery = useQuery<{ timeline: any[]; source?: string; latencyMs?: number }>({
     queryKey: ["/api/events", currentTenant?.id, "timeline", timeRange],
     queryFn: async () => {
-      if (!currentTenant?.id) return [];
+      if (!currentTenant?.id) return { timeline: [] };
       const dr = getDateRange();
       const params = new URLSearchParams({ interval: timeRange });
       if (dr.dateFrom) params.set("dateFrom", dr.dateFrom);
       if (dr.dateTo) params.set("dateTo", dr.dateTo);
       const res = await fetch(`/api/events/${currentTenant.id}/timeline?${params}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch timeline");
-      return res.json();
+      const json = await res.json();
+      // Backward compatible: older deploys returned a bare array
+      if (Array.isArray(json)) return { timeline: json };
+      return json;
     },
     enabled: !!currentTenant?.id && activeDomain === "overview",
   });
@@ -608,7 +612,7 @@ export default function EventsPage() {
     : (eventsQuery.data?.totalPages || 1);
   const domainStats = domainStatsQuery.data;
 
-  const timelineData = (timelineQuery.data || []).map((p: any) => ({
+  const timelineData = (timelineQuery.data?.timeline || []).map((p: any) => ({
     ...p, time: fmt.formatChartLabel(p.timestamp, timeRange),
   }));
 
@@ -967,9 +971,12 @@ export default function EventsPage() {
                 <div className="flex items-center gap-2 mb-3">
                   <Link2 className="w-4 h-4 text-amber-500" />
                   <span className="text-sm font-medium">Cross-Source IOC Correlations</span>
-                  <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-400 ml-auto">
-                    {crossSourceQuery.data.totalCorrelations} correlated IOCs
-                  </Badge>
+                  <div className="ml-auto flex items-center gap-2">
+                    <DataSourceBadge source={crossSourceQuery.data.source} latencyMs={crossSourceQuery.data.latencyMs} />
+                    <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-400">
+                      {crossSourceQuery.data.totalCorrelations} correlated IOCs
+                    </Badge>
+                  </div>
                 </div>
                 <div className="space-y-2">
                   {crossSourceQuery.data.correlations.slice(0, 8).map((c: any, idx: number) => (
@@ -1049,7 +1056,12 @@ export default function EventsPage() {
 
           {timelineData.length > 0 && (
             <Card data-testid="events-timeline-chart">
-              <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Event Volume Timeline</CardTitle></CardHeader>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium flex items-center gap-2">
+                  Event Volume Timeline
+                  <span className="ml-auto"><DataSourceBadge source={timelineQuery.data?.source} latencyMs={timelineQuery.data?.latencyMs} /></span>
+                </CardTitle>
+              </CardHeader>
               <CardContent>
                 <ResponsiveContainer width="100%" height={180}>
                   <AreaChart data={timelineData}>

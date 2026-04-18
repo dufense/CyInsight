@@ -467,10 +467,99 @@ let serverReady = false;
   // Ensure tenant_quotas table exists (idempotent — safe to run every startup)
   await ensureQuotaTable();
 
-  // Initialize ClickHouse schema (no-op if CLICKHOUSE_URL not configured)
-  initClickHouseSchema().catch(err =>
-    console.warn("[ClickHouse] Schema init warning:", err instanceof Error ? err.message : err)
-  );
+  // Initialize ClickHouse schema (no-op if CLICKHOUSE_URL not configured).
+  // We MUST await this before kicking off the incident backfill/sweeper so
+  // that `incidents_distributed` exists when the first INSERT goes out;
+  // otherwise the backfill would fail on a fresh environment, the sweeper's
+  // cursor would never get anchored, and the MITRE fast-path would
+  // permanently undercount until restart. Failures here are still
+  // non-fatal — the catch keeps the rest of startup alive.
+  let chSchemaReady = true;
+  await initClickHouseSchema().catch(err => {
+    chSchemaReady = false;
+    console.warn("[ClickHouse] Schema init warning:", err instanceof Error ? err.message : err);
+  });
+
+  // Mirror the PG `incidents` table into ClickHouse so the MITRE coverage
+  // fast-path counts stay aligned with the PG path. Two pieces:
+  //
+  //   1. One-time backfill of all historical PG incidents on startup, so the
+  //      fast-path has full coverage from the moment it goes live (instead
+  //      of slowly converging as new incidents arrive). Idempotent — safe to
+  //      re-run because the CH table is a ReplacingMergeTree(updated_at)
+  //      keyed on (tenant_id, id).
+  //
+  //   2. A 30-second background loop that retries the backfill if it hasn't
+  //      yet succeeded (e.g. CH was briefly unreachable on first attempt),
+  //      then drains any new incidents via the sweeper. The sweeper catches
+  //      every raw-SQL incident write path in routes.ts and the engines
+  //      (Checkpoint email, UEBA escalation, classification/triage/status/IOC
+  //      updates, bulk updates) that bypass storage.createIncident /
+  //      storage.updateIncident, and only advances its (updated_at, id)
+  //      cursor after each batch is durably in CH, so a CH outage never
+  //      strands rows.
+  if (chSchemaReady) {
+    void import("./storage").then(async ({ DatabaseStorage }) => {
+      const runOnce = async () => {
+        try {
+          await DatabaseStorage.backfillIncidentsToClickHouse();
+        } catch (err) {
+          console.warn(
+            "[ClickHouse] Incident backfill error (will retry):",
+            err instanceof Error ? err.message : err,
+          );
+        }
+        try {
+          await DatabaseStorage.sweepIncidentsToClickHouse();
+        } catch (err) {
+          console.warn(
+            "[ClickHouse] Incident sweep error (non-fatal):",
+            err instanceof Error ? err.message : err,
+          );
+        }
+        // Task #206: one-shot backfill of security_events.target for events
+        // ingested before the CH ALTER added the column. The method's own
+        // in-memory `done` guard makes the periodic re-tick a cheap no-op
+        // once it succeeds; failures will be retried on the next tick.
+        try {
+          await DatabaseStorage.backfillSecurityEventTargetsToClickHouse();
+        } catch (err) {
+          console.warn(
+            "[ClickHouse] security_events.target backfill error (will retry):",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      };
+      await runOnce();
+      setInterval(runOnce, 30_000);
+    }).catch(() => { /* startup race — ignore */ });
+
+    // Task #207: one-shot backfill of `threat`/`action`/`recipient`/
+    // `description` for older CH security_events rows ingested before
+    // Task #203's column migration. Idempotent (gated by a row in
+    // `ccc._migrations`) and fire-and-forget — failures simply leave the
+    // marker absent so the next restart retries. Runs after the schema init
+    // so the ALTER UPDATE statements always target the new columns.
+    void import("./clickhouse-threat-flow-backfill")
+      .then(async ({ backfillChThreatFlowDetails, isThreatFlowBackfillComplete }) => {
+        const tryBackfill = async () => {
+          if (isThreatFlowBackfillComplete()) return;
+          try {
+            await backfillChThreatFlowDetails();
+          } catch (err) {
+            console.warn(
+              "[ClickHouse] Threat-flow backfill error (will retry):",
+              err instanceof Error ? err.message : err,
+            );
+          }
+        };
+        await tryBackfill();
+        // Light retry cadence — once the migration marker is written this
+        // becomes a single SELECT on _migrations per tick.
+        setInterval(tryBackfill, 5 * 60_000);
+      })
+      .catch(() => { /* startup race — ignore */ });
+  }
   const { createPerformanceIndexes, warmUpPool } = await import("./db");
   warmUpPool(3).catch(err => console.warn("[DB Pool] Warm-up error:", err.message));
   createPerformanceIndexes().catch(err => console.warn("[DB] Index creation deferred:", err.message));
@@ -509,6 +598,10 @@ let serverReady = false;
         if (isKafkaPrimaryWorker()) {
           const { startClickHouseIngestMonitor } = await import("./clickhouse-ingest-monitor");
           startClickHouseIngestMonitor();
+          const { startClickHouseFastPathMonitor } = await import("./clickhouse-fast-path-monitor");
+          startClickHouseFastPathMonitor();
+          const { startPlatformSettingsAuditDigest } = await import("./platform-settings-audit-digest");
+          startPlatformSettingsAuditDigest();
         }
         // TAXII poll scheduler — only run in primary worker to avoid duplicate polling
         if (!cluster.isWorker || cluster.worker?.id === 1) {
@@ -544,6 +637,12 @@ let serverReady = false;
     import("./clickhouse-ingest-monitor").then(({ startClickHouseIngestMonitor }) => {
       startClickHouseIngestMonitor();
     }).catch((e: any) => console.error("[ClickHouseIngestMonitor] Import error:", e));
+    import("./clickhouse-fast-path-monitor").then(({ startClickHouseFastPathMonitor }) => {
+      startClickHouseFastPathMonitor();
+    }).catch((e: any) => console.error("[ClickHouseFastPathMonitor] Import error:", e));
+    import("./platform-settings-audit-digest").then(({ startPlatformSettingsAuditDigest }) => {
+      startPlatformSettingsAuditDigest();
+    }).catch((e: any) => console.error("[PlatformSettingsAuditDigest] Import error:", e));
     await startKafkaConsumerIfPrimary(log);
     log("Server fully initialized");
   }

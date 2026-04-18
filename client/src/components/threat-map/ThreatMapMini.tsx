@@ -9,6 +9,7 @@ import { Globe, TrendingUp, ExternalLink, Activity } from "lucide-react";
 import { COUNTRY_MAP } from "@/lib/country-centroids";
 import { WorldMap, SEV_COLORS } from "@/components/threat-map/WorldMap";
 import type { ArcData } from "@/components/threat-map/WorldMap";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import { Link } from "wouter";
 
 interface ThreatMapResponse {
@@ -18,6 +19,8 @@ interface ThreatMapResponse {
   topTargets?: { country: string; count: number }[];
   uniqueCountries: number;
   hours: number;
+  source?: string;
+  latencyMs?: number;
 }
 
 export function ThreatMapMini({ height = 280 }: { height?: number }) {
@@ -65,6 +68,7 @@ export function ThreatMapMini({ height = 280 }: { height?: number }) {
                 LIVE
               </Badge>
             )}
+            <DataSourceBadge source={data?.source} latencyMs={data?.latencyMs} />
           </CardTitle>
           <Link href="/threat-map">
             <Button variant="ghost" size="sm" className="h-6 px-2 text-[10px] gap-1 text-muted-foreground hover:text-foreground" data-testid="link-threat-map-full">

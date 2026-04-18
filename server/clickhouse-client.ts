@@ -25,6 +25,7 @@
 
 import * as http from "http";
 import * as https from "https";
+import { recordChFastPath } from "./clickhouse-fast-path-stats";
 
 // ── Shared tier-routing constant ──────────────────────────────────────────────
 /** Hot-tier retention in days.  Override via HOT_RETENTION_DAYS env var. */
@@ -84,6 +85,24 @@ export interface HealthResult {
   error?: string;
 }
 
+export interface IngestIncidentPayload {
+  id: number;
+  tenant_id: number;
+  severity: string;
+  status: string;
+  source?: string;
+  detection_source?: string;
+  mitre_tactic?: string;
+  mitre_technique_id?: string;
+  mitre_technique?: string;
+  kill_chain_phase?: string;
+  confidence_score?: number;
+  classification?: string;
+  is_true_positive?: number;       // 0/1; ClickHouse UInt8
+  created_at: string;              // ISO-8601
+  updated_at: string;              // ISO-8601 (also serves as ReplacingMergeTree version)
+}
+
 export interface IngestEventPayload {
   event_id?: string;
   tenant_id: number;
@@ -94,6 +113,15 @@ export interface IngestEventPayload {
   host?: string;
   src_ip?: string;
   dst_ip?: string;
+  /**
+   * Raw target text from the PG `target` column. May be a hostname, FQDN,
+   * IPv4 literal, or empty. Stored alongside `dst_ip` (which only carries
+   * valid IPv4 values) so the threat-globe fast-path can match offices via
+   * hostname keywords / CIDR exactly the way the PG path does. Without this
+   * field, multi-office tenants saw every CH-path arc collapse to the
+   * default office because target hostnames weren't available server-side.
+   */
+  target?: string;
   user_name?: string;
   process_name?: string;
   mitre_tactic?: string;
@@ -105,6 +133,14 @@ export interface IngestEventPayload {
   normalized_event?: string;
   iocs?: string;
   ingested_at?: string;
+  // Task #203: richer threat-flow Sankey columns. These mirror the PG
+  // `security_events` columns of the same name so the CH fast-path can
+  // produce the same level of detail as the PG path for the dashboard
+  // threat-flow Sankey (Email/EDR domains in particular).
+  threat?: string;
+  action?: string;
+  recipient?: string;
+  description?: string;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -220,9 +256,10 @@ export class ClickHouseClient {
     const insertSql =
       `INSERT INTO ${this.database}.security_events_distributed ` +
       `(event_id, tenant_id, source_type, log_source, severity, event_type, host, ` +
-      `src_ip, dst_ip, user_name, process_name, mitre_tactic, mitre_technique, ` +
+      `src_ip, dst_ip, target, user_name, process_name, mitre_tactic, mitre_technique, ` +
       `kill_chain_phase, confidence_score, data_region, raw_event, ` +
-      `normalized_event, iocs, ingested_at) FORMAT JSONEachRow`;
+      `normalized_event, iocs, ingested_at, ` +
+      `threat, action, recipient, description) FORMAT JSONEachRow`;
 
     const qs = new URLSearchParams({
       query: insertSql,
@@ -242,6 +279,7 @@ export class ClickHouseClient {
       host:             event.host ?? "",
       src_ip:           event.src_ip ?? "0.0.0.0",
       dst_ip:           event.dst_ip ?? "0.0.0.0",
+      target:           event.target ?? "",
       user_name:        event.user_name ?? "",
       process_name:     event.process_name ?? "",
       mitre_tactic:     event.mitre_tactic ?? "",
@@ -253,6 +291,10 @@ export class ClickHouseClient {
       normalized_event: event.normalized_event ?? "",
       iocs:             event.iocs ?? "[]",
       ingested_at:      event.ingested_at ?? new Date().toISOString(),
+      threat:           event.threat ?? "",
+      action:           event.action ?? "",
+      recipient:        event.recipient ?? "",
+      description:      event.description ?? "",
     };
     const body = JSON.stringify(row);
 
@@ -581,9 +623,10 @@ export class ClickHouseClient {
     const insertSql =
       `INSERT INTO ${this.database}.security_events_distributed ` +
       `(event_id, tenant_id, source_type, log_source, severity, event_type, host, ` +
-      `src_ip, dst_ip, user_name, process_name, mitre_tactic, mitre_technique, ` +
+      `src_ip, dst_ip, target, user_name, process_name, mitre_tactic, mitre_technique, ` +
       `kill_chain_phase, confidence_score, data_region, raw_event, ` +
-      `normalized_event, iocs, ingested_at) FORMAT JSONEachRow`;
+      `normalized_event, iocs, ingested_at, ` +
+      `threat, action, recipient, description) FORMAT JSONEachRow`;
 
     const qs = new URLSearchParams({ query: insertSql, database: this.database });
     const requestUrl = `${parsed.origin}/?${qs.toString()}`;
@@ -602,6 +645,7 @@ export class ClickHouseClient {
           host:             event.host ?? "",
           src_ip:           event.src_ip ?? "0.0.0.0",
           dst_ip:           event.dst_ip ?? "0.0.0.0",
+          target:           event.target ?? "",
           user_name:        event.user_name ?? "",
           process_name:     event.process_name ?? "",
           mitre_tactic:     event.mitre_tactic ?? "",
@@ -613,6 +657,10 @@ export class ClickHouseClient {
           normalized_event: event.normalized_event ?? "",
           iocs:             event.iocs ?? "[]",
           ingested_at:      event.ingested_at ?? new Date().toISOString(),
+          threat:           event.threat ?? "",
+          action:           event.action ?? "",
+          recipient:        event.recipient ?? "",
+          description:      event.description ?? "",
         })
       )
       .join("\n");
@@ -642,6 +690,81 @@ export class ClickHouseClient {
       );
       req.on("error", reject);
       req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse batch insert timed out")); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  /**
+   * Insert/update incidents into ClickHouse via JSONEachRow. The underlying
+   * table is a ReplacingMergeTree keyed on (tenant_id, id) with `updated_at`
+   * as the version column, so re-inserting the same id with a newer
+   * `updated_at` upserts the row in place. Used by storage.chDualWriteIncidents
+   * so the MITRE coverage fast-path can count incidents (not events) from CH
+   * and stay apples-to-apples with the PostgreSQL path.
+   */
+  async insertIncidents(rows: IngestIncidentPayload[]): Promise<void> {
+    if (rows.length === 0) return;
+    const parsed = new URL(this.url);
+    const insertSql =
+      `INSERT INTO ${this.database}.incidents_distributed ` +
+      `(id, tenant_id, severity, status, source, detection_source, ` +
+      `mitre_tactic, mitre_technique_id, mitre_technique, kill_chain_phase, ` +
+      `confidence_score, classification, is_true_positive, ` +
+      `created_at, updated_at) FORMAT JSONEachRow`;
+
+    const qs = new URLSearchParams({ query: insertSql, database: this.database });
+    const requestUrl = `${parsed.origin}/?${qs.toString()}`;
+    const transport = parsed.protocol === "https:" ? https : http;
+    const headers = buildAuthHeaders(this.user, this.password);
+
+    const body = rows
+      .map((r) =>
+        JSON.stringify({
+          id:                  r.id,
+          tenant_id:           r.tenant_id,
+          severity:            r.severity ?? "",
+          status:              r.status ?? "",
+          source:              r.source ?? "",
+          detection_source:    r.detection_source ?? "",
+          mitre_tactic:        r.mitre_tactic ?? "",
+          mitre_technique_id:  r.mitre_technique_id ?? "",
+          mitre_technique:     r.mitre_technique ?? "",
+          kill_chain_phase:    r.kill_chain_phase ?? "",
+          confidence_score:    r.confidence_score ?? 0,
+          classification:      r.classification ?? "",
+          is_true_positive:    r.is_true_positive ?? 0,
+          created_at:          r.created_at,
+          updated_at:          r.updated_at,
+        })
+      )
+      .join("\n");
+
+    return new Promise<void>((resolve, reject) => {
+      const reqOptions = new URL(requestUrl);
+      const req = transport.request(
+        {
+          hostname: reqOptions.hostname,
+          port:     reqOptions.port,
+          path:     `${reqOptions.pathname}${reqOptions.search}`,
+          method:   "POST",
+          headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
+          timeout:  this.timeoutMs,
+        },
+        (res) => {
+          let respBody = "";
+          res.on("data", (c: Buffer) => { respBody += c.toString(); });
+          res.on("end", () => {
+            if (res.statusCode !== undefined && res.statusCode >= 400) {
+              reject(new Error(`ClickHouse incidents INSERT ${res.statusCode}: ${respBody.slice(0, 256)}`));
+            } else {
+              resolve();
+            }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse incidents insert timed out")); });
       req.write(body);
       req.end();
     });
@@ -767,6 +890,11 @@ export async function initClickHouseSchema(): Promise<void> {
       host             String CODEC(ZSTD(3))   DEFAULT '',
       src_ip           IPv4          DEFAULT '0.0.0.0',
       dst_ip           IPv4          DEFAULT '0.0.0.0',
+      -- Raw target text (hostname/FQDN/IPv4-literal). Required by the
+      -- threat-globe fast-path so multi-office tenants can match offices via
+      -- hostname keywords + CIDR identically to the PG path. dst_ip alone is
+      -- not enough because it only carries valid IPv4 values.
+      target           String CODEC(ZSTD(3))   DEFAULT '',
       user_name        String CODEC(ZSTD(3))   DEFAULT '',
       process_name     String CODEC(ZSTD(3))   DEFAULT '',
       mitre_tactic     LowCardinality(String) DEFAULT '',
@@ -778,6 +906,14 @@ export async function initClickHouseSchema(): Promise<void> {
       normalized_event String CODEC(ZSTD(3))   DEFAULT '',
       iocs             String CODEC(ZSTD(3))   DEFAULT '[]',
       ingested_at      DateTime64(3) DEFAULT now64(),
+      -- Task #203: richer threat-flow Sankey context. Mirrors PG security_events
+      -- so the CH fast-path can produce per-threat / per-action / per-recipient
+      -- detail equivalent to the PG path. action is LowCardinality (small
+      -- enumerated set); the rest are high-cardinality strings.
+      threat           String CODEC(ZSTD(3))   DEFAULT '',
+      action           LowCardinality(String)  DEFAULT '',
+      recipient        String CODEC(ZSTD(3))   DEFAULT '',
+      description      String CODEC(ZSTD(6))   DEFAULT '',
       INDEX idx_severity     severity      TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_mitre_tactic mitre_tactic  TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_source_type  source_type   TYPE bloom_filter(0.01) GRANULARITY 4,
@@ -799,6 +935,60 @@ export async function initClickHouseSchema(): Promise<void> {
      POPULATE AS
      SELECT tenant_id, toStartOfHour(ingested_at) AS hour, severity, source_type, countState() AS cnt
      FROM ${database}.security_events GROUP BY tenant_id, hour, severity, source_type`,
+    // Incidents mirror — feeds the MITRE coverage fast-path so per-tile counts
+    // match the PostgreSQL incidents-grouped query (instead of approximating
+    // via raw security_events). ReplacingMergeTree(updated_at) collapses to
+    // the latest version per (tenant_id, id), so chDualWriteIncidents can
+    // re-emit the row on every update without duplicates.
+    `CREATE TABLE IF NOT EXISTS ${database}.incidents ON CLUSTER ccc_cluster (
+      id                  UInt64,
+      tenant_id           UInt32,
+      severity            LowCardinality(String) DEFAULT '',
+      status              LowCardinality(String) DEFAULT '',
+      source              LowCardinality(String) DEFAULT '',
+      detection_source    String CODEC(ZSTD(3))   DEFAULT '',
+      mitre_tactic        LowCardinality(String) DEFAULT '',
+      mitre_technique_id  LowCardinality(String) DEFAULT '',
+      mitre_technique     LowCardinality(String) DEFAULT '',
+      kill_chain_phase    LowCardinality(String) DEFAULT '',
+      confidence_score    Int32                  DEFAULT 0,
+      classification      LowCardinality(String) DEFAULT '',
+      is_true_positive    UInt8                  DEFAULT 0,
+      created_at          DateTime64(3)          DEFAULT now64(),
+      updated_at          DateTime64(3)          DEFAULT now64(),
+      INDEX idx_inc_mitre_id     mitre_technique_id  TYPE bloom_filter(0.01) GRANULARITY 4,
+      INDEX idx_inc_mitre_tactic mitre_tactic        TYPE bloom_filter(0.01) GRANULARITY 4
+    ) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/incidents', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (tenant_id, id)
+    SETTINGS index_granularity = 8192`,
+    // IMPORTANT: shard deterministically by incident identity, NOT rand().
+    // ReplacingMergeTree(updated_at) only deduplicates within a shard, and
+    // FINAL on a Distributed query does not collapse cross-shard duplicates.
+    // The CH dual-write re-emits the same (tenant_id, id) on every update to
+    // upsert the latest version, so different versions of the same incident
+    // MUST land on the same shard or the MITRE coverage fast-path will
+    // overcount and drift from the PG path. cityHash64(tenant_id, id)
+    // matches the table's ORDER BY key and pins all versions of an incident
+    // to one shard.
+    //
+    // Drop + recreate is safe for the Distributed table because it owns no
+    // data — the rows live on the underlying `incidents` shards. This
+    // guarantees the sharding key is correct even if a prior deploy created
+    // the table with a different key. The historical rows then get re-keyed
+    // on the next ingest pass (the dual-write + sweeper re-emit on update).
+    `DROP TABLE IF EXISTS ${database}.incidents_distributed ON CLUSTER ccc_cluster`,
+    `CREATE TABLE ${database}.incidents_distributed ON CLUSTER ccc_cluster
+     AS ${database}.incidents
+     ENGINE = Distributed(ccc_cluster, ${database}, incidents, cityHash64(tenant_id, id))`,
+    // Tiny migrations table used to gate one-shot data remediations across
+    // restarts (e.g. truncating mis-sharded incident rows). Replicated so all
+    // shards see the same applied set.
+    `CREATE TABLE IF NOT EXISTS ${database}._migrations ON CLUSTER ccc_cluster (
+       name       String,
+       applied_at DateTime64(3) DEFAULT now64()
+     ) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/_migrations', '{replica}')
+     ORDER BY name`,
   ];
 
   // Single-node fallback — same schema without ON CLUSTER / ReplicatedMergeTree.
@@ -814,6 +1004,7 @@ export async function initClickHouseSchema(): Promise<void> {
       host             String CODEC(ZSTD(3))   DEFAULT '',
       src_ip           IPv4          DEFAULT '0.0.0.0',
       dst_ip           IPv4          DEFAULT '0.0.0.0',
+      target           String CODEC(ZSTD(3))   DEFAULT '',
       user_name        String CODEC(ZSTD(3))   DEFAULT '',
       process_name     String CODEC(ZSTD(3))   DEFAULT '',
       mitre_tactic     LowCardinality(String) DEFAULT '',
@@ -825,6 +1016,10 @@ export async function initClickHouseSchema(): Promise<void> {
       normalized_event String CODEC(ZSTD(3))   DEFAULT '',
       iocs             String CODEC(ZSTD(3))   DEFAULT '[]',
       ingested_at      DateTime64(3) DEFAULT now64(),
+      threat           String CODEC(ZSTD(3))   DEFAULT '',
+      action           LowCardinality(String)  DEFAULT '',
+      recipient        String CODEC(ZSTD(3))   DEFAULT '',
+      description      String CODEC(ZSTD(6))   DEFAULT '',
       INDEX idx_severity     severity      TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_mitre_tactic mitre_tactic  TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_source_type  source_type   TYPE bloom_filter(0.01) GRANULARITY 4,
@@ -844,6 +1039,30 @@ export async function initClickHouseSchema(): Promise<void> {
      POPULATE AS
      SELECT tenant_id, toStartOfHour(ingested_at) AS hour, severity, source_type, countState() AS cnt
      FROM ${database}.security_events GROUP BY tenant_id, hour, severity, source_type`,
+    // Single-node incidents mirror — same shape as the cluster table.
+    `CREATE TABLE IF NOT EXISTS ${database}.incidents (
+      id                  UInt64,
+      tenant_id           UInt32,
+      severity            LowCardinality(String) DEFAULT '',
+      status              LowCardinality(String) DEFAULT '',
+      source              LowCardinality(String) DEFAULT '',
+      detection_source    String CODEC(ZSTD(3))   DEFAULT '',
+      mitre_tactic        LowCardinality(String) DEFAULT '',
+      mitre_technique_id  LowCardinality(String) DEFAULT '',
+      mitre_technique     LowCardinality(String) DEFAULT '',
+      kill_chain_phase    LowCardinality(String) DEFAULT '',
+      confidence_score    Int32                  DEFAULT 0,
+      classification      LowCardinality(String) DEFAULT '',
+      is_true_positive    UInt8                  DEFAULT 0,
+      created_at          DateTime64(3)          DEFAULT now64(),
+      updated_at          DateTime64(3)          DEFAULT now64(),
+      INDEX idx_inc_mitre_id     mitre_technique_id  TYPE bloom_filter(0.01) GRANULARITY 4,
+      INDEX idx_inc_mitre_tactic mitre_tactic        TYPE bloom_filter(0.01) GRANULARITY 4
+    ) ENGINE = ReplacingMergeTree(updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (tenant_id, id)
+    SETTINGS index_granularity = 8192`,
+    `CREATE VIEW IF NOT EXISTS ${database}.incidents_distributed AS SELECT * FROM ${database}.incidents`,
   ];
 
   const isClusterError = (msg: string) =>
@@ -874,6 +1093,103 @@ export async function initClickHouseSchema(): Promise<void> {
         if (msg.includes("already exists") || msg.includes("POPULATE")) continue;
         console.warn(`[ClickHouse] DDL warning (non-fatal): ${msg.slice(0, 256)}`);
       }
+    }
+  } else {
+    // Cluster mode only: one-shot data remediation for environments that may
+    // have ingested incidents while the Distributed wrapper still used
+    // rand() sharding. Those rows can be physically located on any shard,
+    // and ReplacingMergeTree(updated_at) + FINAL only deduplicates within a
+    // shard — so leaving them in place would let the MITRE coverage
+    // fast-path overcount versus PG. We TRUNCATE the local incidents table
+    // on every shard once, then let storage.backfillIncidentsToClickHouse()
+    // repopulate from PG using the new deterministic sharding key. The
+    // marker in `_migrations` ensures this runs at most once per cluster.
+    const MIGRATION = "incidents_dedup_shard_v1";
+    try {
+      const rows = await client.queryRows<{ name: string }>(
+        `SELECT name FROM ${database}._migrations WHERE name = '${MIGRATION}' LIMIT 1`,
+      );
+      if (rows.length === 0) {
+        console.log(
+          "[ClickHouse] Applying migration incidents_dedup_shard_v1: " +
+          "truncating mis-sharded incidents so the startup backfill can " +
+          "rebuild them with the cityHash64(tenant_id, id) sharding key.",
+        );
+        await client.query(`TRUNCATE TABLE IF EXISTS ${database}.incidents ON CLUSTER ccc_cluster`);
+        await client.query(
+          `INSERT INTO ${database}._migrations (name) VALUES ('${MIGRATION}')`,
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ClickHouse] incident migration warning (non-fatal): ${msg.slice(0, 256)}`);
+    }
+  }
+
+  // ── Forward-compatible column migrations ────────────────────────────────────
+  // Existing deployments created the table before these columns were added.
+  // ALTER ADD COLUMN IF NOT EXISTS is idempotent so this is safe on every
+  // boot. The cluster variant uses ON CLUSTER so the change reaches every
+  // shard; we fall back to the unqualified ALTER on single-node setups.
+  //
+  //  - Task #202: `target` (raw target text — hostname/FQDN/IP literal) is
+  //    required by the threat-globe office matcher.
+  //  - Task #203: `threat`, `action`, `recipient`, `description` mirror the
+  //    PG security_events columns the threat-flow Sankey depends on so the
+  //    CH fast-path matches the PG path's specificity.
+  const alterColumnStmts: { col: string; type: string }[] = [
+    { col: "target",      type: "String CODEC(ZSTD(3)) DEFAULT ''" },
+    { col: "threat",      type: "String CODEC(ZSTD(3)) DEFAULT ''" },
+    { col: "action",      type: "LowCardinality(String) DEFAULT ''" },
+    { col: "recipient",   type: "String CODEC(ZSTD(3)) DEFAULT ''" },
+    { col: "description", type: "String CODEC(ZSTD(6)) DEFAULT ''" },
+  ];
+
+  const runAlter = async (clusterStmt: string, singleStmt: string | null, label: string) => {
+    try {
+      await client.query(useSingleNode && singleStmt ? singleStmt : clusterStmt);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!useSingleNode && isClusterError(msg) && singleStmt) {
+        try { await client.query(singleStmt); }
+        catch (err2: unknown) {
+          const msg2 = err2 instanceof Error ? err2.message : String(err2);
+          console.warn(`[ClickHouse] ALTER ${label} (non-fatal): ${msg2.slice(0, 256)}`);
+        }
+      } else if (!msg.includes("already exists") && !msg.includes("Cannot add")) {
+        console.warn(`[ClickHouse] ALTER ${label} (non-fatal): ${msg.slice(0, 256)}`);
+      }
+    }
+  };
+
+  for (const { col, type } of alterColumnStmts) {
+    const baseCluster = `ALTER TABLE ${database}.security_events ON CLUSTER ccc_cluster ADD COLUMN IF NOT EXISTS ${col} ${type}`;
+    const baseSingle  = `ALTER TABLE ${database}.security_events ADD COLUMN IF NOT EXISTS ${col} ${type}`;
+    await runAlter(baseCluster, baseSingle, `security_events.${col}`);
+    // Distributed table — must be altered separately on cluster setups so
+    // INSERT INTO security_events_distributed (..., ${col}, ...) recognises
+    // the new column. (On single-node this is a regular VIEW recreated below
+    // to pick up new base-table columns at query time.)
+    if (!useSingleNode) {
+      const distCluster = `ALTER TABLE ${database}.security_events_distributed ON CLUSTER ccc_cluster ADD COLUMN IF NOT EXISTS ${col} ${type}`;
+      await runAlter(distCluster, null, `security_events_distributed.${col}`);
+    }
+  }
+
+  // Single-node: `security_events_distributed` is a VIEW over security_events
+  // whose `SELECT *` was expanded at creation time, so it won't include the
+  // newly-added columns. Drop and recreate so reads see the new fields.
+  // (In cluster mode the Distributed engine resolves columns lazily, so no
+  // recreation is needed there.)
+  if (useSingleNode) {
+    try {
+      await client.query(`DROP VIEW IF EXISTS ${database}.security_events_distributed`);
+      await client.query(
+        `CREATE VIEW IF NOT EXISTS ${database}.security_events_distributed AS SELECT * FROM ${database}.security_events`,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ClickHouse] distributed-view refresh warning (non-fatal): ${msg.slice(0, 256)}`);
     }
   }
 
@@ -996,6 +1312,12 @@ export function logChQuery(
   latencyMs: number,
   extras?: Record<string, unknown>,
 ): void {
+  // Task #187 — feed per-tenant fast-path success/failure counters so a
+  // sustained CH outage triggers a platform alert (see clickhouse-fast-path-monitor).
+  try {
+    recordChFastPath(name, latencyMs, extras);
+  } catch { /* counters are best-effort */ }
+
   if (process.env.LOG_LEVEL === "debug" || process.env.DEBUG_CLICKHOUSE === "1") {
     const extrasStr = extras
       ? " " + Object.entries(extras).map(([k, v]) => `${k}=${v}`).join(" ")

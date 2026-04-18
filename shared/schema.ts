@@ -2453,6 +2453,30 @@ export const insertPlatformNotificationSchema = createInsertSchema(platformNotif
 export type PlatformNotification = typeof platformNotifications.$inferSelect;
 export type InsertPlatformNotification = z.infer<typeof insertPlatformNotificationSchema>;
 
+// Task #183 — historical record of ClickHouse stalled-ingest outages so
+// operators can see how often ingestion stalls and how long each outage lasted.
+export const clickhouseIngestOutages = pgTable("clickhouse_ingest_outages", {
+  id: serial("id").primaryKey(),
+  startedAt: timestamp("started_at").notNull(),
+  endedAt: timestamp("ended_at"),
+  durationSeconds: integer("duration_seconds"),
+  thresholdMinutes: integer("threshold_minutes").notNull(),
+  sampleWindowSeconds: integer("sample_window_seconds").notNull(),
+  notificationsDispatched: integer("notifications_dispatched").default(0).notNull(),
+  resolved: boolean("resolved").default(false).notNull(),
+  // Task #187 — distinguish stalled-ingest outages (platform-wide) from
+  // fast-path read failures (per tenant). Existing rows keep reason='stalled_ingest'.
+  reason: varchar("reason", { length: 32 }).default("stalled_ingest").notNull(),
+  tenantId: integer("tenant_id"),
+  failureRatePercent: integer("failure_rate_percent"),
+  attempts: integer("attempts"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertClickhouseIngestOutageSchema = createInsertSchema(clickhouseIngestOutages).omit({ id: true, createdAt: true });
+export type ClickhouseIngestOutage = typeof clickhouseIngestOutages.$inferSelect;
+export type InsertClickhouseIngestOutage = z.infer<typeof insertClickhouseIngestOutageSchema>;
+
 export const huntSessionStatusEnum = pgEnum("hunt_session_status", ["active", "paused", "completed", "archived"]);
 
 export const huntSessions = pgTable("hunt_sessions", {
@@ -2979,6 +3003,32 @@ export const clickHouseIngestMonitorSettingsSchema = z.object({
   intervalSeconds: z.number().int().min(30).max(3600),
 });
 export type ClickHouseIngestMonitorSettings = z.infer<typeof clickHouseIngestMonitorSettingsSchema>;
+
+// Task #187 — settings for the per-tenant ClickHouse fast-path failure monitor.
+// When the rolling failure rate over `windowMinutes` (with at least
+// `minAttempts` samples) exceeds `failureRatePercent`, an alert fires for that
+// tenant and an entry is written to clickhouse_ingest_outages so operators can
+// correlate against the existing outage history.
+export const clickHouseFastPathMonitorSettingsSchema = z.object({
+  enabled: z.boolean(),
+  windowMinutes: z.number().int().min(1).max(60),
+  minAttempts: z.number().int().min(1).max(10000),
+  failureRatePercent: z.number().int().min(1).max(100),
+  intervalSeconds: z.number().int().min(30).max(3600),
+  cooldownMinutes: z.number().int().min(1).max(1440),
+});
+export type ClickHouseFastPathMonitorSettings = z.infer<typeof clickHouseFastPathMonitorSettingsSchema>;
+
+// ── Platform Settings Audit (#188) — record each change for review ───────────
+export const platformSettingsAudit = pgTable("platform_settings_audit", {
+  id: serial("id").primaryKey(),
+  key: varchar("key", { length: 128 }).notNull(),
+  prevValue: jsonb("prev_value"),
+  newValue: jsonb("new_value").notNull(),
+  changedBy: varchar("changed_by", { length: 255 }),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+});
+export type PlatformSettingsAuditEntry = typeof platformSettingsAudit.$inferSelect;
 
 // ── Tenant Intel Sharing Settings (#78) — opt-in/out per tenant ──────────────
 export const tenantIntelSharingSettings = pgTable("tenant_intel_sharing_settings", {

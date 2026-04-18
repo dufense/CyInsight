@@ -19,6 +19,7 @@ import {
 import { MITRE_TACTICS, getTacticColor, ALL_TECHNIQUES, TOTAL_TECHNIQUE_COUNT, type MitreTechnique } from "@/lib/mitre-attack-data";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from "recharts";
 import { Link } from "wouter";
 
@@ -312,7 +313,7 @@ export default function MitreCoveragePage() {
     queryKey: ["/api/mitre/coverage", tenantId, days],
     queryFn: async () => {
       const res = await fetch(`/api/mitre/coverage?tenantId=${tenantId}&days=${days}`);
-      return res.json() as Promise<{ covered: Record<string, CoverageEntry>; days: number }>;
+      return res.json() as Promise<{ covered: Record<string, CoverageEntry>; days: number; source?: string; latencyMs?: number }>;
     },
     enabled: !!tenantId,
   });
@@ -414,6 +415,7 @@ export default function MitreCoveragePage() {
               <Button variant="outline" size="sm" onClick={handleExport} className="h-8 gap-1.5 text-xs" data-testid="button-export-coverage">
                 <Download className="w-3.5 h-3.5" />Export CSV
               </Button>
+              <DataSourceBadge source={data?.source} latencyMs={data?.latencyMs} />
             </div>
           </div>
 

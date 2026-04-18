@@ -27,6 +27,7 @@ import { ThreatGlobe } from "@/components/dashboard/ThreatGlobe";
 import { IncidentHeatmap } from "@/components/dashboard/IncidentHeatmap";
 import { LiveEventsTicker } from "@/components/dashboard/LiveEventsTicker";
 import { useDashboardFilter } from "@/components/dashboard/DashboardFilterContext";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import { RiskBar, CountryFlag, AppIcon } from "@/lib/visual-helpers";
 import { ExpandableCard } from "@/components/ui/expandable-card";
 import { Button } from "@/components/ui/button";
@@ -756,6 +757,8 @@ interface ThreatFlowData {
   links: ThreatFlowLink[];
   columns?: string[];
   layerOrder?: string[];
+  source?: string;
+  latencyMs?: number;
 }
 
 const ACTION_COLORS: Record<string, string> = {
@@ -1240,7 +1243,10 @@ function ThreatFlowSection({ tenantId, domain, title }: { tenantId: number; doma
   return (
     <Card data-testid={`threat-flow-card-${domain}`}>
       <CardHeader className="pb-2">
-        <CardTitle className="text-xs font-semibold uppercase tracking-wider">{displayTitle}</CardTitle>
+        <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
+          {displayTitle}
+          <span className="ml-auto"><DataSourceBadge source={data?.source} latencyMs={data?.latencyMs} /></span>
+        </CardTitle>
       </CardHeader>
       <CardContent className="pt-0">
         {data?.nodes?.length ? (
@@ -1573,7 +1579,7 @@ export default function DashboardPage() {
     staleTime: 3 * 60 * 1000,
   });
 
-  const { data: drilldownData, isLoading: drilldownLoading } = useQuery<any>({
+  const { data: drilldownData, isLoading: drilldownLoading, dataUpdatedAt: drilldownUpdatedAt } = useQuery<any>({
     queryKey: ["/api/drilldown", currentTenant?.id, drilldown?.filterType, drilldown?.filterValue, drilldown?.domain],
     queryFn: async () => {
       let url = `/api/drilldown/${currentTenant?.id}?filterType=${encodeURIComponent(drilldown!.filterType)}&filterValue=${encodeURIComponent(drilldown!.filterValue)}`;
@@ -1688,6 +1694,8 @@ export default function DashboardPage() {
     newAlerts: { today: 0, thisWeek: 0, thisMonth: 0, todayChange: 0, weekChange: 0, monthChange: 0 } as any,
     domainInsights: {} as Record<string, any>,
     eventsTimeline: [] as any[],
+    source: undefined as string | undefined,
+    latencyMs: undefined as number | undefined,
     ...stats,
   };
 
@@ -1733,6 +1741,9 @@ export default function DashboardPage() {
               </Button>
             ))}
           </div>
+          {(stats?.source || typeof stats?.latencyMs === "number") && (
+            <DataSourceBadge source={stats?.source} latencyMs={stats?.latencyMs} samplesKey="dashboard-stats" sampleId={dataUpdatedAt} />
+          )}
           <Badge variant="outline" className="gap-1.5 text-[10px] cursor-pointer hover:bg-muted/50 transition-colors"
             onClick={() => setLiveFeedOpen(!liveFeedOpen)} data-testid="live-feed-toggle">
             <span className={`w-1.5 h-1.5 rounded-full ${liveFeedConnected ? "bg-green-500 animate-pulse" : "bg-muted-foreground"}`} />
@@ -2491,7 +2502,10 @@ export default function DashboardPage() {
                 <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
                   <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
                   <span className="text-muted-foreground">Global Threat Activity</span>
-                  <span className="ml-auto text-[9px] font-mono text-red-400/70 bg-red-500/10 px-1.5 py-0.5 rounded border border-red-500/20">LIVE TRACKING</span>
+                  <span className="ml-auto flex items-center gap-2">
+                    <DataSourceBadge source={s.source} latencyMs={s.latencyMs} />
+                    <span className="text-[9px] font-mono text-red-400/70 bg-red-500/10 px-1.5 py-0.5 rounded border border-red-500/20">LIVE TRACKING</span>
+                  </span>
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-2 pb-3 pt-0">
@@ -2614,6 +2628,7 @@ export default function DashboardPage() {
                   <Activity className="w-4 h-4 text-blue-500" />
                   Events Timeline
                   {liveMode && <span className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />}
+                  <span className="ml-auto"><DataSourceBadge source={s.source} latencyMs={s.latencyMs} /></span>
                 </CardTitle>
                 <p className="text-[10px] text-muted-foreground mt-0.5">Event volume by severity over time</p>
               </CardHeader>
@@ -5559,9 +5574,14 @@ export default function DashboardPage() {
                   </p>
                 )}
               </div>
+              <div className="flex items-center gap-2">
+                {drilldownData?.source && (
+                  <DataSourceBadge source={drilldownData.source} latencyMs={drilldownData.latencyMs} samplesKey="dashboard-drilldown" sampleId={drilldownUpdatedAt} />
+                )}
               <Button variant="ghost" size="icon" onClick={closeDrilldown} data-testid="drilldown-close">
                 <X className="w-4 h-4" />
               </Button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto p-4">
               {drilldownLoading ? (

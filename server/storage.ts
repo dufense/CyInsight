@@ -52,9 +52,10 @@ import {
   type SourceHealth, type InsertSourceHealth,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, desc, and, or, count, sql, gte, lte, inArray, isNull, isNotNull, getTableColumns } from "drizzle-orm";
+import { eq, desc, and, or, count, sql, gt, gte, lte, inArray, isNull, isNotNull, getTableColumns } from "drizzle-orm";
 import crypto from "crypto";
 import { buildIntegrationGuardSql } from "./log-source-map";
+import type { IngestIncidentPayload } from "./clickhouse-client";
 
 // Per-row EXISTS guards — enforce integration-aware filtering at query level.
 // The guard checks whether each row's tenant currently has the connected
@@ -430,7 +431,412 @@ export class DatabaseStorage implements IStorage {
 
   async createIncident(data: InsertIncident): Promise<Incident> {
     const [inc] = await db.insert(incidents).values(data).returning();
+    DatabaseStorage.chDualWriteIncidents([inc]);
     return inc;
+  }
+
+  // ── ClickHouse incidents mirroring ────────────────────────────────────────
+  // Every storage-level create/update of an incident is streamed into the CH
+  // `incidents_distributed` ReplacingMergeTree (keyed on tenant_id+id, version
+  // = updated_at) so the MITRE coverage fast-path can count incidents (not
+  // raw events) and stay numerically equivalent to the PostgreSQL path.
+  // Failures on the live dual-write are non-fatal — PG remains authoritative,
+  // and the periodic sweeper below catches anything missed (including writes
+  // from raw-SQL paths that bypass storage entirely).
+  //
+  // Build the JSONEachRow payload for an array of Incident rows. Pure — no
+  // I/O, no `any` casts. Used by both the live dual-write and the durable
+  // sweep/backfill paths.
+  private static toIncidentPayload(rows: Incident[]): IngestIncidentPayload[] {
+    const toIso = (v: Date | string | null | undefined): string =>
+      v instanceof Date ? v.toISOString()
+      : typeof v === "string" && v ? new Date(v).toISOString()
+      : new Date().toISOString();
+    return rows
+      .filter((r) => r && typeof r.id === "number" && typeof r.tenantId === "number")
+      .map((r) => ({
+        id:                  r.id,
+        tenant_id:           r.tenantId,
+        severity:            r.severity ? String(r.severity) : "",
+        status:              r.status ? String(r.status) : "",
+        source:              r.source ?? "",
+        detection_source:    r.detectionSource ?? "",
+        mitre_tactic:        r.mitreTactic ?? "",
+        mitre_technique_id:  r.mitreTechniqueId ?? "",
+        mitre_technique:     r.mitreTechnique ?? "",
+        kill_chain_phase:    r.killChainPhase ?? "",
+        confidence_score:    typeof r.confidenceScore === "number" ? r.confidenceScore : 0,
+        classification:      r.classification ?? "",
+        is_true_positive:    r.isTruePositive ? 1 : 0,
+        created_at:          toIso(r.createdAt),
+        updated_at:          toIso(r.updatedAt),
+      }));
+  }
+
+  private static async getChClientForIncidents(): Promise<
+    { insertIncidents: (rows: IngestIncidentPayload[]) => Promise<void> } | null
+  > {
+    try {
+      const m = await import("./clickhouse-client");
+      return m.getClickHouseClient();
+    } catch { return null; }
+  }
+
+  // Live dual-write: fire-and-forget, non-fatal. Called from createIncident /
+  // updateIncident on the hot path — we never want a CH outage to block a
+  // storage call. Anything missed here will be picked up by the next sweep.
+  static chDualWriteIncidents(rows: Incident[]): void {
+    if (rows.length === 0) return;
+    void DatabaseStorage.getChClientForIncidents().then(async (chClient) => {
+      if (!chClient) return;
+      const payload = DatabaseStorage.toIncidentPayload(rows);
+      if (payload.length === 0) return;
+      try {
+        await chClient.insertIncidents(payload);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[Storage] ClickHouse incident write error (non-fatal): ${msg}`);
+      }
+    });
+  }
+
+  // Awaitable variant: throws on insert failure. Used by the sweeper and
+  // backfill so the cursor only advances after the rows are durably in CH.
+  private static async chWriteIncidentsAwait(
+    chClient: { insertIncidents: (rows: IngestIncidentPayload[]) => Promise<void> },
+    rows: Incident[],
+  ): Promise<void> {
+    const payload = DatabaseStorage.toIncidentPayload(rows);
+    if (payload.length === 0) return;
+    await chClient.insertIncidents(payload);
+  }
+
+  // ── ClickHouse incidents one-time backfill ────────────────────────────────
+  // Copies every existing PG incident into ClickHouse on startup so the MITRE
+  // coverage fast-path has full historical coverage from the moment it goes
+  // live, instead of slowly converging as new incidents arrive. Idempotent:
+  // safe to re-run because the CH `incidents` table is a
+  // ReplacingMergeTree(updated_at) keyed on (tenant_id, id) — re-emits
+  // collapse to a single row. The backfill marks the sweeper's cursor on
+  // completion so the periodic sweep takes over from the right point.
+  private static incidentBackfillDone = false;
+  private static incidentBackfillRunning = false;
+  static isIncidentBackfillComplete(): boolean {
+    return DatabaseStorage.incidentBackfillDone;
+  }
+  /**
+   * True while a backfill walk is actively in flight (either the startup
+   * retry loop or an operator-triggered re-run). Exposed so the admin
+   * re-run endpoint can refuse to reset state out from under a concurrent
+   * backfill — that would race the sweeper cursor anchoring at the end of
+   * `backfillIncidentsToClickHouse`.
+   */
+  static isIncidentBackfillRunning(): boolean {
+    return DatabaseStorage.incidentBackfillRunning;
+  }
+  /**
+   * Operator-facing reset hook for the one-shot incident backfill. Clears
+   * the in-process "done" guard so the next call to
+   * `backfillIncidentsToClickHouse` re-walks PG and re-streams every row
+   * into CH. Used by the admin re-run endpoint when an operator needs to
+   * force a re-backfill (e.g. after a CH wipe/restore, schema rebuild, or
+   * suspected drift). Idempotent on the CH side — the `incidents` table is
+   * a ReplacingMergeTree(updated_at) keyed on (tenant_id, id), so re-emits
+   * collapse to the latest version per row instead of duplicating.
+   */
+  static resetIncidentBackfillState(): void {
+    DatabaseStorage.incidentBackfillDone = false;
+  }
+  static async backfillIncidentsToClickHouse(batchSize = 5000): Promise<number> {
+    if (DatabaseStorage.incidentBackfillDone || DatabaseStorage.incidentBackfillRunning) return 0;
+    DatabaseStorage.incidentBackfillRunning = true;
+    let total = 0;
+    try {
+      const chClient = await DatabaseStorage.getChClientForIncidents();
+      if (!chClient) {
+        DatabaseStorage.incidentBackfillDone = true;
+        return 0;
+      }
+      // Walk the table in (updated_at, id) order so a same-timestamp cluster
+      // can never strand a row across a batch boundary.
+      let lastUpdatedAt: Date | null = null;
+      let lastId = 0;
+      while (true) {
+        const batch: Incident[] = lastUpdatedAt
+          ? await db.select().from(incidents)
+              .where(or(
+                gt(incidents.updatedAt, lastUpdatedAt),
+                and(eq(incidents.updatedAt, lastUpdatedAt), gt(incidents.id, lastId)),
+              ))
+              .orderBy(incidents.updatedAt, incidents.id)
+              .limit(batchSize)
+          : await db.select().from(incidents)
+              .orderBy(incidents.updatedAt, incidents.id)
+              .limit(batchSize);
+        if (batch.length === 0) break;
+        await DatabaseStorage.chWriteIncidentsAwait(chClient, batch);
+        const tail: Incident = batch[batch.length - 1];
+        const tailTs: Date = tail.updatedAt instanceof Date
+          ? tail.updatedAt
+          : new Date(tail.updatedAt as unknown as string | number);
+        lastUpdatedAt = tailTs;
+        lastId = tail.id;
+        total += batch.length;
+        if (batch.length < batchSize) break;
+      }
+      // Anchor the periodic sweeper just past the last backfilled row so it
+      // doesn't re-ship the entire history on its first tick. If the table
+      // was completely empty, anchor from the live DB MAX(updated_at, id)
+      // instead of `now()` so any rows inserted concurrently with the
+      // backfill scan still get caught by the next sweep tick.
+      if (lastUpdatedAt) {
+        DatabaseStorage.incidentSweepCursor = {
+          ts: new Date(lastUpdatedAt.getTime()),
+          id: lastId,
+        };
+      } else {
+        const [maxRow] = await db.select({
+          maxTs: sql<Date | null>`max(${incidents.updatedAt})`,
+          maxId: sql<number | null>`max(${incidents.id})`,
+        }).from(incidents);
+        DatabaseStorage.incidentSweepCursor = {
+          ts: maxRow?.maxTs ? new Date(maxRow.maxTs) : new Date(0),
+          id: maxRow?.maxId ?? 0,
+        };
+      }
+      DatabaseStorage.incidentBackfillDone = true;
+      console.log(`[ClickHouse] Incident backfill complete: ${total} rows mirrored`);
+      return total;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ClickHouse] Incident backfill error (will retry next startup): ${msg}`);
+      return total;
+    } finally {
+      DatabaseStorage.incidentBackfillRunning = false;
+    }
+  }
+
+  // ── ClickHouse incidents background sweeper ───────────────────────────────
+  // Catches incidents written through any code path, including the legacy
+  // raw-SQL paths in routes.ts and engines (Checkpoint email, UEBA
+  // escalation, classification/triage/status/IOC updates, bulk updates) that
+  // bypass storage.createIncident / storage.updateIncident. Polls PG for
+  // rows whose (updated_at, id) tuple moved past the cursor, ships them to
+  // CH, and only advances the cursor after the write succeeds, so a CH
+  // outage never strands rows. Drains the full backlog each tick.
+  private static incidentSweepCursor: { ts: Date; id: number } | null = null;
+  private static incidentSweepRunning = false;
+  static async sweepIncidentsToClickHouse(batchLimit = 1000): Promise<number> {
+    if (DatabaseStorage.incidentSweepRunning) return 0;
+    DatabaseStorage.incidentSweepRunning = true;
+    let totalShipped = 0;
+    try {
+      const chClient = await DatabaseStorage.getChClientForIncidents();
+      if (!chClient) return 0;
+
+      // The sweeper depends on the backfill having succeeded — the backfill
+      // is what anchors the cursor to the tail of the historical set. If the
+      // cursor is still null (backfill never ran or failed), we MUST NOT
+      // anchor it to "now" here, because doing so would skip all historical
+      // incidents forever (until a successful restart). Instead, no-op and
+      // let the bootstrap loop retry the backfill.
+      if (!DatabaseStorage.incidentSweepCursor) return 0;
+
+      // Drain loop: keep shipping batches until we get a short batch (no more
+      // backlog). Cursor advances only after each batch is durably in CH.
+      while (true) {
+        const cursor: { ts: Date; id: number } = DatabaseStorage.incidentSweepCursor;
+        const batch: Incident[] = await db.select().from(incidents)
+          .where(or(
+            gt(incidents.updatedAt, cursor.ts),
+            and(eq(incidents.updatedAt, cursor.ts), gt(incidents.id, cursor.id)),
+          ))
+          .orderBy(incidents.updatedAt, incidents.id)
+          .limit(batchLimit);
+        if (batch.length === 0) break;
+        try {
+          await DatabaseStorage.chWriteIncidentsAwait(chClient, batch);
+        } catch (err) {
+          // Don't advance the cursor — next tick will retry the same window.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[ClickHouse] Incident sweep insert failed (cursor held): ${msg}`);
+          break;
+        }
+        const tail: Incident = batch[batch.length - 1];
+        const tailTs: Date = tail.updatedAt instanceof Date
+          ? tail.updatedAt
+          : new Date(tail.updatedAt as unknown as string | number);
+        DatabaseStorage.incidentSweepCursor = { ts: tailTs, id: tail.id };
+        totalShipped += batch.length;
+        if (batch.length < batchLimit) break;
+      }
+      return totalShipped;
+    } finally {
+      DatabaseStorage.incidentSweepRunning = false;
+    }
+  }
+
+  // ── ClickHouse security_events.target one-time backfill ──────────────────
+  // The CH `target` column was added by the Task #202 ALTER migration, so
+  // every event ingested *before* that migration has target='' in CH even
+  // though the PG row carries a real hostname/FQDN. The threat-globe
+  // fast-path uses target to match offices via hostname keywords / CIDR, so
+  // any lookback window crossing the migration boundary lost office accuracy
+  // for older events. This backfill walks PG security_events with non-empty
+  // target and issues batched ALTER TABLE ... UPDATE statements against the
+  // CH base table to populate `target` in place.
+  //
+  // Idempotent by construction: every UPDATE carries a `target = ''` guard
+  // so already-populated rows (including those written by chDualWrite after
+  // the migration) are never touched. Re-running the backfill on a fully
+  // patched dataset is a no-op. Safe to invoke on every startup.
+  private static eventTargetBackfillDone = false;
+  private static eventTargetBackfillRunning = false;
+  static isEventTargetBackfillComplete(): boolean {
+    return DatabaseStorage.eventTargetBackfillDone;
+  }
+  static async backfillSecurityEventTargetsToClickHouse(
+    batchSize = 1000,
+  ): Promise<number> {
+    if (DatabaseStorage.eventTargetBackfillDone || DatabaseStorage.eventTargetBackfillRunning) return 0;
+    DatabaseStorage.eventTargetBackfillRunning = true;
+    let totalProcessed = 0;
+    try {
+      const m = await import("./clickhouse-client");
+      const chClient = m.getClickHouseClient();
+      if (!chClient) {
+        DatabaseStorage.eventTargetBackfillDone = true;
+        return 0;
+      }
+      const database = process.env.CLICKHOUSE_DATABASE ?? "ccc";
+      // Detect cluster vs single-node by checking the _migrations table that
+      // is only created on cluster setups. Cheap probe (single LIMIT 0
+      // metadata read). On error we conservatively assume single-node and
+      // skip the ON CLUSTER clause.
+      let useCluster = false;
+      try {
+        await chClient.query(`SELECT 1 FROM ${database}._migrations LIMIT 0 FORMAT JSONEachRow`);
+        useCluster = true;
+      } catch {
+        useCluster = false;
+      }
+      const onClusterClause = useCluster ? " ON CLUSTER ccc_cluster" : "";
+
+      const escSql = (s: string) =>
+        s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+      // Walk PG ordered by id. Only consider rows that have a real target
+      // string AND a key the CH row was written under (event_hash if
+      // present, otherwise id::text — see chDualWrite which uses
+      // `ev.eventHash ?? String(ev.id)` as event_id).
+      //
+      // Tenant scoping is critical: event_hash collisions across tenants
+      // are possible (different tenants can produce identical hashes for
+      // structurally identical events), and the CH `event_id` column is
+      // not globally unique. Mutating without a tenant_id predicate could
+      // overwrite the wrong tenant's row. We group every batch by
+      // tenant_id and emit one ALTER ... UPDATE per tenant scoped by
+      // `tenant_id = X AND event_id IN (...) AND target = ''`.
+      let lastId = 0;
+      while (true) {
+        const res = await pool.query<{
+          id: number;
+          tenant_id: number;
+          event_hash: string | null;
+          target: string;
+        }>(
+          `SELECT id, tenant_id, event_hash, target
+             FROM security_events
+            WHERE id > $1
+              AND target IS NOT NULL
+              AND target <> ''
+            ORDER BY id
+            LIMIT $2`,
+          [lastId, batchSize],
+        );
+        const rows = res.rows;
+        if (rows.length === 0) break;
+        lastId = rows[rows.length - 1].id;
+
+        // Group by tenant_id and dedupe on key within each tenant. When a
+        // tenant has two rows sharing the same key with different targets
+        // (extremely rare; should not happen because event_hash is unique
+        // per tenant via the PG index, but we still defend against it),
+        // we keep the row with the higher PG id — i.e. the most recently
+        // ingested value — so the mutation is deterministic.
+        const byTenant = new Map<number, Map<string, { id: number; target: string }>>();
+        for (const r of rows) {
+          if (!Number.isFinite(r.tenant_id)) continue;
+          const key = r.event_hash && r.event_hash.length > 0 ? r.event_hash : String(r.id);
+          if (!key || !r.target) continue;
+          let bucket = byTenant.get(r.tenant_id);
+          if (!bucket) {
+            bucket = new Map();
+            byTenant.set(r.tenant_id, bucket);
+          }
+          const existing = bucket.get(key);
+          if (!existing || r.id > existing.id) {
+            bucket.set(key, { id: r.id, target: r.target });
+          }
+        }
+
+        let batchProcessed = 0;
+        let batchFailed = false;
+        for (const [tenantId, bucket] of Array.from(byTenant.entries())) {
+          if (bucket.size === 0) continue;
+          const entries = Array.from(bucket.entries());
+          const idList = entries.map(([k]) => `'${escSql(k)}'`).join(",");
+          const targetList = entries.map(([, v]) => `'${escSql(v.target)}'`).join(",");
+          const safeTenantId = Math.floor(tenantId);
+
+          // ALTER ... UPDATE on Distributed tables isn't supported in CH —
+          // we mutate the local `security_events` MergeTree directly. The
+          // transform() builds a per-event_id lookup; the WHERE clause
+          // restricts to (tenant_id, event_id) pairs that still have
+          // target='' so the mutation is bounded, tenant-scoped, and
+          // idempotent. The leading tenant_id predicate also matches the
+          // table's ORDER BY (tenant_id, ..., event_id), keeping the
+          // mutation cheap.
+          const buildSql = (withCluster: boolean) =>
+            `ALTER TABLE ${database}.security_events${withCluster ? onClusterClause : ""} ` +
+            `UPDATE target = transform(event_id, [${idList}], [${targetList}], target) ` +
+            `WHERE tenant_id = ${safeTenantId} AND event_id IN (${idList}) AND target = ''`;
+
+          try {
+            await chClient.query(buildSql(true));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (useCluster && /cluster|distributed|on cluster/i.test(msg)) {
+              try {
+                await chClient.query(buildSql(false));
+              } catch (err2) {
+                const msg2 = err2 instanceof Error ? err2.message : String(err2);
+                console.warn(`[ClickHouse] target backfill batch failed (tenant=${safeTenantId}, will retry next startup): ${msg2.slice(0, 256)}`);
+                batchFailed = true;
+                break;
+              }
+            } else {
+              console.warn(`[ClickHouse] target backfill batch failed (tenant=${safeTenantId}, will retry next startup): ${msg.slice(0, 256)}`);
+              batchFailed = true;
+              break;
+            }
+          }
+          batchProcessed += bucket.size;
+        }
+        totalProcessed += batchProcessed;
+        if (batchFailed) return totalProcessed;
+        if (rows.length < batchSize) break;
+      }
+      DatabaseStorage.eventTargetBackfillDone = true;
+      console.log(`[ClickHouse] security_events.target backfill complete: ${totalProcessed} rows queued for in-place mutation`);
+      return totalProcessed;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ClickHouse] target backfill error (will retry next startup): ${msg}`);
+      return totalProcessed;
+    } finally {
+      DatabaseStorage.eventTargetBackfillRunning = false;
+    }
   }
 
   async getExistingDedupHashes(tenantId: number): Promise<Set<string>> {
@@ -446,6 +852,7 @@ export class DatabaseStorage implements IStorage {
       .set({ ...data, updatedAt: new Date() })
       .where(eq(incidents.id, id))
       .returning();
+    if (inc) DatabaseStorage.chDualWriteIncidents([inc]);
     return inc;
   }
 
@@ -615,6 +1022,11 @@ export class DatabaseStorage implements IStorage {
       host:            ev.asset ?? "",
       src_ip:          validIp(ev.attacker),
       dst_ip:          validIp(ev.target),
+      // Mirror the raw target string (hostname or IP) so the threat-globe
+      // fast-path can match offices the same way the PG path does. Without
+      // this, multi-office tenants saw all CH-path arcs collapse to the
+      // tenant's default office because dst_ip is empty for hostname targets.
+      target:          ev.target ?? "",
       user_name:       ev.attacker && !validIp(ev.attacker) ? ev.attacker : "",
       mitre_tactic:    ev.mitreTactic ?? "",
       mitre_technique: ev.mitreTechnique ?? "",
@@ -622,6 +1034,15 @@ export class DatabaseStorage implements IStorage {
       ingested_at:     ev.occurredAt instanceof Date
         ? ev.occurredAt.toISOString()
         : (ev.occurredAt as string | undefined) ?? new Date().toISOString(),
+      // Task #203: mirror the PG security_events columns the threat-flow Sankey
+      // depends on so the CH fast-path produces the same level of detail
+      // (per-threat names, per-action labels, per-recipient grouping for email).
+      threat:          ev.threat ?? "",
+      action:          ev.action ?? "",
+      recipient:       ev.recipient ?? "",
+      // Trim long descriptions — the PG fast-path already LEFT(TRIM(description),200)s
+      // the column for the Sankey, so capping here keeps payload size bounded.
+      description:     (ev.description ?? "").slice(0, 1000),
     }));
     chClient.insertEvents(payload).catch((err: Error) => {
       console.warn(`[Storage] ClickHouse write error (non-fatal): ${err.message}`);

@@ -5,6 +5,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Progress } from "@/components/ui/progress";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -14,7 +15,7 @@ import {
   ArrowUpDown, Gauge, Zap, RefreshCw, Cable, Building2,
   Radio, Shield, BarChart3, TrendingUp, Package, CircleDot,
   Globe, HardDrive, Archive, MapPin, ArrowLeftRight,
-  Layers, GitMerge, Sliders, Boxes,
+  Layers, GitMerge, Sliders, Boxes, ChevronDown, ChevronRight, History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1055,6 +1056,9 @@ export default function PlatformHealthTab() {
       <ClickHouseHealthCard />
 
       <ClickHouseIngestMonitorSettingsCard />
+      <ClickHouseFastPathStatsCard />
+      <ThreatFlowBackfillCard />
+      <ClickHouseIngestOutageHistory />
 
       <QuotaEnginePanel />
 
@@ -1180,6 +1184,953 @@ function ClickHouseHealthCard() {
               </div>
             )}
           </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── ClickHouse Fast-Path Failure Stats (Task #187) ───────────────────────────
+// Per-tenant rolling counters of CH success vs failure. When the failure rate
+// is sustained, the alerter fires and an entry shows up in the Ingestion
+// Outage History panel below (reason='fast_path').
+
+interface FastPathTenantRow {
+  tenantId: number;
+  windowMinutes: number;
+  successes: number;
+  failures: number;
+  attempts: number;
+  failureRate: number;
+  failureRatePercent: number;
+  breachesThreshold: boolean;
+  recentFailures: Array<{ ts: string; op: string; error: string }>;
+}
+
+interface FastPathRecentOutage {
+  id: number;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  tenantId: number | null;
+  failureRatePercent: number | null;
+  attempts: number | null;
+  resolved: boolean;
+}
+
+interface FastPathStatsResponse {
+  settings: {
+    enabled: boolean;
+    windowMinutes: number;
+    minAttempts: number;
+    failureRatePercent: number;
+    intervalSeconds: number;
+    cooldownMinutes: number;
+  };
+  windowMinutes: number;
+  generatedAt: string;
+  totals: {
+    successes: number;
+    failures: number;
+    attempts: number;
+    failureRatePercent: number;
+  };
+  tenants: FastPathTenantRow[];
+  breachingCount: number;
+  recentFastPathOutages: FastPathRecentOutage[];
+}
+
+function ClickHouseFastPathStatsCard() {
+  const { data, isLoading, refetch, dataUpdatedAt } = useQuery<FastPathStatsResponse>({
+    queryKey: ["/api/admin/platform-health/clickhouse-fast-path-stats"],
+    refetchInterval: 30000,
+  });
+
+  const settings = data?.settings;
+  const tenants = data?.tenants ?? [];
+  const totals = data?.totals;
+  const recent = data?.recentFastPathOutages ?? [];
+
+  return (
+    <Card className="border-border/40 bg-card/60" data-testid="clickhouse-fast-path-stats-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Zap className="w-4 h-4 text-amber-500" />
+            <CardTitle className="text-sm font-semibold">
+              ClickHouse Fast-Path (PostgreSQL Fallback)
+            </CardTitle>
+            {settings && (
+              <Badge variant="outline" className="text-[10px]" data-testid="badge-fast-path-window">
+                {settings.windowMinutes}m window
+              </Badge>
+            )}
+            {settings && (
+              <Badge
+                variant="outline"
+                className={`text-[10px] ${settings.enabled ? "" : "text-muted-foreground"}`}
+                data-testid="badge-fast-path-enabled"
+              >
+                {settings.enabled ? "monitor on" : "monitor off"}
+              </Badge>
+            )}
+            {totals && (
+              <Badge
+                variant="outline"
+                className={`text-[10px] ${
+                  totals.failureRatePercent >= (settings?.failureRatePercent ?? 50)
+                    ? "bg-red-500/10 text-red-500 border-red-500/20"
+                    : totals.failureRatePercent > 0
+                      ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                      : "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
+                }`}
+                data-testid="badge-fast-path-overall-rate"
+              >
+                {totals.failureRatePercent}% fail · {totals.attempts} attempts
+              </Badge>
+            )}
+            {data && data.breachingCount > 0 && (
+              <Badge
+                variant="outline"
+                className="bg-red-500/10 text-red-500 border-red-500/20 text-[10px]"
+                data-testid="badge-fast-path-breaching"
+              >
+                {data.breachingCount} tenant{data.breachingCount === 1 ? "" : "s"} breaching
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-muted-foreground">
+              {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "—"} • Auto-refresh 30s
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 text-[11px] px-2"
+              onClick={() => refetch()}
+              data-testid="button-refresh-fast-path-stats"
+            >
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <div className="p-4 space-y-2">
+            {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-8" />)}
+          </div>
+        ) : tenants.length === 0 ? (
+          <div className="flex items-start gap-3 p-4 text-[12px] text-muted-foreground" data-testid="fast-path-empty">
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-500" />
+            <div>
+              <p className="font-medium text-foreground mb-0.5">No fast-path activity in window</p>
+              <p>
+                No tenant has run an event search through the ClickHouse fast path in the last
+                {" "}
+                {settings?.windowMinutes ?? 10} minutes. Counters appear here as soon as searches run.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Tenant</TableHead>
+                <TableHead className="text-xs">Attempts</TableHead>
+                <TableHead className="text-xs">Failures</TableHead>
+                <TableHead className="text-xs">Failure rate</TableHead>
+                <TableHead className="text-xs">Status</TableHead>
+                <TableHead className="text-xs">Recent failure</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {tenants.map((t) => {
+                const last = t.recentFailures[t.recentFailures.length - 1];
+                return (
+                  <TableRow key={t.tenantId} data-testid={`row-fast-path-${t.tenantId}`}>
+                    <TableCell className="text-xs font-medium" data-testid={`text-fast-path-tenant-${t.tenantId}`}>
+                      {t.tenantId}
+                    </TableCell>
+                    <TableCell className="text-xs">{t.attempts}</TableCell>
+                    <TableCell className="text-xs">{t.failures}</TableCell>
+                    <TableCell className="text-xs" data-testid={`text-fast-path-rate-${t.tenantId}`}>
+                      {t.failureRatePercent}%
+                    </TableCell>
+                    <TableCell>
+                      {t.breachesThreshold ? (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-500 border-red-500/20 text-[10px]" data-testid={`status-fast-path-${t.tenantId}`}>
+                          breaching
+                        </Badge>
+                      ) : t.failures > 0 ? (
+                        <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]" data-testid={`status-fast-path-${t.tenantId}`}>
+                          degraded
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px]" data-testid={`status-fast-path-${t.tenantId}`}>
+                          healthy
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-[10px] text-muted-foreground max-w-[280px] truncate" title={last ? `${last.op}: ${last.error}` : ""}>
+                      {last ? `${last.op}: ${last.error}` : "—"}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+
+        {recent.length > 0 && (
+          <div className="border-t border-border/40 p-3 text-[11px] text-muted-foreground flex items-start gap-2" data-testid="fast-path-recent-outages">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+            <div>
+              <span className="font-medium text-foreground">
+                {recent.length} fast-path outage{recent.length === 1 ? "" : "s"} in the last 24h
+              </span>
+              {" — "}see <span className="text-foreground">Ingestion Outage History</span> below
+              {" "}for details (latest tenant {recent[0].tenantId} at{" "}
+              {new Date(recent[0].startedAt).toLocaleTimeString()},{" "}
+              {recent[0].failureRatePercent ?? 0}% over {recent[0].attempts ?? 0} attempts).
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── ClickHouse Threat-Flow Backfill Status (Task #210) ───────────────────────
+
+interface ThreatFlowBackfillRun {
+  updated: number;
+  groups: number;
+  failedGroups: number;
+  durationMs: number;
+  finishedAt: string;
+  error?: string;
+}
+
+interface ThreatFlowRemainingEstimate {
+  remainingRows: number | null;
+  estimatedAt: string;
+  error?: string;
+}
+
+interface ThreatFlowBackfillStatus {
+  complete: boolean;
+  running: boolean;
+  clickhouseAvailable: boolean;
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastRun: ThreatFlowBackfillRun | null;
+  cumulativeUpdated: number;
+  cumulativeGroups: number;
+  cumulativeFailedGroups: number;
+  remaining?: ThreatFlowRemainingEstimate;
+  recentThroughput?: {
+    rowsPerMinute: number;
+    sampleRuns: number;
+    sampleDurationMs: number;
+    sampleUpdated: number;
+    samples?: number[];
+  } | null;
+  eta?: {
+    etaSeconds: number;
+    rowsPerMinute: number;
+    basedOnRuns: number;
+  } | null;
+}
+
+// Tiny inline SVG sparkline for the threat-flow throughput history (Task #226).
+// Kept local to this file rather than promoted to a shared component because
+// it is the only consumer; the data-source-badge sparkline has slightly
+// different sizing/styling needs and reusing it here would force both to
+// converge prematurely.
+function ThroughputSparkline({
+  samples,
+  width = 80,
+  height = 18,
+  className,
+}: {
+  samples: number[];
+  width?: number;
+  height?: number;
+  className?: string;
+}) {
+  if (!samples || samples.length < 2) {
+    return (
+      <svg
+        width={width}
+        height={height}
+        aria-hidden="true"
+        className={className ?? "text-muted-foreground"}
+        data-testid="sparkline-threat-flow-throughput-empty"
+      >
+        <line
+          x1={0}
+          y1={height - 1}
+          x2={width}
+          y2={height - 1}
+          stroke="currentColor"
+          strokeWidth={1}
+          strokeDasharray="2 2"
+          opacity={0.5}
+        />
+      </svg>
+    );
+  }
+  const min = Math.min(...samples);
+  const max = Math.max(...samples);
+  const range = max - min || 1;
+  const stepX = width / (samples.length - 1);
+  const points = samples
+    .map((v, i) => {
+      const x = i * stepX;
+      const y = height - 1 - ((v - min) / range) * (height - 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const lastX = (samples.length - 1) * stepX;
+  const lastY =
+    height - 1 - ((samples[samples.length - 1] - min) / range) * (height - 2);
+  return (
+    <svg
+      width={width}
+      height={height}
+      aria-hidden="true"
+      className={className ?? "text-purple-500"}
+      data-testid="sparkline-threat-flow-throughput"
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.25}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx={lastX} cy={lastY} r={1.75} fill="currentColor" />
+    </svg>
+  );
+}
+
+function formatEtaSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "—";
+  if (sec < 60) return `<1 min`;
+  const totalMin = Math.round(sec / 60);
+  if (totalMin < 60) return `~${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24) return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
+  const d = Math.floor(h / 24);
+  const remH = h % 24;
+  return remH > 0 ? `~${d}d ${remH}h` : `~${d}d`;
+}
+
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return new Date(iso).toLocaleString();
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function ThreatFlowBackfillCard() {
+  const { data, isLoading, refetch, dataUpdatedAt } = useQuery<ThreatFlowBackfillStatus>({
+    queryKey: ["/api/admin/platform-health/threat-flow-backfill"],
+    refetchInterval: 30000,
+  });
+
+  const status: "complete" | "running" | "pending" | "unavailable" = !data
+    ? "pending"
+    : !data.clickhouseAvailable
+      ? "unavailable"
+      : data.complete
+        ? "complete"
+        : data.running
+          ? "running"
+          : "pending";
+
+  const statusBadge =
+    status === "complete" ? (
+      <Badge
+        variant="outline"
+        className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px]"
+        data-testid="badge-threat-flow-backfill-status"
+      >
+        complete
+      </Badge>
+    ) : status === "running" ? (
+      <Badge
+        variant="outline"
+        className="bg-blue-500/10 text-blue-500 border-blue-500/20 text-[10px]"
+        data-testid="badge-threat-flow-backfill-status"
+      >
+        running
+      </Badge>
+    ) : status === "unavailable" ? (
+      <Badge
+        variant="outline"
+        className="text-muted-foreground text-[10px]"
+        data-testid="badge-threat-flow-backfill-status"
+      >
+        ClickHouse unavailable
+      </Badge>
+    ) : (
+      <Badge
+        variant="outline"
+        className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]"
+        data-testid="badge-threat-flow-backfill-status"
+      >
+        pending — retrying every 5 min
+      </Badge>
+    );
+
+  return (
+    <Card className="border-border/40 bg-card/60" data-testid="threat-flow-backfill-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <History className="w-4 h-4 text-purple-500" />
+            <CardTitle className="text-sm font-semibold">
+              Threat-Flow Historical Backfill
+            </CardTitle>
+            {statusBadge}
+            {data && data.cumulativeFailedGroups > 0 && (
+              <Badge
+                variant="outline"
+                className="bg-red-500/10 text-red-500 border-red-500/20 text-[10px]"
+                data-testid="badge-threat-flow-backfill-failed-groups"
+              >
+                {data.cumulativeFailedGroups} failed group{data.cumulativeFailedGroups === 1 ? "" : "s"}
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-muted-foreground">
+              {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "—"} • Auto-refresh 30s
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 text-[11px] px-2"
+              onClick={() => refetch()}
+              data-testid="button-refresh-threat-flow-backfill"
+            >
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-4">
+        {isLoading ? (
+          <div className="space-y-2">
+            {[...Array(2)].map((_, i) => <Skeleton key={i} className="h-8" />)}
+          </div>
+        ) : !data ? (
+          <p className="text-xs text-muted-foreground">No status available.</p>
+        ) : (
+          <div className="space-y-3 text-[12px]">
+            <p className="text-muted-foreground leading-relaxed">
+              One-shot migration that backfills <span className="font-mono text-foreground">threat / action / recipient / description</span>
+              {" "}on older ClickHouse <span className="font-mono text-foreground">security_events</span> rows
+              so the dashboard threat-flow Sankey shows full historical detail. Re-tries every
+              5 minutes until the marker row in <span className="font-mono text-foreground">ccc._migrations</span>
+              {" "}is written.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div data-testid="stat-threat-flow-cumulative-updated">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Rows mirrored</div>
+                <div className="text-sm font-semibold text-foreground">
+                  {data.cumulativeUpdated.toLocaleString()}
+                </div>
+              </div>
+              <div data-testid="stat-threat-flow-remaining" title={data.remaining?.error ?? data.remaining?.estimatedAt ?? ""}>
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Rows remaining (CH)</div>
+                <div className="text-sm font-semibold text-foreground">
+                  {data.complete
+                    ? "0"
+                    : data.remaining?.remainingRows == null
+                      ? "—"
+                      : `~${data.remaining.remainingRows.toLocaleString()}`}
+                </div>
+              </div>
+              <div data-testid="stat-threat-flow-cumulative-groups">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Mutation groups</div>
+                <div className="text-sm font-semibold text-foreground">
+                  {data.cumulativeGroups.toLocaleString()}
+                </div>
+              </div>
+              <div data-testid="stat-threat-flow-attempts" title="Counters reset on restart and are scoped to this server worker">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Attempts (this worker)</div>
+                <div className="text-sm font-semibold text-foreground">{data.attempts}</div>
+              </div>
+              <div data-testid="stat-threat-flow-last-attempt">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Last attempt</div>
+                <div
+                  className="text-sm font-semibold text-foreground"
+                  title={data.lastAttemptAt ?? ""}
+                >
+                  {formatRelativeTime(data.lastAttemptAt)}
+                </div>
+              </div>
+            </div>
+            {(() => {
+              // Render a progress bar only while the marker is still pending.
+              // Use mirrored / (mirrored + remaining) — the only inputs the
+              // server can give us cheaply. When `complete` we already render
+              // the green completion banner below, so a 100% bar would be
+              // redundant. When CH is offline we omit the bar rather than
+              // show a misleading 0%.
+              if (data.complete) return null;
+              const remaining = data.remaining?.remainingRows;
+              if (remaining == null) {
+                return (
+                  <div className="flex items-start justify-between gap-3">
+                    <p
+                      className="text-[11px] text-muted-foreground"
+                      data-testid="text-threat-flow-progress-unavailable"
+                    >
+                      Remaining-rows estimate unavailable
+                      {data.remaining?.error ? ` (${data.remaining.error})` : ""}.
+                    </p>
+                    {data.recentThroughput?.samples && data.recentThroughput.samples.length >= 1 && (
+                      <span
+                        className="inline-flex items-center shrink-0"
+                        title={`Per-run throughput (oldest → newest): ${data.recentThroughput.samples
+                          .map((v) => `${Math.round(v).toLocaleString()} r/min`)
+                          .join(" → ")}`}
+                        aria-label="Recent throughput sparkline"
+                      >
+                        <ThroughputSparkline samples={data.recentThroughput.samples} />
+                      </span>
+                    )}
+                  </div>
+                );
+              }
+              const mirrored = data.cumulativeUpdated;
+              const denom = mirrored + remaining;
+              const pct = denom > 0 ? Math.min(100, Math.max(0, (mirrored / denom) * 100)) : 0;
+              return (
+                <div className="space-y-1" data-testid="threat-flow-progress">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>
+                      Backfill progress —{" "}
+                      <span
+                        className="text-foreground font-medium"
+                        data-testid="text-threat-flow-progress-pct"
+                      >
+                        {pct.toFixed(1)}%
+                      </span>
+                    </span>
+                    <span title={data.remaining?.estimatedAt ?? ""}>
+                      ~{remaining.toLocaleString()} row{remaining === 1 ? "" : "s"} still empty
+                    </span>
+                  </div>
+                  <Progress value={pct} className="h-1.5" />
+                  {data.eta ? (
+                    <div className="flex items-start justify-between gap-3">
+                      <p
+                        className="text-[11px] text-muted-foreground"
+                        data-testid="text-threat-flow-eta"
+                        title={`Based on ${data.eta.basedOnRuns} recent productive run${data.eta.basedOnRuns === 1 ? "" : "s"} • ${Math.round(data.eta.rowsPerMinute).toLocaleString()} rows/min`}
+                      >
+                        ETA{" "}
+                        <span
+                          className="text-foreground font-medium"
+                          data-testid="text-threat-flow-eta-value"
+                        >
+                          {formatEtaSeconds(data.eta.etaSeconds)} remaining
+                        </span>{" "}
+                        at current rate (~{Math.round(data.eta.rowsPerMinute).toLocaleString()} rows/min,
+                        based on {data.eta.basedOnRuns} recent run{data.eta.basedOnRuns === 1 ? "" : "s"}).
+                      </p>
+                      {data.recentThroughput?.samples && data.recentThroughput.samples.length >= 1 && (
+                        <span
+                          className="inline-flex items-center shrink-0"
+                          title={`Per-run throughput (oldest → newest): ${data.recentThroughput.samples
+                            .map((v) => `${Math.round(v).toLocaleString()} r/min`)
+                            .join(" → ")}`}
+                          aria-label="Recent throughput sparkline"
+                        >
+                          <ThroughputSparkline samples={data.recentThroughput.samples} />
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-start justify-between gap-3">
+                      <p
+                        className="text-[11px] text-muted-foreground"
+                        data-testid="text-threat-flow-eta-unavailable"
+                      >
+                        ETA unavailable — waiting for a productive run on this worker to measure
+                        throughput.
+                      </p>
+                      {data.recentThroughput?.samples && data.recentThroughput.samples.length >= 1 && (
+                        <span
+                          className="inline-flex items-center shrink-0"
+                          title={`Per-run throughput (oldest → newest): ${data.recentThroughput.samples
+                            .map((v) => `${Math.round(v).toLocaleString()} r/min`)
+                            .join(" → ")}`}
+                          aria-label="Recent throughput sparkline"
+                        >
+                          <ThroughputSparkline samples={data.recentThroughput.samples} />
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">
+                    Estimate counts CH <span className="font-mono">security_events</span> rows where
+                    threat / action / recipient / description are all empty. Mirrored counter only
+                    reflects this worker's runs, so the true percentage may be higher right after a
+                    restart.
+                  </p>
+                </div>
+              );
+            })()}
+            {data.lastRun && (
+              <div
+                className="rounded-md border border-border/40 bg-background/40 p-3 text-[11px] flex items-start gap-2"
+                data-testid="threat-flow-last-run"
+              >
+                {data.lastRun.error ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 mt-0.5 shrink-0" />
+                )}
+                <div className="text-muted-foreground">
+                  <span className="text-foreground font-medium">Last run:</span>{" "}
+                  {data.lastRun.updated.toLocaleString()} row{data.lastRun.updated === 1 ? "" : "s"} /{" "}
+                  {data.lastRun.groups.toLocaleString()} group{data.lastRun.groups === 1 ? "" : "s"}
+                  {data.lastRun.failedGroups > 0 && (
+                    <>, <span className="text-red-500">{data.lastRun.failedGroups} failed</span></>
+                  )}
+                  {" "}in {(data.lastRun.durationMs / 1000).toFixed(1)}s — finished{" "}
+                  <span title={data.lastRun.finishedAt}>{formatRelativeTime(data.lastRun.finishedAt)}</span>
+                  {data.lastRun.error && (
+                    <div
+                      className="mt-1 text-amber-600 dark:text-amber-400 font-mono break-all"
+                      data-testid="text-threat-flow-last-error"
+                    >
+                      {data.lastRun.error}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            {data.complete && data.lastSuccessAt && (
+              <p
+                className="text-[11px] text-muted-foreground"
+                data-testid="text-threat-flow-completed-at"
+              >
+                Completion marker observed{" "}
+                <span title={data.lastSuccessAt}>{formatRelativeTime(data.lastSuccessAt)}</span>.
+                Older rows now carry full threat-flow detail.
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── ClickHouse Ingest Outage History (Task #183) ─────────────────────────────
+
+interface IngestOutage {
+  id: number;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  thresholdMinutes: number;
+  sampleWindowSeconds: number;
+  notificationsDispatched: number;
+  resolved: boolean;
+  reason?: "stalled_ingest" | "fast_path" | string;
+  tenantId?: number | null;
+  failureRatePercent?: number | null;
+  attempts?: number | null;
+}
+
+interface IngestOutageDailyPoint {
+  day: string;
+  count: number;
+  totalDurationSeconds: number;
+}
+
+interface IngestOutageHistory {
+  outages: IngestOutage[];
+  stats: {
+    last24h: { count: number; totalDurationSeconds: number };
+    weekly?: {
+      currentCount: number;
+      previousCount: number;
+      currentDurationSeconds: number;
+      previousDurationSeconds: number;
+    };
+  };
+  dailySeries?: IngestOutageDailyPoint[];
+  rangeDays?: number;
+}
+
+function formatDurationSeconds(sec: number | null): string {
+  if (sec == null) return "—";
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+}
+
+function ClickHouseIngestOutageHistory() {
+  const { data, isLoading, refetch, dataUpdatedAt } = useQuery<IngestOutageHistory>({
+    queryKey: ["/api/admin/platform-health/clickhouse-ingest-outages"],
+    refetchInterval: 60000,
+  });
+
+  const outages = data?.outages ?? [];
+  const last24h = data?.stats?.last24h;
+  const weekly = data?.stats?.weekly;
+  const dailySeries = data?.dailySeries ?? [];
+  const rangeDays = data?.rangeDays ?? 30;
+
+  const chartData = dailySeries.map((p) => ({
+    day: p.day,
+    label: new Date(p.day + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    count: p.count,
+    downtimeMinutes: Math.round(p.totalDurationSeconds / 60),
+  }));
+  const totalRangeOutages = chartData.reduce((s, p) => s + p.count, 0);
+  const totalRangeDowntimeSec = dailySeries.reduce((s, p) => s + p.totalDurationSeconds, 0);
+
+  const wowCountDelta = weekly ? weekly.currentCount - weekly.previousCount : 0;
+  const wowDurationDelta = weekly ? weekly.currentDurationSeconds - weekly.previousDurationSeconds : 0;
+  const wowImproving = wowCountDelta < 0 || (wowCountDelta === 0 && wowDurationDelta < 0);
+  const wowFlat = wowCountDelta === 0 && wowDurationDelta === 0;
+  const trendColorClass = wowFlat
+    ? "text-muted-foreground"
+    : wowImproving
+      ? "text-emerald-500"
+      : "text-amber-500";
+  const trendLabel = wowFlat ? "no change" : wowImproving ? "improving" : "worsening";
+
+  return (
+    <Card className="border-border/40 bg-card/60" data-testid="clickhouse-ingest-outage-history">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500" />
+            <CardTitle className="text-sm font-semibold">Ingestion Outage History</CardTitle>
+            {last24h && (
+              <Badge variant="outline" className="text-[10px]" data-testid="badge-outage-24h-count">
+                {last24h.count} in 24h
+              </Badge>
+            )}
+            {last24h && last24h.totalDurationSeconds > 0 && (
+              <Badge variant="outline" className="text-[10px]" data-testid="badge-outage-24h-duration">
+                {formatDurationSeconds(last24h.totalDurationSeconds)} downtime
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-muted-foreground">
+              {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "—"} • Auto-refresh 60s
+            </span>
+            <Button size="sm" variant="outline" className="h-6 text-[11px] px-2"
+              onClick={() => refetch()} data-testid="button-refresh-outage-history">
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <div className="p-4 space-y-2">
+            {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-8" />)}
+          </div>
+        ) : (
+          <>
+            <div className="px-4 pt-3 pb-4 border-b border-border/40" data-testid="outage-trend-section">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                <div className="rounded-md border border-border/30 bg-muted/20 p-2.5">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Last {rangeDays} days</p>
+                  <p className="text-lg font-bold leading-tight" data-testid="stat-outages-range-count">
+                    {totalRangeOutages}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {formatDurationSeconds(totalRangeDowntimeSec)} total downtime
+                  </p>
+                </div>
+                <div className="rounded-md border border-border/30 bg-muted/20 p-2.5">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">This week</p>
+                  <p className="text-lg font-bold leading-tight" data-testid="stat-outages-week-count">
+                    {weekly?.currentCount ?? 0}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {formatDurationSeconds(weekly?.currentDurationSeconds ?? 0)} downtime
+                  </p>
+                </div>
+                <div className="rounded-md border border-border/30 bg-muted/20 p-2.5">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Week-over-week</p>
+                  <div className="flex items-center gap-1.5">
+                    <TrendingUp
+                      className={`w-4 h-4 ${trendColorClass} ${wowImproving ? "rotate-180" : ""}`}
+                    />
+                    <p className={`text-lg font-bold leading-tight ${trendColorClass}`} data-testid="stat-outages-wow-trend">
+                      {wowCountDelta > 0 ? "+" : ""}{wowCountDelta}
+                    </p>
+                    <span className={`text-[11px] font-medium ${trendColorClass}`} data-testid="text-outages-wow-label">
+                      {trendLabel}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">
+                    vs prev week ({weekly?.previousCount ?? 0} outages, {formatDurationSeconds(weekly?.previousDurationSeconds ?? 0)})
+                  </p>
+                </div>
+              </div>
+              <div className="h-32 w-full" data-testid="chart-outage-trend">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} vertical={false} />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }}
+                      interval={Math.max(0, Math.floor(chartData.length / 8) - 1)}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      allowDecimals={false}
+                      tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={28}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      allowDecimals={false}
+                      tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={28}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: "hsl(var(--popover))",
+                        border: "1px solid hsl(var(--border))",
+                        borderRadius: 6,
+                        fontSize: 11,
+                      }}
+                      formatter={(value: number | string, name: string) => {
+                        if (name === "Downtime (min)") return [`${value} min`, name];
+                        return [value, name];
+                      }}
+                    />
+                    <Bar yAxisId="left" dataKey="count" name="Outages" fill="hsl(var(--chart-1, 217 91% 60%))" radius={[2, 2, 0, 0]} />
+                    <Bar yAxisId="right" dataKey="downtimeMinutes" name="Downtime (min)" fill="hsl(var(--chart-4, 38 92% 50%))" radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            {outages.length === 0 ? (
+              <div className="flex items-start gap-3 p-4 text-[12px] text-muted-foreground" data-testid="outage-history-empty">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-500" />
+                <div>
+                  <p className="font-medium text-foreground mb-0.5">No ingestion outages recorded</p>
+                  <p>The ClickHouse stalled-ingest monitor has not raised any alerts. Past outages will appear here.</p>
+                </div>
+              </div>
+            ) : (
+              <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Started</TableHead>
+                <TableHead className="text-xs">Reason</TableHead>
+                <TableHead className="text-xs">Duration</TableHead>
+                <TableHead className="text-xs">Status</TableHead>
+                <TableHead className="text-xs">Threshold</TableHead>
+                <TableHead className="text-xs">Notifications</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {outages.map((o) => {
+                const ongoingSec = !o.resolved
+                  ? Math.max(0, Math.round((Date.now() - new Date(o.startedAt).getTime()) / 1000))
+                  : null;
+                return (
+                  <TableRow key={o.id} data-testid={`row-outage-${o.id}`}>
+                    <TableCell className="text-xs">
+                      <div className="font-medium" data-testid={`text-outage-started-${o.id}`}>
+                        {new Date(o.startedAt).toLocaleString()}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {formatTimeAgo(o.startedAt)}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-xs" data-testid={`text-outage-reason-${o.id}`}>
+                      {o.reason === "fast_path" ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px] w-fit">
+                            fast-path → PG
+                          </Badge>
+                          {o.tenantId != null && (
+                            <span className="text-[10px] text-muted-foreground">
+                              tenant {o.tenantId}
+                              {o.failureRatePercent != null ? ` · ${o.failureRatePercent}% fail` : ""}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <Badge variant="outline" className="bg-muted text-foreground/80 text-[10px]">
+                          stalled ingest
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs" data-testid={`text-outage-duration-${o.id}`}>
+                      {o.resolved
+                        ? formatDurationSeconds(o.durationSeconds)
+                        : <span className="text-amber-500">{formatDurationSeconds(ongoingSec)} (ongoing)</span>}
+                    </TableCell>
+                    <TableCell>
+                      {o.resolved ? (
+                        <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px]" data-testid={`status-outage-${o.id}`}>
+                          resolved
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-500 border-red-500/20 text-[10px]" data-testid={`status-outage-${o.id}`}>
+                          ongoing
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {o.thresholdMinutes}m / {o.sampleWindowSeconds}s window
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground" data-testid={`text-outage-notifications-${o.id}`}>
+                      {o.notificationsDispatched}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+              </Table>
+            )}
+          </>
         )}
       </CardContent>
     </Card>
@@ -1559,11 +2510,58 @@ interface IngestMonitorSettings {
   intervalSeconds: number;
 }
 
+interface IngestMonitorAuditEntry {
+  id: number;
+  prevValue: IngestMonitorSettings | null;
+  newValue: IngestMonitorSettings;
+  changedBy: string | null;
+  changedAt: string;
+}
+
+function formatAuditTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function diffSettings(
+  prev: IngestMonitorSettings | null,
+  next: IngestMonitorSettings,
+): Array<{ label: string; from: string; to: string }> {
+  const fields: Array<{ key: keyof IngestMonitorSettings; label: string; suffix: string }> = [
+    { key: "enabled", label: "Monitor", suffix: "" },
+    { key: "thresholdMinutes", label: "Threshold", suffix: " min" },
+    { key: "sampleWindowSeconds", label: "Sample window", suffix: "s" },
+    { key: "intervalSeconds", label: "Check interval", suffix: "s" },
+  ];
+  const out: Array<{ label: string; from: string; to: string }> = [];
+  for (const f of fields) {
+    const nextVal = next[f.key];
+    const prevVal = prev ? prev[f.key] : undefined;
+    const fmt = (v: any) =>
+      f.key === "enabled" ? (v ? "on" : "off") : `${v}${f.suffix}`;
+    if (prev === null) {
+      out.push({ label: f.label, from: "—", to: fmt(nextVal) });
+    } else if (prevVal !== nextVal) {
+      out.push({ label: f.label, from: fmt(prevVal), to: fmt(nextVal) });
+    }
+  }
+  return out;
+}
+
 function ClickHouseIngestMonitorSettingsCard() {
   const { toast } = useToast();
-  const { data, isLoading } = useQuery<{ settings: IngestMonitorSettings }>({
+  const { data, isLoading } = useQuery<{
+    settings: IngestMonitorSettings;
+    recentChanges?: IngestMonitorAuditEntry[];
+  }>({
     queryKey: ["/api/admin/platform/clickhouse-ingest-monitor"],
   });
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [draft, setDraft] = useState<IngestMonitorSettings | null>(null);
 
@@ -1575,8 +2573,9 @@ function ClickHouseIngestMonitorSettingsCard() {
       const res = await apiRequest("PATCH", "/api/admin/platform/clickhouse-ingest-monitor", next);
       return res.json() as Promise<{ settings: IngestMonitorSettings }>;
     },
-    onSuccess: (resp) => {
-      queryClient.setQueryData(["/api/admin/platform/clickhouse-ingest-monitor"], resp);
+    onSuccess: () => {
+      // Refetch so the new value AND the freshly-written audit row are loaded.
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/platform/clickhouse-ingest-monitor"] });
       setDraft(null);
       toast({ title: "Settings saved", description: "Stalled-ingest monitor updated. Changes apply immediately." });
     },
@@ -1706,6 +2705,74 @@ function ClickHouseIngestMonitorSettingsCard() {
               >
                 {mutation.isPending ? "Saving..." : "Save changes"}
               </Button>
+            </div>
+
+            <div className="pt-3 border-t border-border/40">
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((v) => !v)}
+                className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                data-testid="button-toggle-monitor-history"
+              >
+                {historyOpen ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+                <History className="w-3.5 h-3.5" />
+                Recent changes
+                {data?.recentChanges && data.recentChanges.length > 0 && (
+                  <span className="text-[10px] text-muted-foreground/80">
+                    ({data.recentChanges.length})
+                  </span>
+                )}
+              </button>
+
+              {historyOpen && (
+                <div className="mt-2" data-testid="container-monitor-history">
+                  {!data?.recentChanges || data.recentChanges.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground italic" data-testid="text-monitor-history-empty">
+                      No changes recorded yet.
+                    </p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {data.recentChanges.map((entry) => {
+                        const diffs = diffSettings(entry.prevValue, entry.newValue);
+                        return (
+                          <li
+                            key={entry.id}
+                            className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 text-[11px]"
+                            data-testid={`row-monitor-history-${entry.id}`}
+                          >
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="text-muted-foreground" data-testid={`text-history-when-${entry.id}`}>
+                                {formatAuditTimestamp(entry.changedAt)}
+                              </span>
+                              <span className="font-medium text-foreground/90" data-testid={`text-history-who-${entry.id}`}>
+                                {entry.changedBy || "unknown"}
+                              </span>
+                            </div>
+                            {diffs.length === 0 ? (
+                              <span className="text-muted-foreground italic">No field changes recorded.</span>
+                            ) : (
+                              <ul className="space-y-0.5">
+                                {diffs.map((d, i) => (
+                                  <li key={i} className="flex flex-wrap items-center gap-1.5">
+                                    <span className="text-muted-foreground">{d.label}:</span>
+                                    <span className="line-through text-muted-foreground/70">{d.from}</span>
+                                    <ArrowLeftRight className="w-3 h-3 text-muted-foreground/60" />
+                                    <span className="text-foreground font-medium">{d.to}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}

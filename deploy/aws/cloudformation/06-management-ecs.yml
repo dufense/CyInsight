@@ -67,6 +67,14 @@
 #   DATABASE_URL, SESSION_SECRET, KAFKA_BROKERS, CLICKHOUSE_URL,
 #   AI_PROVIDER, AI_API_KEY
 #
+# Plain env vars wired here for ClickHouse-era operability features:
+#   APP_BASE_URL                                 — used in alert/digest emails
+#   PLATFORM_ONCALL_EMAILS                       — comma list paged on fast-path fallback
+#   CLICKHOUSE_INGEST_OUTAGE_RETENTION_DAYS      — purge horizon for outage history
+#   PLATFORM_SETTINGS_AUDIT_DIGEST_PERIOD_HOURS  — change-digest window (default 168h)
+#   PLATFORM_SETTINGS_AUDIT_DIGEST_DISABLED      — set to "1" to disable the digest
+#   PLATFORM_SETTINGS_AUDIT_DIGEST_TICK_SECONDS  — scheduler tick (default 3600s)
+#
 # Depends on:
 #   - 01-vpc.yml               (VPC, subnets, security groups)
 #   - 02-aurora-management.yml (DB secret ARN)
@@ -135,6 +143,55 @@ Parameters:
     Type: String
     Default: ccc
     Description: ClickHouse database used by the management plane for analytics
+
+  # ── ClickHouse-era operability knobs ─────────────────────────────────────────
+  AppBaseUrl:
+    Type: String
+    Default: ""
+    Description: >-
+      Public base URL of the management plane (e.g. https://app.example.com).
+      Used to render deep links in alert and platform-settings-audit digest emails.
+      Leave blank to fall back to localhost links.
+
+  PlatformOnCallEmails:
+    Type: String
+    Default: ""
+    Description: >-
+      Comma-separated list of email addresses paged when the ClickHouse fast-path
+      silently falls back to PostgreSQL or when ingestion outage thresholds breach.
+
+  ClickHouseIngestOutageRetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 3650
+    Description: >-
+      Number of days to retain ClickHouse ingest-outage history rows before the
+      auto-cleaner purges them (Task #190).
+
+  PlatformSettingsAuditDigestPeriodHours:
+    Type: Number
+    Default: 168
+    MinValue: 1
+    MaxValue: 8760
+    Description: >-
+      Window size in hours for the platform-settings change-digest email
+      (default 168h = 7 days).
+
+  PlatformSettingsAuditDigestDisabled:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+    Description: >-
+      Set to "1" to disable the platform-settings audit digest scheduler.
+
+  PlatformSettingsAuditDigestTickSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 60
+    MaxValue: 86400
+    Description: >-
+      Audit-digest scheduler tick interval in seconds (default 3600 = 1h).
 
   ImageUri:
     Type: String
@@ -714,6 +771,26 @@ Resources:
               - Name: CLICKHOUSE_DATABASE
                 Value: !Ref ClickHouseDatabase
               - !Ref AWS::NoValue
+            # ── ClickHouse-era operability env vars ─────────────────────────────
+            # Public base URL used to render deep links in alert / digest emails.
+            - Name: APP_BASE_URL
+              Value: !Ref AppBaseUrl
+            # Comma-separated on-call list paged when the ClickHouse fast-path
+            # silently falls back to PostgreSQL (Task #194) or ingestion outages
+            # breach configured thresholds.
+            - Name: PLATFORM_ONCALL_EMAILS
+              Value: !Ref PlatformOnCallEmails
+            # Retention horizon for ClickHouse ingest-outage history rows
+            # (Task #190). Older rows are auto-purged.
+            - Name: CLICKHOUSE_INGEST_OUTAGE_RETENTION_DAYS
+              Value: !Sub "${ClickHouseIngestOutageRetentionDays}"
+            # Platform-settings change-digest scheduler (Task #197).
+            - Name: PLATFORM_SETTINGS_AUDIT_DIGEST_PERIOD_HOURS
+              Value: !Sub "${PlatformSettingsAuditDigestPeriodHours}"
+            - Name: PLATFORM_SETTINGS_AUDIT_DIGEST_DISABLED
+              Value: !Ref PlatformSettingsAuditDigestDisabled
+            - Name: PLATFORM_SETTINGS_AUDIT_DIGEST_TICK_SECONDS
+              Value: !Sub "${PlatformSettingsAuditDigestTickSeconds}"
           Secrets:
             - Name: DATABASE_URL
               ValueFrom: !Sub

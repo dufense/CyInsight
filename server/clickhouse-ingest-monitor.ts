@@ -2,6 +2,8 @@ import { pool } from "./db";
 import { getClickHouseClient, isClickHouseEnabled } from "./clickhouse-client";
 import { sendEmail } from "./email-service";
 import type { ClickHouseIngestMonitorSettings } from "@shared/schema";
+import { sendPlatformOnCallEmail } from "./platform-oncall";
+import { writePlatformSettingsAudit, getPlatformSettingsAudit } from "./platform-settings-audit";
 
 export const CLICKHOUSE_INGEST_MONITOR_SETTINGS_KEY = "clickhouse_ingest_monitor";
 
@@ -25,7 +27,20 @@ let monitorRunning = false;
 let zeroStreakStartedAt: number | null = null;
 let alertFiredAt: number | null = null;
 let scheduledTimer: NodeJS.Timeout | null = null;
+let cleanupTimer: NodeJS.Timeout | null = null;
 let currentIntervalSeconds = ENV_DEFAULTS.intervalSeconds;
+let currentOutageRowId: number | null = null;
+
+// Task #190 — periodic cleanup of very old rows in clickhouse_ingest_outages so
+// the table doesn't grow forever on long-running deployments. Defaults to 90
+// days, overridable via env. Values are clamped to a sane range so an
+// accidental "0" doesn't wipe the whole history.
+const OUTAGE_RETENTION_DAYS: number = (() => {
+  const raw = parseInt(process.env.CLICKHOUSE_INGEST_OUTAGE_RETENTION_DAYS || "90", 10);
+  if (!Number.isFinite(raw)) return 90;
+  return Math.min(3650, Math.max(7, raw));
+})();
+const OUTAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function logInfo(msg: string): void {
   console.log(`[ClickHouseIngestMonitor] ${msg}`);
@@ -69,11 +84,33 @@ export async function setClickHouseIngestMonitorSettings(
   updatedBy?: string | null,
 ): Promise<ClickHouseIngestMonitorSettings> {
   const normalized = normalizeSettings(next);
+  // Read previous value so we can record the before/after pair in the audit
+  // log. We tolerate any failure here — auditing should not block saves.
+  let prevValue: ClickHouseIngestMonitorSettings | null = null;
+  try {
+    const r = await pool.query(
+      `SELECT value FROM platform_settings WHERE key = $1 LIMIT 1`,
+      [CLICKHOUSE_INGEST_MONITOR_SETTINGS_KEY],
+    );
+    if (r.rows[0]?.value) prevValue = normalizeSettings(r.rows[0].value);
+  } catch (err: any) {
+    logErr(`Failed to load previous settings for audit: ${err.message}`);
+  }
+
   await pool.query(
     `INSERT INTO platform_settings (key, value, updated_at, updated_by)
      VALUES ($1, $2::jsonb, NOW(), $3)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
     [CLICKHOUSE_INGEST_MONITOR_SETTINGS_KEY, JSON.stringify(normalized), updatedBy || null],
+  );
+
+  // Audit (Task #196): delegated to the shared helper so every platform
+  // setting writer goes through the same who/when/before/after path.
+  await writePlatformSettingsAudit(
+    CLICKHOUSE_INGEST_MONITOR_SETTINGS_KEY,
+    prevValue,
+    normalized,
+    updatedBy,
   );
   // If interval changed, reschedule the periodic timer (or just track it so the
   // first scheduled interval after startup uses the new value).
@@ -93,6 +130,31 @@ export async function setClickHouseIngestMonitorSettings(
   zeroStreakStartedAt = null;
   alertFiredAt = null;
   return normalized;
+}
+
+export interface ClickHouseIngestMonitorAuditEntry {
+  id: number;
+  prevValue: ClickHouseIngestMonitorSettings | null;
+  newValue: ClickHouseIngestMonitorSettings;
+  changedBy: string | null;
+  changedAt: string;
+}
+
+export async function getClickHouseIngestMonitorAudit(
+  limit = 10,
+): Promise<ClickHouseIngestMonitorAuditEntry[]> {
+  const rows = await getPlatformSettingsAudit<ClickHouseIngestMonitorSettings>(
+    CLICKHOUSE_INGEST_MONITOR_SETTINGS_KEY,
+    limit,
+    normalizeSettings,
+  );
+  return rows.map(row => ({
+    id: row.id,
+    prevValue: row.prevValue ?? null,
+    newValue: row.newValue,
+    changedBy: row.changedBy,
+    changedAt: row.changedAt,
+  }));
 }
 
 function renderAlertHtml(opts: {
@@ -178,10 +240,45 @@ async function fireAlert(
     windowSeconds: settings.sampleWindowSeconds,
   });
 
+  // Always page the platform on-call inbox first so degradation surfaces even
+  // when no tenant admin / email config exists.
+  let onCallSucceeded = false;
+  try {
+    const onCallResult = await sendPlatformOnCallEmail({
+      subject: `[SecureOps] ${title}`,
+      html,
+    });
+    onCallSucceeded = onCallResult.success;
+    if (onCallResult.attempted) {
+      logInfo(
+        `On-call email: success=${onCallResult.success} recipients=${onCallResult.recipients}` +
+        (onCallResult.reason ? ` reason=${onCallResult.reason}` : ""),
+      );
+    } else if (onCallResult.reason) {
+      logInfo(`On-call email skipped: ${onCallResult.reason}`);
+    }
+  } catch (err: any) {
+    logErr(`Platform on-call email dispatch failed: ${err?.message || err}`);
+  }
+
   const adminTenants = await listAdminTenants();
   if (adminTenants.length === 0) {
-    logInfo("No platform_admin / mss_admin recipients found; skipping notification dispatch.");
-    return false;
+    logInfo("No platform_admin / mss_admin recipients found; relying on on-call email only.");
+    // Still record the outage so history reflects it.
+    try {
+      const r = await pool.query(
+        `INSERT INTO clickhouse_ingest_outages
+           (started_at, threshold_minutes, sample_window_seconds, notifications_dispatched, resolved)
+         VALUES ($1, $2, $3, $4, false)
+         RETURNING id`,
+        [startedAt, settings.thresholdMinutes, settings.sampleWindowSeconds, 0],
+      );
+      currentOutageRowId = Number(r.rows[0]?.id ?? null) || null;
+    } catch (err: any) {
+      logErr(`Failed to insert outage history row: ${err.message}`);
+      currentOutageRowId = null;
+    }
+    return onCallSucceeded;
   }
 
   let notifInserted = 0;
@@ -233,7 +330,53 @@ async function fireAlert(
   }
 
   logInfo(`Alert dispatched: notifications=${notifInserted}, emailsSent=${emailsSent}, emailsFailed=${emailsFailed}`);
+
+  // Record this outage in the history table so operators can spot trends.
+  try {
+    const r = await pool.query(
+      `INSERT INTO clickhouse_ingest_outages
+         (started_at, threshold_minutes, sample_window_seconds, notifications_dispatched, resolved)
+       VALUES ($1, $2, $3, $4, false)
+       RETURNING id`,
+      [startedAt, settings.thresholdMinutes, settings.sampleWindowSeconds, notifInserted],
+    );
+    currentOutageRowId = Number(r.rows[0]?.id ?? null) || null;
+  } catch (err: any) {
+    logErr(`Failed to insert outage history row: ${err.message}`);
+    currentOutageRowId = null;
+  }
+
   return notifInserted > 0;
+}
+
+async function markOutageResolved(endedAt: Date): Promise<void> {
+  if (currentOutageRowId === null || zeroStreakStartedAt === null) {
+    currentOutageRowId = null;
+    return;
+  }
+  const durationSec = Math.max(0, Math.round((endedAt.getTime() - zeroStreakStartedAt) / 1000));
+  try {
+    await pool.query(
+      `UPDATE clickhouse_ingest_outages
+          SET ended_at = $1, duration_seconds = $2, resolved = true
+        WHERE id = $3`,
+      [endedAt, durationSec, currentOutageRowId],
+    );
+  } catch (err: any) {
+    logErr(`Failed to mark outage ${currentOutageRowId} resolved: ${err.message}`);
+  } finally {
+    currentOutageRowId = null;
+  }
+}
+
+async function resetStreak(recovered: boolean): Promise<void> {
+  if (recovered && alertFiredAt !== null) {
+    await markOutageResolved(new Date());
+  } else {
+    currentOutageRowId = null;
+  }
+  zeroStreakStartedAt = null;
+  alertFiredAt = null;
 }
 
 async function checkOnce(): Promise<void> {
@@ -249,15 +392,13 @@ async function checkOnce(): Promise<void> {
 
   if (!isClickHouseEnabled()) {
     if (zeroStreakStartedAt !== null || alertFiredAt !== null) {
-      zeroStreakStartedAt = null;
-      alertFiredAt = null;
+      await resetStreak(false);
     }
     return;
   }
   const client = getClickHouseClient();
   if (!client) {
-    zeroStreakStartedAt = null;
-    alertFiredAt = null;
+    await resetStreak(false);
     return;
   }
 
@@ -270,8 +411,9 @@ async function checkOnce(): Promise<void> {
   }
 
   if (!connected) {
-    zeroStreakStartedAt = null;
-    alertFiredAt = null;
+    // Unreachable — covered by other signals; reset streak so we don't immediately fire
+    // a stalled-ingest alert the moment ClickHouse comes back.
+    await resetStreak(false);
     return;
   }
 
@@ -289,8 +431,7 @@ async function checkOnce(): Promise<void> {
     if (zeroStreakStartedAt !== null || alertFiredAt !== null) {
       logInfo(`Insert rate recovered (${rate}/s) — clearing zero-rate streak.`);
     }
-    zeroStreakStartedAt = null;
-    alertFiredAt = null;
+    await resetStreak(true);
     return;
   }
 
@@ -321,6 +462,29 @@ async function checkOnce(): Promise<void> {
   }
 }
 
+// Task #190 — delete outage rows older than the configured retention window.
+// Exported so it can be invoked manually or from tests.
+export async function cleanupOldClickHouseIngestOutages(
+  retentionDays: number = OUTAGE_RETENTION_DAYS,
+): Promise<number> {
+  const days = Math.min(3650, Math.max(7, Math.floor(retentionDays) || 90));
+  try {
+    const r = await pool.query(
+      `DELETE FROM clickhouse_ingest_outages
+        WHERE COALESCE(ended_at, started_at) < NOW() - ($1::int * INTERVAL '1 day')`,
+      [days],
+    );
+    const deleted = r.rowCount ?? 0;
+    if (deleted > 0) {
+      logInfo(`Cleanup removed ${deleted} outage row(s) older than ${days} days.`);
+    }
+    return deleted;
+  } catch (err: any) {
+    logErr(`Outage cleanup failed: ${err?.message || err}`);
+    return 0;
+  }
+}
+
 export function startClickHouseIngestMonitor(): void {
   if (monitorRunning) return;
   monitorRunning = true;
@@ -345,6 +509,17 @@ export function startClickHouseIngestMonitor(): void {
     scheduledTimer = setInterval(() => {
       checkOnce().catch(err => logErr(`checkOnce error: ${err?.message || err}`));
     }, currentIntervalSeconds * 1000);
+
+    // Task #190 — kick off retention cleanup once on startup, then daily.
+    logInfo(`Outage retention cleanup enabled (keeping ${OUTAGE_RETENTION_DAYS} days).`);
+    cleanupOldClickHouseIngestOutages().catch(err =>
+      logErr(`Initial outage cleanup error: ${err?.message || err}`),
+    );
+    cleanupTimer = setInterval(() => {
+      cleanupOldClickHouseIngestOutages().catch(err =>
+        logErr(`Scheduled outage cleanup error: ${err?.message || err}`),
+      );
+    }, OUTAGE_CLEANUP_INTERVAL_MS);
   }, 90_000);
 }
 
@@ -352,9 +527,14 @@ export function startClickHouseIngestMonitor(): void {
 export function __resetClickHouseIngestMonitorForTests(): void {
   zeroStreakStartedAt = null;
   alertFiredAt = null;
+  currentOutageRowId = null;
   monitorRunning = false;
   if (scheduledTimer) {
     clearInterval(scheduledTimer);
     scheduledTimer = null;
+  }
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
   }
 }

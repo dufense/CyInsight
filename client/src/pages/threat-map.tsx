@@ -17,6 +17,7 @@ import { COUNTRY_MAP } from "@/lib/country-centroids";
 import { WorldMap, SEV_COLORS } from "@/components/threat-map/WorldMap";
 import type { ArcData, OfficeLocation } from "@/components/threat-map/WorldMap";
 import { ThreatRadar } from "@/components/threat-map/ThreatRadar";
+import { DataSourceBadge } from "@/components/data-source-badge";
 import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
@@ -29,6 +30,8 @@ interface ThreatMapResponse {
   uniqueCountries: number;
   topTechnique: string;
   hours: number;
+  source?: string;
+  latencyMs?: number;
 }
 
 interface CountryDetailResponse {
@@ -168,6 +171,7 @@ export default function ThreatMapPage() {
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               <span className="text-sm text-muted-foreground">Live threat feed</span>
+              <DataSourceBadge source={data?.source} latencyMs={data?.latencyMs} />
               {hoveredCountry && hoveredCountryData && (
                 <div className="flex items-center gap-1.5 ml-2 px-2.5 py-0.5 rounded-full bg-muted/50 dark:bg-white/5 border border-border dark:border-white/10 text-xs">
                   <span>{hoveredCountryData.flag}</span>

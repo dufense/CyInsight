@@ -137,12 +137,16 @@ function chJsonParse(s: unknown): any {
   try { return JSON.parse(s); } catch { return s; }
 }
 
-function buildChIntegrationGuard(map: Map<number, string[]>): string {
+function buildChIntegrationGuard(
+  map: Map<number, string[]>,
+  column: string = "log_source",
+): string {
+  const safeColumn = column.replace(/[^a-zA-Z0-9_]/g, "");
   const clauses: string[] = [];
   for (const [tid, sources] of Array.from(map.entries())) {
     if (sources.length === 0) continue;
     const quoted = sources.map((s) => `'${s.replace(/'/g, "\\'")}'`).join(",");
-    clauses.push(`(tenant_id = ${tid} AND log_source IN (${quoted}))`);
+    clauses.push(`(tenant_id = ${tid} AND ${safeColumn} IN (${quoted}))`);
   }
   return clauses.length === 0 ? "0" : `(${clauses.join(" OR ")})`;
 }
@@ -4392,6 +4396,7 @@ export async function registerRoutes(
 
   app.get("/api/dashboard/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
       const timeRange = (req.query.timeRange as string) || "all";
@@ -4399,12 +4404,13 @@ export async function registerRoutes(
       const safeTimeRange = validRanges.includes(timeRange) ? timeRange : "all";
       const cacheKey = `dashboard:${tenantId}:${safeTimeRange}`;
       const cached = await getCache(cacheKey);
-      if (cached) return res.json(cached);
+      if (cached) return res.json({ ...cached, latencyMs: Date.now() - reqStart });
       const stats = await withHeavyQueryLimit(() => storage.getEnhancedDashboardStats(tenantId, safeTimeRange));
 
       // Augment with ClickHouse event-volume histogram when cluster is reachable.
       // This adds a real-time event trend to the main dashboard without blocking
       // the PG response — CH provides sub-second aggregations across hot+warm tiers.
+      let trendSource: "clickhouse_olap" | "postgres" = "postgres";
       const chDash = getClickHouseClient();
       if (chDash) {
         try {
@@ -4426,13 +4432,18 @@ export async function registerRoutes(
             hourly_buckets: chTrend,
             totals: chTotals,
           };
+          trendSource = "clickhouse_olap";
         } catch {
           // ClickHouse not reachable — dashboard served from PG only
         }
       }
 
+      // Surface the data-source/latency trust signals (Task #178 pattern) so
+      // the dashboard can render the same OLAP/Postgres badge that Detection
+      // Feed and Log Explorer already show.
+      (stats as Record<string, unknown>).source = trendSource;
       setCache(cacheKey, stats);
-      res.json(stats);
+      res.json({ ...stats, latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       console.error("Dashboard error:", error?.message, error?.stack?.split('\n').slice(0, 5).join('\n'));
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch dashboard" });
@@ -4588,6 +4599,7 @@ export async function registerRoutes(
 
   app.get("/api/security-console/:tenantId/incidents", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
       await assertTenantAccess(req, tenantId);
@@ -4715,7 +4727,9 @@ export async function registerRoutes(
         updatedAt: row.updated_at,
       }));
 
-      res.json({ data, total, page, pageSize, totalPages });
+      // Surface data-source/latency trust signals (Task #178 pattern). The
+      // incidents list is served exclusively from PG, so source is constant.
+      res.json({ data, total, page, pageSize, totalPages, source: "postgres", latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
     }
@@ -4835,13 +4849,14 @@ export async function registerRoutes(
 
   app.get("/api/events/:tenantId/cross-source-correlations", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
       await assertTenantAccess(req, tenantId);
       const tenantIds = await getAccessibleTenantIds(req, tenantId);
       const cacheKey = `cross-source-${tenantId}`;
       const cached = await getCache(cacheKey);
-      if (cached) return res.json(cached);
+      if (cached) return res.json({ ...cached, latencyMs: Date.now() - reqStart });
 
       // ── ClickHouse fast-path ────────────────────────────────────────────────
       // Cross-source IOC correlation is the most expensive event-aggregation
@@ -4882,7 +4897,7 @@ export async function registerRoutes(
             source: "clickhouse_olap",
           };
           setCache(cacheKey, chResult);
-          return res.json(chResult);
+          return res.json({ ...chResult, latencyMs: Date.now() - reqStart });
         } catch (chErr: unknown) {
           // ClickHouse unavailable — fall through to PG path
           const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
@@ -4892,7 +4907,8 @@ export async function registerRoutes(
         }
       }
 
-      const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
+      const placeholders1 = tenantIds.map((_, i) => `$${i + 1}`).join(",");
+      const placeholders2 = tenantIds.map((_, i) => `$${tenantIds.length + i + 1}`).join(",");
 
       const correlationResult = await poolRead.query(
         `WITH ioc_sources AS (
@@ -4903,7 +4919,7 @@ export async function registerRoutes(
             COALESCE(log_source, source_type, 'Unknown') as log_source,
             COUNT(*)::int as hit_count
           FROM security_events
-          WHERE tenant_id IN (${placeholders})
+          WHERE tenant_id IN (${placeholders1})
             AND attacker IS NOT NULL AND attacker != ''
             AND attacker ~ '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]'
           GROUP BY attacker, event_type, COALESCE(log_source, source_type, 'Unknown')
@@ -4915,7 +4931,7 @@ export async function registerRoutes(
             COALESCE(log_source, source_type, 'Unknown') as log_source,
             COUNT(*)::int as hit_count
           FROM security_events
-          WHERE tenant_id IN (${placeholders})
+          WHERE tenant_id IN (${placeholders2})
             AND target IS NOT NULL AND target != ''
             AND target ~ '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]'
           GROUP BY target, event_type, COALESCE(log_source, source_type, 'Unknown')
@@ -4946,7 +4962,7 @@ export async function registerRoutes(
         source: "postgres",
       };
       setCache(cacheKey, result);
-      res.json(result);
+      res.json({ ...result, latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
     }
@@ -4954,6 +4970,7 @@ export async function registerRoutes(
 
   app.get("/api/events/:tenantId/timeline", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
       await assertTenantAccess(req, tenantId);
@@ -5008,15 +5025,19 @@ export async function registerRoutes(
           logChQuery("events.timeline", Date.now() - chStart, {
             tenant: tenantId, interval, points: rows.length,
           });
-          return res.json(rows.map((r) => ({
-            timestamp: r.ts,
-            critical:  Number(r.critical) || 0,
-            high:      Number(r.high)     || 0,
-            medium:    Number(r.medium)   || 0,
-            low:       Number(r.low)      || 0,
-            info:      Number(r.info)     || 0,
-            total:     Number(r.total)    || 0,
-          })));
+          return res.json({
+            timeline: rows.map((r) => ({
+              timestamp: r.ts,
+              critical:  Number(r.critical) || 0,
+              high:      Number(r.high)     || 0,
+              medium:    Number(r.medium)   || 0,
+              low:       Number(r.low)      || 0,
+              info:      Number(r.info)     || 0,
+              total:     Number(r.total)    || 0,
+            })),
+            source: "clickhouse_olap",
+            latencyMs: Date.now() - reqStart,
+          });
         } catch (chErr: unknown) {
           const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
           logChQuery("events.timeline.failed", 0, { tenant: tenantId, error: chMsg });
@@ -5025,7 +5046,7 @@ export async function registerRoutes(
       }
 
       const timeline = await storage.getEventVolumeTimeline(tenantId, tenantIds, interval, dateFrom, dateTo);
-      res.json(timeline);
+      res.json({ timeline, source: "postgres", latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
     }
@@ -5269,6 +5290,7 @@ export async function registerRoutes(
 
   app.get("/api/drilldown/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       await assertTenantAccess(req, tenantId);
       const { filterType, filterValue, domain } = req.query;
@@ -5510,6 +5532,11 @@ export async function registerRoutes(
         totalEvents: parseInt(eventCountResult.rows[0]?.cnt || "0", 10),
         incidents: incidentResults,
         events: eventResults,
+        // Surface which store served the events portion so the drilldown
+        // panel can render the same OLAP/Postgres trust badge as Detection
+        // Feed and Log Explorer. Incidents always come from PG.
+        source: usedCh ? "clickhouse_olap" : "postgres",
+        latencyMs: Date.now() - reqStart,
       });
     } catch (error: any) {
       console.error("[Drilldown] Error:", error.message, "filterType:", req.query.filterType, "filterValue:", req.query.filterValue, "domain:", req.query.domain);
@@ -23513,9 +23540,12 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       if (!isSuperAdminUser && !isPlatformAdmin) {
         return res.status(403).json({ error: "Platform admin access required" });
       }
-      const { getClickHouseIngestMonitorSettings } = await import("./clickhouse-ingest-monitor");
-      const settings = await getClickHouseIngestMonitorSettings();
-      res.json({ settings });
+      const { getClickHouseIngestMonitorSettings, getClickHouseIngestMonitorAudit } = await import("./clickhouse-ingest-monitor");
+      const [settings, recentChanges] = await Promise.all([
+        getClickHouseIngestMonitorSettings(),
+        getClickHouseIngestMonitorAudit(10),
+      ]);
+      res.json({ settings, recentChanges });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -23541,6 +23571,143 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       }
       const { setClickHouseIngestMonitorSettings } = await import("./clickhouse-ingest-monitor");
       const settings = await setClickHouseIngestMonitorSettings(parsed.data, userEmail);
+      res.json({ settings });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Task #196: generic platform-settings audit history ───────────────────
+  // Any setting written through `writePlatformSettingsAudit` can have its
+  // history fetched here without each feature needing its own endpoint.
+  // Gated to platform_admin (or super-admin) since these rows can include
+  // operational thresholds and other sensitive config snapshots.
+  app.get("/api/admin/platform/settings/:key/history", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const key = String(req.params.key || "").trim();
+      if (!key || key.length > 128 || !/^[a-zA-Z0-9_.\-]+$/.test(key)) {
+        return res.status(400).json({ error: "Invalid settings key" });
+      }
+      const limitRaw = parseInt(String(req.query.limit ?? "20"), 10);
+      const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 20));
+      const { getPlatformSettingsAudit } = await import("./platform-settings-audit");
+      const history = await getPlatformSettingsAudit(key, limit);
+      res.json({ key, history });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Task #187: ClickHouse fast-path failure monitor ──────────────────────
+  // Per-tenant rolling counters of CH success/failure (silent PG fallback).
+  // Stats endpoint is open to any platform/MSS admin so the platform-health
+  // page can render the panel; settings endpoints are platform_admin only.
+  app.get(
+    "/api/admin/platform-health/clickhouse-fast-path-stats",
+    isAuthenticated,
+    isSuperAdminOrPlatformAdmin,
+    async (req: any, res) => {
+      try {
+        const windowRaw = parseInt(String(req.query.windowMinutes ?? "10"), 10);
+        const windowMinutes = Math.min(60, Math.max(1, Number.isFinite(windowRaw) ? windowRaw : 10));
+        const { getChFastPathStatsCluster } = await import("./clickhouse-fast-path-stats");
+        const { getClickHouseFastPathMonitorSettings } = await import("./clickhouse-fast-path-monitor");
+        const [snapshot, settings, recent] = await Promise.all([
+          getChFastPathStatsCluster(windowMinutes),
+          getClickHouseFastPathMonitorSettings(),
+          pool.query(
+            `SELECT id,
+                    started_at         AS "startedAt",
+                    ended_at           AS "endedAt",
+                    duration_seconds   AS "durationSeconds",
+                    tenant_id          AS "tenantId",
+                    failure_rate_percent AS "failureRatePercent",
+                    attempts,
+                    resolved
+               FROM clickhouse_ingest_outages
+              WHERE reason = 'fast_path'
+                AND started_at > NOW() - INTERVAL '24 hours'
+              ORDER BY started_at DESC
+              LIMIT 20`,
+          ).then(r => r.rows).catch(() => []),
+        ]);
+
+        // Annotate per-tenant rows with whether they currently breach config.
+        const tenants = snapshot.tenants.map(t => ({
+          ...t,
+          failureRatePercent: Math.round(t.failureRate * 100),
+          breachesThreshold:
+            t.attempts >= settings.minAttempts &&
+            t.failureRate * 100 >= settings.failureRatePercent,
+        }));
+        const breachingCount = tenants.filter(t => t.breachesThreshold).length;
+
+        res.json({
+          settings,
+          windowMinutes: snapshot.windowMinutes,
+          generatedAt: snapshot.generatedAt,
+          totals: {
+            ...snapshot.totals,
+            failureRatePercent: Math.round(snapshot.totals.failureRate * 100),
+          },
+          tenants,
+          breachingCount,
+          recentFastPathOutages: recent,
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || "Failed to load fast-path stats" });
+      }
+    },
+  );
+
+  app.get("/api/admin/platform/clickhouse-fast-path-monitor", isAuthenticated, async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const { getClickHouseFastPathMonitorSettings } = await import("./clickhouse-fast-path-monitor");
+      const settings = await getClickHouseFastPathMonitorSettings();
+      res.json({ settings });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch("/api/admin/platform/clickhouse-fast-path-monitor", isAuthenticated, async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      let userEmail: string | null = null;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+        userEmail = req.user?.claims?.email || access.user?.email || null;
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const { clickHouseFastPathMonitorSettingsSchema } = await import("@shared/schema");
+      const parsed = clickHouseFastPathMonitorSettingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid settings", issues: parsed.error.issues });
+      }
+      const { setClickHouseFastPathMonitorSettings } = await import("./clickhouse-fast-path-monitor");
+      const settings = await setClickHouseFastPathMonitorSettings(parsed.data, userEmail);
       res.json({ settings });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -23602,6 +23769,94 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
+  // ── Task #209 ──────────────────────────────────────────────────────────────
+  // Operator-triggered re-run of the one-shot incidents backfill (PG ➜ CH).
+  // The backfill normally runs once per process at startup (see server/index.ts),
+  // anchoring the periodic sweeper's (updated_at, id) cursor so subsequent
+  // incidents stream into CH automatically. This endpoint exists for the
+  // recovery cases where the startup pass alone is not enough:
+  //   - CH cluster was wiped / restored from a snapshot and needs to be
+  //     rehydrated without bouncing every app instance.
+  //   - Suspected drift between PG and CH MITRE coverage counts.
+  //   - First deploy after this feature ships into a long-lived environment
+  //     where simply waiting for the next restart is undesirable.
+  // It clears the in-process "done" guard then awaits the backfill so the
+  // operator gets the row count back synchronously. Idempotent on the CH
+  // side — the `ccc.incidents` table is a ReplacingMergeTree(updated_at)
+  // keyed on (tenant_id, id), so re-emits collapse to the latest version
+  // per row instead of duplicating. Restricted to platform admins so a
+  // tenant user can't trigger an expensive backfill.
+  app.post(
+    "/api/admin/clickhouse/incidents-backfill",
+    isAuthenticated,
+    isSuperAdminOrPlatformAdmin,
+    async (_req, res) => {
+      try {
+        if (!isClickHouseEnabled()) {
+          return res.status(503).json({
+            ok: false,
+            message:
+              "ClickHouse is not configured on this plane (CLICKHOUSE_URL / CLICKHOUSE_PASSWORD missing).",
+          });
+        }
+        const { DatabaseStorage } = await import("./storage");
+        // Concurrency guard: if a backfill is already in flight (e.g. the
+        // 30-second startup retry loop or a previous admin trigger is still
+        // running), don't reset its state out from under it — that would
+        // race the cursor anchoring. Surface a 409 so the caller can retry.
+        if (
+          !DatabaseStorage.isIncidentBackfillComplete() &&
+          DatabaseStorage.isIncidentBackfillRunning()
+        ) {
+          return res.status(409).json({
+            ok: false,
+            message: "Incident backfill is already running; retry once it finishes.",
+          });
+        }
+        DatabaseStorage.resetIncidentBackfillState();
+        const startedAt = Date.now();
+        const rowsMirrored = await DatabaseStorage.backfillIncidentsToClickHouse();
+        // The storage method swallows ClickHouse errors and returns the
+        // partial row count so the startup retry loop can keep trying.
+        // For an operator-triggered call we want a clear pass/fail signal:
+        // if the in-process "done" marker isn't set after the await, the
+        // backfill aborted partway through and the operator should retry.
+        const complete = DatabaseStorage.isIncidentBackfillComplete();
+        if (!complete) {
+          return res.status(500).json({
+            ok: false,
+            rowsMirrored,
+            durationMs: Date.now() - startedAt,
+            message:
+              "Backfill did not complete — check server logs for the underlying ClickHouse error and retry.",
+          });
+        }
+        // Drain anything that landed in PG while we were walking so the
+        // sweeper cursor lands on the true tail before the next periodic tick.
+        let sweptAfter = 0;
+        try {
+          sweptAfter = await DatabaseStorage.sweepIncidentsToClickHouse();
+        } catch (err) {
+          console.warn(
+            "[ClickHouse] Post-backfill sweep error (non-fatal):",
+            err instanceof Error ? err.message : err,
+          );
+        }
+        return res.json({
+          ok: true,
+          rowsMirrored,
+          sweptAfter,
+          durationMs: Date.now() - startedAt,
+          completedAt: new Date().toISOString(),
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[ClickHouse] Incidents backfill endpoint error: ${msg}`);
+        return res.status(500).json({ ok: false, message: msg });
+      }
+    },
+  );
+
   // ── Task #172 ──────────────────────────────────────────────────────────────
   // Dedicated ClickHouse health endpoint for the Platform Health dashboard.
   // Returns connection status, version, active query count, and recent
@@ -23657,6 +23912,147 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         error: message,
         checkedAt: new Date().toISOString(),
       });
+    }
+  });
+
+  // Task #210 — surface the threat-flow column backfill state to admins so
+  // they can confirm older CH rows have been mirrored without grepping logs.
+  app.get(
+    "/api/admin/platform-health/threat-flow-backfill",
+    isAuthenticated,
+    isSuperAdminOrPlatformAdmin,
+    async (_req: any, res) => {
+      try {
+        const { getThreatFlowBackfillStatus, getThreatFlowRemainingEstimate } = await import(
+          "./clickhouse-threat-flow-backfill"
+        );
+        const status = getThreatFlowBackfillStatus();
+        // Task #211 — surface a "rows still empty in CH" estimate so the
+        // admin card can show real progress, not just complete vs pending.
+        // Skip the CH count once the marker is written: by definition the
+        // remaining is 0 and there's no value in scanning the table again.
+        const remaining = status.complete
+          ? { remainingRows: 0, estimatedAt: new Date().toISOString() }
+          : await getThreatFlowRemainingEstimate();
+        // Task #225 — derive an ETA from the cached recent throughput and the
+        // CH remaining-rows count. We compute it here (instead of in the
+        // backfill module) because that's where both pieces are joined; the
+        // backfill module doesn't know the remaining-rows estimate, and the
+        // client shouldn't have to multiply rate by remaining itself.
+        // ETA is intentionally `null` when any input is missing or when
+        // throughput is non-positive — the UI hides the row in that case
+        // rather than showing a misleading "∞ minutes".
+        let eta:
+          | { etaSeconds: number; rowsPerMinute: number; basedOnRuns: number }
+          | null = null;
+        if (
+          !status.complete &&
+          status.recentThroughput &&
+          status.recentThroughput.rowsPerMinute > 0 &&
+          remaining.remainingRows != null &&
+          remaining.remainingRows > 0
+        ) {
+          const etaSeconds =
+            (remaining.remainingRows / status.recentThroughput.rowsPerMinute) * 60;
+          if (Number.isFinite(etaSeconds) && etaSeconds >= 0) {
+            eta = {
+              etaSeconds,
+              rowsPerMinute: status.recentThroughput.rowsPerMinute,
+              basedOnRuns: status.recentThroughput.sampleRuns,
+            };
+          }
+        }
+        res.json({ ...status, remaining, eta });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? "failed to read backfill status" });
+      }
+    },
+  );
+
+  // Task #183 — history of past ClickHouse stalled-ingest outages so operators
+  // can spot trends (recurrence, duration) on the Platform Health page.
+  app.get("/api/admin/platform-health/clickhouse-ingest-outages", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+    try {
+      const limitRaw = parseInt(String(req.query.limit ?? "20"), 10);
+      const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 20));
+      const result = await pool.query(
+        `SELECT id,
+                started_at         AS "startedAt",
+                ended_at           AS "endedAt",
+                duration_seconds   AS "durationSeconds",
+                threshold_minutes  AS "thresholdMinutes",
+                sample_window_seconds AS "sampleWindowSeconds",
+                notifications_dispatched AS "notificationsDispatched",
+                resolved,
+                reason,
+                tenant_id          AS "tenantId",
+                failure_rate_percent AS "failureRatePercent",
+                attempts
+           FROM clickhouse_ingest_outages
+          ORDER BY started_at DESC
+          LIMIT $1`,
+        [limit],
+      );
+      const stats24h = await pool.query(
+        `SELECT COUNT(*)::int AS count,
+                COALESCE(SUM(duration_seconds), 0)::int AS total_duration
+           FROM clickhouse_ingest_outages
+          WHERE started_at > NOW() - INTERVAL '24 hours'`,
+      );
+      const daysRaw = parseInt(String(req.query.days ?? "30"), 10);
+      const days = Math.min(90, Math.max(7, Number.isFinite(daysRaw) ? daysRaw : 30));
+      const dailyRows = await pool.query(
+        `SELECT to_char(date_trunc('day', started_at), 'YYYY-MM-DD') AS day,
+                COUNT(*)::int AS count,
+                COALESCE(SUM(duration_seconds), 0)::int AS total_duration
+           FROM clickhouse_ingest_outages
+          WHERE started_at > NOW() - ($1 || ' days')::interval
+          GROUP BY 1
+          ORDER BY 1`,
+        [String(days)],
+      );
+      const dailyMap = new Map<string, { count: number; totalDurationSeconds: number }>();
+      for (const r of dailyRows.rows) {
+        dailyMap.set(r.day, { count: r.count, totalDurationSeconds: r.total_duration });
+      }
+      const dailySeries: { day: string; count: number; totalDurationSeconds: number }[] = [];
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(today);
+        d.setUTCDate(d.getUTCDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        const v = dailyMap.get(key);
+        dailySeries.push({ day: key, count: v?.count ?? 0, totalDurationSeconds: v?.totalDurationSeconds ?? 0 });
+      }
+      const weeklyRow = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE started_at > NOW() - INTERVAL '7 days')::int AS current_count,
+           COUNT(*) FILTER (WHERE started_at <= NOW() - INTERVAL '7 days' AND started_at > NOW() - INTERVAL '14 days')::int AS previous_count,
+           COALESCE(SUM(duration_seconds) FILTER (WHERE started_at > NOW() - INTERVAL '7 days'), 0)::int AS current_duration,
+           COALESCE(SUM(duration_seconds) FILTER (WHERE started_at <= NOW() - INTERVAL '7 days' AND started_at > NOW() - INTERVAL '14 days'), 0)::int AS previous_duration
+         FROM clickhouse_ingest_outages`,
+      );
+      const w = weeklyRow.rows[0] || {};
+      res.json({
+        outages: result.rows,
+        stats: {
+          last24h: {
+            count: stats24h.rows[0]?.count ?? 0,
+            totalDurationSeconds: stats24h.rows[0]?.total_duration ?? 0,
+          },
+          weekly: {
+            currentCount: w.current_count ?? 0,
+            previousCount: w.previous_count ?? 0,
+            currentDurationSeconds: w.current_duration ?? 0,
+            previousDurationSeconds: w.previous_duration ?? 0,
+          },
+        },
+        dailySeries,
+        rangeDays: days,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || "Failed to load outage history" });
     }
   });
 
@@ -30711,6 +31107,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/dashboard/:tenantId/threat-flow/:domain", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.params.tenantId);
       if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
       await assertTenantAccess(req, tenantId);
@@ -30720,7 +31117,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       const cacheKey = `threat-flow:${tenantId}:${domain}`;
       const cached = await getCache(cacheKey);
-      if (cached) return res.json(cached);
+      if (cached) return res.json({ ...cached, latencyMs: Date.now() - reqStart });
 
       const DOMAIN_EVENT_TYPE_MAP: Record<string, string[]> = {
         endpoint: ["endpoint"],
@@ -30984,32 +31381,97 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       const flowConfig = DOMAIN_FLOW_COLUMNS[domain] || DOMAIN_FLOW_COLUMNS["network"]!;
 
-      const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
-      const etPlaceholders = eventTypes.map((_, i) => `$${tenantIds.length + i + 1}`).join(",");
-      const params = [...tenantIds, ...eventTypes];
+      // ── ClickHouse fast-path ────────────────────────────────────────────────
+      // The threat-flow Sankey aggregates every event for a domain (often
+      // millions of rows). The CH columnar store handles this in a fraction
+      // of the PG cost. CH lacks `threat`, `action`, `target`, `recipient`,
+      // and `description` columns, so we substitute the closest available
+      // signals (mitre_technique → threat name, host/dst_ip → target, default
+      // action "Detected") and feed the resulting rows through the unchanged
+      // classifier / Sankey-builder below. Response shape is identical; the
+      // dashboard "OLAP fast-path" badge reflects the actual data path.
+      let rows: any[] = [];
+      let threatFlowSource = "postgres";
+      const chFlowClient = getClickHouseClient();
+      if (chFlowClient) {
+        try {
+          const chStart = Date.now();
+          const guardMap = await getConnectedLogSourcesByTenant(tenantIds);
+          const chGuard = buildChIntegrationGuard(guardMap);
+          const guardSql = chGuard ? ` AND ${chGuard}` : "";
+          const etList = eventTypes.map((t) => `'${t.replace(/'/g, "''")}'`).join(",");
+          // Restrict to the hot retention window — the Sankey is a "what's
+          // happening now" widget and full-history scans on CH are wasteful.
+          // Task #203: prefer the new dedicated CH columns (`threat`, `action`,
+          // `recipient`, `description`) so the fast-path matches the PG
+          // Sankey's specificity. Fall back to mitre_technique / event_type
+          // when those columns are empty (older rows ingested before the
+          // schema migration).
+          const sql = `
+            SELECT
+              if(empty(threat),
+                 if(empty(mitre_technique), if(empty(event_type), 'Unknown Threat', event_type), mitre_technique),
+                 threat) AS threat_name,
+              if(empty(severity), 'medium', severity) AS sev,
+              if(empty(action), 'Detected', action) AS action_name,
+              if(empty(host),
+                 if(IPv4NumToString(dst_ip) = '0.0.0.0', 'Unknown', IPv4NumToString(dst_ip)),
+                 host) AS target_name,
+              if(empty(source_type), 'Unknown', source_type) AS channel_name,
+              if(empty(log_source), 'Unknown Source', log_source) AS source_name,
+              recipient AS recipient_email,
+              substring(description, 1, 200) AS description_text,
+              toUInt64(count()) AS cnt
+            FROM security_events_distributed
+            WHERE tenant_id IN (${tenantIds.join(",")})
+              AND event_type IN (${etList})
+              AND ingested_at >= now() - INTERVAL ${HOT_RETENTION_DAYS} DAY
+              ${guardSql}
+            GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, recipient_email, description_text
+            ORDER BY cnt DESC
+            LIMIT 5000
+          `;
+          const chRows = await chFlowClient.queryRows<any>(sql);
+          rows = chRows.map((r) => ({ ...r, cnt: Number(r.cnt) || 0 }));
+          threatFlowSource = "clickhouse_olap";
+          logChQuery("dashboard.threat-flow", Date.now() - chStart, {
+            tenant: tenantId, domain, rows: rows.length,
+          });
+        } catch (chErr: unknown) {
+          const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
+          logChQuery("dashboard.threat-flow.failed", 0, { tenant: tenantId, domain, error: chMsg });
+          rows = [];
+        }
+      }
 
-      const result = await pool.query(`
-        SELECT
-          COALESCE(NULLIF(TRIM(threat), ''), 'Unknown Threat') as threat_name,
-          COALESCE(severity, 'medium') as sev,
-          COALESCE(NULLIF(TRIM(action), ''), 'Detected') as action_name,
-          COALESCE(NULLIF(TRIM(target), ''), 'Unknown') as target_name,
-          COALESCE(NULLIF(TRIM(source_type), ''), 'Unknown') as channel_name,
-          COALESCE(NULLIF(TRIM(log_source), ''), 'Unknown Source') as source_name,
-          COALESCE(NULLIF(TRIM(recipient), ''), '') as recipient_email,
-          COALESCE(LEFT(TRIM(description), 200), '') as description_text,
-          COUNT(*)::int as cnt
-        FROM security_events
-        WHERE tenant_id IN (${placeholders})
-          AND event_type IN (${etPlaceholders})
-        GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, recipient_email, description_text
-        ORDER BY cnt DESC
-      `, params);
+      if (threatFlowSource === "postgres") {
+        const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
+        const etPlaceholders = eventTypes.map((_, i) => `$${tenantIds.length + i + 1}`).join(",");
+        const params = [...tenantIds, ...eventTypes];
 
-      const rows = result.rows;
+        const result = await pool.query(`
+          SELECT
+            COALESCE(NULLIF(TRIM(threat), ''), 'Unknown Threat') as threat_name,
+            COALESCE(severity, 'medium') as sev,
+            COALESCE(NULLIF(TRIM(action), ''), 'Detected') as action_name,
+            COALESCE(NULLIF(TRIM(target), ''), 'Unknown') as target_name,
+            COALESCE(NULLIF(TRIM(source_type), ''), 'Unknown') as channel_name,
+            COALESCE(NULLIF(TRIM(log_source), ''), 'Unknown Source') as source_name,
+            COALESCE(NULLIF(TRIM(recipient), ''), '') as recipient_email,
+            COALESCE(LEFT(TRIM(description), 200), '') as description_text,
+            COUNT(*)::int as cnt
+          FROM security_events
+          WHERE tenant_id IN (${placeholders})
+            AND event_type IN (${etPlaceholders})
+          GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, recipient_email, description_text
+          ORDER BY cnt DESC
+        `, params);
+
+        rows = result.rows;
+      }
 
       if (rows.length === 0) {
-        return res.json({ nodes: [], links: [], columns: flowConfig.columns, layerOrder: flowConfig.layers });
+        return res.json({ nodes: [], links: [], columns: flowConfig.columns, layerOrder: flowConfig.layers, source: threatFlowSource, latencyMs: Date.now() - reqStart });
       }
 
       let emailRecipientCounts: Map<string, number> | undefined;
@@ -31137,10 +31599,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         }
       }
 
-      const responseData = { nodes, links, columns: flowConfig.columns, layerOrder: flowConfig.layers };
+      const responseData = { nodes, links, columns: flowConfig.columns, layerOrder: flowConfig.layers, source: threatFlowSource };
       setCache(cacheKey, responseData);
 
-      res.json(responseData);
+      res.json({ ...responseData, latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       console.error("Threat flow error:", error);
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch threat flow data" });
@@ -38033,21 +38495,14 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
   // ─────────────────────────────────────────────────────────────────────────
   app.get("/api/mitre/coverage", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.query.tenantId as string);
       const days = parseInt(req.query.days as string) || 90;
       if (!tenantId) return res.status(400).json({ message: "tenantId required" });
 
       const since = new Date(Date.now() - days * 86400000);
-      const rows = await pool.query(
-        `SELECT mitre_technique_id, mitre_tactic, mitre_technique, COUNT(*) as count, MAX(created_at) as last_seen,
-                AVG(CASE WHEN confidence_score IS NOT NULL THEN confidence_score ELSE 50 END)::int as avg_confidence
-         FROM incidents
-         WHERE tenant_id = $1 AND created_at >= $2 AND mitre_technique_id IS NOT NULL
-         GROUP BY mitre_technique_id, mitre_tactic, mitre_technique`,
-        [tenantId, since]
-      );
 
-      // Sigma rule counts per technique
+      // Sigma rule counts per technique (used by both PG and CH paths)
       const sigmaRows = await pool.query(
         `SELECT mitre_tags FROM sigma_rules WHERE is_enabled = true AND mitre_tags IS NOT NULL`
       );
@@ -38062,6 +38517,104 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
           }
         }
       }
+
+      // ── ClickHouse fast-path ────────────────────────────────────────────────
+      // The PG coverage query groups the `incidents` table by mitre_technique_id.
+      // Incidents are mirrored into CH via storage.chDualWriteIncidents on
+      // create/update, so the fast-path now counts incidents from
+      // `incidents_distributed` (a ReplacingMergeTree keyed on tenant_id+id),
+      // keeping per-tile counts apples-to-apples with the PG path. FINAL is
+      // used so duplicate versions emitted by the dual-write are collapsed
+      // to the latest one before grouping.
+      // Readiness guard: only use the CH fast-path once the startup backfill
+      // has finished mirroring the historical PG incidents into CH. Until
+      // then (especially right after the one-shot dedup-shard TRUNCATE
+      // migration), CH would return systematically lower counts than PG, so
+      // we fall through to the PG path to avoid a transient undercount.
+      const { DatabaseStorage } = await import("./storage");
+      const chCoverage = DatabaseStorage.isIncidentBackfillComplete()
+        ? getClickHouseClient()
+        : null;
+      if (chCoverage) {
+        try {
+          const chStart = Date.now();
+          const sinceIso = since.toISOString();
+          // Mirror the PG fallback's filter set exactly so per-tile counts are
+          // apples-to-apples between the two paths: tenant_id, time window,
+          // and a non-null mitre_technique_id. The CH column is non-nullable
+          // String (NULLs from PG land as ''), so `notEmpty()` is the
+          // semantic equivalent of PG's `IS NOT NULL`. The PG path does NOT
+          // apply INCIDENT_INTEGRATION_GUARD here, so neither do we — applying
+          // it only on the fast-path would create systematic count drift
+          // between the CH and PG responses for the same request.
+          const sql = `
+            SELECT
+              mitre_technique_id AS tid,
+              mitre_tactic       AS tactic,
+              mitre_technique    AS technique,
+              toUInt64(count())  AS cnt,
+              toFloat64(avg(if(confidence_score > 0, confidence_score, 50))) AS avg_conf,
+              max(created_at)    AS last_seen
+            FROM incidents_distributed FINAL
+            WHERE tenant_id = ${tenantId}
+              AND created_at >= '${sinceIso}'
+              AND notEmpty(mitre_technique_id)
+            GROUP BY mitre_technique_id, mitre_tactic, mitre_technique
+          `;
+          const chRows = await chCoverage.queryRows<{
+            tid: string; tactic: string; technique: string;
+            cnt: string; avg_conf: number | string; last_seen: string;
+          }>(sql);
+
+          const covered: Record<string, { count: number; lastSeen: string; tactic: string; technique: string; confidence: number; ruleCount: number }> = {};
+          for (const r of chRows) {
+            const raw = String(r.tid || "").toUpperCase();
+            const m = raw.match(/T\d{4}(?:\.\d{3})?/);
+            const tid = m ? m[0] : raw;
+            if (!tid) continue;
+            const cnt = Number(r.cnt) || 0;
+            const existing = covered[tid];
+            if (!existing || existing.count < cnt) {
+              covered[tid] = {
+                count: cnt,
+                lastSeen: String(r.last_seen ?? ""),
+                tactic: r.tactic ?? "",
+                technique: r.technique ?? "",
+                confidence: Math.round(Number(r.avg_conf) || 50),
+                ruleCount: ruleCounts[tid] || 0,
+              };
+            }
+          }
+          // Merge in sigma-only entries (have rules but no events)
+          for (const [tid, ruleCount] of Object.entries(ruleCounts)) {
+            if (!covered[tid] && ruleCount > 0) {
+              covered[tid] = { count: 0, lastSeen: "", tactic: "", technique: "", confidence: 0, ruleCount };
+            }
+          }
+
+          // Bail out to PG only if CH returned absolutely nothing usable —
+          // a tenant with sigma rules but zero CH-derived techniques would
+          // still show *some* covered set; prefer that over an empty board.
+          if (Object.keys(covered).length > 0) {
+            logChQuery("mitre.coverage", Date.now() - chStart, {
+              tenant: tenantId, days, techniques: Object.keys(covered).length,
+            });
+            return res.json({ covered, days, ruleCounts, source: "clickhouse_olap", latencyMs: Date.now() - reqStart });
+          }
+        } catch (chErr: unknown) {
+          const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
+          logChQuery("mitre.coverage.failed", 0, { tenant: tenantId, error: chMsg });
+        }
+      }
+
+      const rows = await pool.query(
+        `SELECT mitre_technique_id, mitre_tactic, mitre_technique, COUNT(*) as count, MAX(created_at) as last_seen,
+                AVG(CASE WHEN confidence_score IS NOT NULL THEN confidence_score ELSE 50 END)::int as avg_confidence
+         FROM incidents
+         WHERE tenant_id = $1 AND created_at >= $2 AND mitre_technique_id IS NOT NULL
+         GROUP BY mitre_technique_id, mitre_tactic, mitre_technique`,
+        [tenantId, since]
+      );
 
       const covered: Record<string, { count: number; lastSeen: string; tactic: string; technique: string; confidence: number; ruleCount: number }> = {};
       for (const r of rows.rows) {
@@ -38082,7 +38635,7 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
         }
       }
 
-      res.json({ covered, days, ruleCounts });
+      res.json({ covered, days, ruleCounts, source: "postgres", latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -38188,7 +38741,11 @@ Keep response concise, actionable, technical. Max 200 words.`;
   }
 
   // ── IP Geolocation cache (in-memory, 24h TTL) ─────────────────────────────
-  const _ipGeoCache = new Map<string, { lat: number; lon: number; expiresAt: number }>();
+  // countryCode is optional: cache entries written before the CH fast-path
+  // shipped only stored {lat, lon}. The CH fast-path needs a country for the
+  // arc `from` field (CH has no `country` column), so newer cache entries also
+  // carry the ISO-2 code returned by ip-api.
+  const _ipGeoCache = new Map<string, { lat: number; lon: number; countryCode?: string; expiresAt: number }>();
   const IP_GEO_TTL_MS = 24 * 60 * 60 * 1000;
   // Strict IPv4: each octet must be 0-255 with no leading zeros
   const PUBLIC_IP_RE = /^((25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)$/;
@@ -38228,7 +38785,7 @@ Keep response concise, actionable, technical. Max 200 words.`;
     for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
       const batch = toFetch.slice(i, i + BATCH_SIZE);
       try {
-        const resp = await fetch("http://ip-api.com/batch?fields=status,query,lat,lon", {
+        const resp = await fetch("http://ip-api.com/batch?fields=status,query,lat,lon,countryCode", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(batch.map(q => ({ query: q }))),
@@ -38238,7 +38795,8 @@ Keep response concise, actionable, technical. Max 200 words.`;
           const rows: any[] = await resp.json();
           for (const row of rows) {
             if (row.status === "success" && row.lat != null && row.lon != null && row.query) {
-              _ipGeoCache.set(row.query, { lat: row.lat, lon: row.lon, expiresAt: now + IP_GEO_TTL_MS });
+              const cc = typeof row.countryCode === "string" ? row.countryCode : undefined;
+              _ipGeoCache.set(row.query, { lat: row.lat, lon: row.lon, countryCode: cc, expiresAt: now + IP_GEO_TTL_MS });
               result.set(row.query, { lat: row.lat, lon: row.lon });
             }
           }
@@ -38250,8 +38808,26 @@ Keep response concise, actionable, technical. Max 200 words.`;
     return result;
   }
 
+  // Like geolocateIPs() but also returns the ISO-2 country code. Used by the
+  // ClickHouse fast-path for /api/threat-map/arcs because CH events have no
+  // `country` column — the arc `from` field must be derived from the source IP.
+  async function geolocateIPsFull(ips: string[]): Promise<Map<string, { lat: number; lon: number; countryCode?: string }>> {
+    // First make sure cache is warm (also writes countryCode for fresh rows)
+    await geolocateIPs(ips);
+    const out = new Map<string, { lat: number; lon: number; countryCode?: string }>();
+    const now = Date.now();
+    for (const ip of ips) {
+      const c = _ipGeoCache.get(ip);
+      if (c && c.expiresAt > now) {
+        out.set(ip, { lat: c.lat, lon: c.lon, countryCode: c.countryCode });
+      }
+    }
+    return out;
+  }
+
   app.get("/api/threat-map/arcs", isAuthenticated, async (req: any, res) => {
     try {
+      const reqStart = Date.now();
       const tenantId = parseInt(req.query.tenantId as string);
       const hours = parseInt(req.query.hours as string) || 24;
       if (!tenantId) return res.status(400).json({ message: "tenantId required" });
@@ -38261,6 +38837,222 @@ Keep response concise, actionable, technical. Max 200 words.`;
 
       const since = new Date(Date.now() - hours * 3600000);
       const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      // ── ClickHouse fast-path ────────────────────────────────────────────────
+      // Threat globe arcs aggregate every event in the lookback window. On
+      // PG that means scanning `security_events` plus several CIDR-subselect
+      // joins per group, which dominates dashboard load on busy tenants. CH
+      // has no `country` / `attacker` text columns, but we have `src_ip`,
+      // `dst_ip`, `severity`, `mitre_tactic`, `ingested_at` — enough to
+      // rebuild the same response shape:
+      //   • from country: derived from `src_ip` via the same ip-api batch
+      //     geo lookup the PG path uses for arc starting points
+      //   • to office:    defaultOffice (CH lacks asset/target text needed
+      //     for CIDR/keyword office matching — acceptable trade-off)
+      // Falls back to PG on any CH error or when CH is not configured.
+      const chArcsClient = getClickHouseClient();
+      if (chArcsClient) {
+        try {
+          const chStart = Date.now();
+          const sinceIso = since.toISOString();
+          const tenantList = tenantIds.join(",");
+          // Same integration-awareness guard the events fast-paths use, so
+          // arcs only reflect log sources the tenant has actively connected.
+          const guardMap = await getConnectedLogSourcesByTenant(tenantIds);
+          const chGuard = buildChIntegrationGuard(guardMap);
+          const guardSql = chGuard ? ` AND ${chGuard}` : "";
+          // Public IPv4 only — exclude RFC1918 / loopback / link-local /
+          // multicast / 0.0.0.0 ranges using CH's isIPAddressInRange.
+          const publicIpFilter = `
+              src_ip != toIPv4('0.0.0.0')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '10.0.0.0/8')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '172.16.0.0/12')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '192.168.0.0/16')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '127.0.0.0/8')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '169.254.0.0/16')
+              AND NOT isIPAddressInRange(IPv4NumToString(src_ip), '224.0.0.0/4')`;
+          // ── Office matching (parity with PG dual-signal logic) ───────────
+          // PG path resolves each arc to an office via:
+          //   Signal 1: hostname-keyword match against asset/target text
+          //   Signal 2: CIDR match against attacker/asset/target IPs
+          // Mirror that here so multi-office tenants don't see every arc
+          // collapse to the default office. The CH `target` column is
+          // populated by chDualWrite (storage.ts) and the CIDR / keyword
+          // checks use ClickHouse re2 + isIPAddressInRange — no PG round-trip.
+          const officeRowsForCase = await pool.query(
+            `SELECT id, name, city, country_code, latitude, longitude, hostname_keywords, private_ip_ranges
+             FROM infrastructure_locations
+             WHERE tenant_id = ANY($1) AND is_active = true
+               AND latitude IS NOT NULL AND longitude IS NOT NULL
+             ORDER BY id ASC`,
+            [tenantIds],
+          );
+          const tenantOfficesCh: any[] = officeRowsForCase.rows;
+          const officeByIdCh = new Map<number, any>(tenantOfficesCh.map((o) => [o.id, o]));
+          const defaultOfficeCh = tenantOfficesCh[0] ?? null;
+
+          const KW_RE = /^[a-z0-9_-]+$/i;
+          const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
+          const officeCaseFragments: string[] = [];
+          // Signal 1 — hostname keyword match (host/target text). Same
+          // word-boundary regex shape used by the PG path so behavior is
+          // identical for tenants that already configured keywords there.
+          for (const o of tenantOfficesCh) {
+            const kws: string[] = (o.hostname_keywords ?? []).filter((k: string) => typeof k === "string" && KW_RE.test(k));
+            if (!kws.length) continue;
+            const conds = kws.map((k) => {
+              const safe = k.toLowerCase();
+              const re = `(^|[^a-z0-9_-])${safe}([^a-z0-9_-]|$)`;
+              return `match(lower(host), '${re}') OR match(lower(target), '${re}')`;
+            }).join(" OR ");
+            officeCaseFragments.push(`WHEN (${conds}) THEN toUInt32(${o.id})`);
+          }
+          // Signal 2 — CIDR match. Try src_ip / dst_ip (IPv4-typed) first,
+          // then fall back to text-typed host/target via isIPAddressInRange,
+          // which returns 0 for non-IP strings so it's safe on hostnames.
+          for (const o of tenantOfficesCh) {
+            const ranges: string[] = Array.isArray(o.private_ip_ranges) ? o.private_ip_ranges : [];
+            const validRanges = ranges.filter((r) => typeof r === "string" && CIDR_RE.test(r));
+            if (!validRanges.length) continue;
+            const conds = validRanges.map((r) => {
+              return (
+                `isIPAddressInRange(IPv4NumToString(src_ip), '${r}') ` +
+                `OR isIPAddressInRange(IPv4NumToString(dst_ip), '${r}') ` +
+                `OR isIPAddressInRange(host, '${r}') ` +
+                `OR isIPAddressInRange(target, '${r}')`
+              );
+            }).join(" OR ");
+            officeCaseFragments.push(`WHEN (${conds}) THEN toUInt32(${o.id})`);
+          }
+          const officeCaseExpr = officeCaseFragments.length > 0
+            ? `CASE ${officeCaseFragments.join(" ")} ELSE toUInt32(0) END`
+            : `toUInt32(0)`;
+
+          const arcsSql = `
+            SELECT
+              IPv4NumToString(src_ip) AS sample_ip,
+              if(empty(severity), 'medium', severity) AS severity,
+              ${officeCaseExpr} AS office_id,
+              toUInt64(count()) AS cnt
+            FROM security_events_distributed
+            WHERE tenant_id IN (${tenantList})
+              AND ingested_at >= '${sinceIso}'
+              AND ${publicIpFilter}
+              ${guardSql}
+            GROUP BY sample_ip, severity, office_id
+            ORDER BY cnt DESC
+            LIMIT 200
+          `;
+          const totalSql = `
+            SELECT toUInt64(count()) AS total
+            FROM security_events_distributed
+            WHERE tenant_id IN (${tenantList})
+              AND ingested_at >= '${sinceIso}'
+              ${guardSql}
+          `;
+          const topTechSql = `
+            SELECT mitre_tactic AS technique, toUInt64(count()) AS cnt
+            FROM security_events_distributed
+            WHERE tenant_id IN (${tenantList})
+              AND ingested_at >= '${sinceIso}'
+              AND mitre_tactic != ''
+              ${guardSql}
+            GROUP BY mitre_tactic
+            ORDER BY cnt DESC
+            LIMIT 1
+          `;
+          const topTargetsSql = `
+            SELECT IPv4NumToString(dst_ip) AS target, toUInt64(count()) AS cnt
+            FROM security_events_distributed
+            WHERE tenant_id IN (${tenantList})
+              AND ingested_at >= '${sinceIso}'
+              AND dst_ip != toIPv4('0.0.0.0')
+              ${guardSql}
+            GROUP BY target
+            ORDER BY cnt DESC
+            LIMIT 10
+          `;
+
+          const [arcsRows, totalRows, techRows, dstRows] = await Promise.all([
+            chArcsClient.queryRows<{ sample_ip: string; severity: string; office_id: string; cnt: string }>(arcsSql),
+            chArcsClient.queryRows<{ total: string }>(totalSql),
+            chArcsClient.queryRows<{ technique: string; cnt: string }>(topTechSql),
+            chArcsClient.queryRows<{ target: string; cnt: string }>(topTargetsSql),
+          ]);
+
+          const uniqueIpsCh = [
+            ...new Set(arcsRows.map((r) => r.sample_ip).filter((ip) => ip && isPublicIPv4(ip))),
+          ] as string[];
+          const ipGeoFull = uniqueIpsCh.length > 0 ? await geolocateIPsFull(uniqueIpsCh) : new Map();
+
+          // Country counts derived from geo lookups (CH has no country column)
+          const countryCounts = new Map<string, number>();
+          const arcs: any[] = [];
+          for (const r of arcsRows) {
+            const cnt = Number(r.cnt) || 0;
+            const ipGeo = ipGeoFull.get(r.sample_ip) as { lat: number; lon: number; countryCode?: string } | undefined;
+            const from = ipGeo?.countryCode ? normalizeCountryToCode(ipGeo.countryCode) : "";
+            if (!from) continue; // Drop rows we couldn't attribute to a country
+            countryCounts.set(from, (countryCounts.get(from) || 0) + cnt);
+            // Resolve the office matched by ClickHouse's per-row CASE
+            // (0 = no match → fall back to the tenant's default office, same
+            // behaviour as the PG path's COALESCE(..., default_office)).
+            const matchedOfficeId = parseInt(r.office_id ?? "0", 10);
+            const office = matchedOfficeId > 0 ? officeByIdCh.get(matchedOfficeId) ?? defaultOfficeCh : defaultOfficeCh;
+            arcs.push({
+              from,
+              to: office?.country_code ?? "US",
+              severity: r.severity,
+              count: cnt,
+              ...(office
+                ? { toLat: office.latitude, toLon: office.longitude, toCity: office.city ?? office.name }
+                : {}),
+              fromLat: ipGeo!.lat,
+              fromLon: ipGeo!.lon,
+            });
+          }
+
+          const topSourcesCh = [...countryCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([country, count]) => ({ country, count }));
+
+          // If geolocation produced no usable arcs (ip-api unreachable or
+          // rate-limited), don't surface an empty globe — fall back to PG so
+          // the widget keeps rendering meaningful data. We only short-circuit
+          // to CH when there's at least one attributed arc OR there were no
+          // matching CH rows to begin with (genuinely quiet tenant).
+          if (arcs.length === 0 && arcsRows.length > 0) {
+            logChQuery("dashboard.threat-map.arcs.no-geo", Date.now() - chStart, {
+              tenant: tenantId, hours, ips: uniqueIpsCh.length,
+            });
+            throw new Error("threat-map: CH rows present but no country attributions resolved");
+          }
+
+          logChQuery("dashboard.threat-map.arcs", Date.now() - chStart, {
+            tenant: tenantId, hours, arcs: arcs.length, ips: uniqueIpsCh.length,
+          });
+
+          return res.json({
+            arcs,
+            totalEvents: parseInt(totalRows[0]?.total ?? "0", 10),
+            topSources: topSourcesCh,
+            topTargets: dstRows.slice(0, 5).map((r) => ({
+              country: (r.target?.slice(0, 2) || "US").toUpperCase(),
+              count: parseInt(String(r.cnt), 10) || 0,
+            })).filter((t) => t.country.length === 2),
+            uniqueCountries: countryCounts.size,
+            topTechnique: techRows[0]?.technique || "",
+            hours,
+            source: "clickhouse_olap",
+            latencyMs: Date.now() - reqStart,
+          });
+        } catch (chErr: unknown) {
+          const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
+          logChQuery("dashboard.threat-map.arcs.failed", 0, { tenant: tenantId, error: chMsg });
+          // fall through to PG path
+        }
+      }
 
       // Step 1: Fetch tenant office locations from infrastructure_locations (DB-driven)
       const officeRes = await pool.query(
@@ -38405,6 +39197,8 @@ Keep response concise, actionable, technical. Max 200 words.`;
         uniqueCountries: new Set(normalizedArcs.map((a: any) => a.from)).size,
         topTechnique: techniqueRes.rows[0]?.technique || "",
         hours,
+        source: "postgres",
+        latencyMs: Date.now() - reqStart,
       });
     } catch (error: any) {
       const status = (error as any).status || 500;

@@ -330,6 +330,8 @@ export default function DetectionFeedPage() {
             <DataSourceBadge
               source={eventsQuery.data?.source ?? statsQuery.data?.source}
               latencyMs={eventsQuery.data?.latencyMs ?? statsQuery.data?.latencyMs}
+              samplesKey="detection-feed"
+              sampleId={eventsQuery.dataUpdatedAt || statsQuery.dataUpdatedAt}
             />
           </div>
           <Button

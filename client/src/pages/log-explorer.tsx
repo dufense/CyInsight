@@ -278,6 +278,8 @@ export default function LogExplorerPage() {
           <DataSourceBadge
             source={eventsQuery.data?.source ?? statsQuery.data?.source}
             latencyMs={eventsQuery.data?.latencyMs ?? statsQuery.data?.latencyMs}
+            samplesKey="log-explorer"
+            sampleId={eventsQuery.dataUpdatedAt || statsQuery.dataUpdatedAt}
           />
         </div>
         <Card>

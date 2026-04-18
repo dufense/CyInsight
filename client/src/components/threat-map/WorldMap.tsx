@@ -174,6 +174,7 @@ interface ArcPath {
   fy: number;
   tx: number;
   ty: number;
+  tooltip: string;
 }
 
 export interface WorldMapProps {
@@ -395,12 +396,21 @@ function ArcOverlay({
     const cy = Math.min(fy, ty) - dist * 0.35;
     const d = `M ${fx.toFixed(1)} ${fy.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${tx.toFixed(1)} ${ty.toFixed(1)}`;
 
+    const fromCentroid = COUNTRY_MAP.get(arc.from.toUpperCase());
+    const fromLabel = fromCentroid ? `${fromCentroid.name} (${arc.from.toUpperCase()})` : arc.from.toUpperCase();
+    const toLabel = arc.toCity && arc.toCity.trim().length > 0
+      ? `${arc.toCity} (${arc.to.toUpperCase()})`
+      : arc.to.toUpperCase();
+    const sevLabel = arc.severity.charAt(0).toUpperCase() + arc.severity.slice(1);
+    const tooltip = `${fromLabel} → ${toLabel}\n${arc.count.toLocaleString()} event${arc.count === 1 ? "" : "s"} · ${sevLabel}`;
+
     visibleArcs.push({
       d, fx, fy, tx, ty,
       color: SEV_COLORS[arc.severity] || SEV_COLORS.medium,
       count: arc.count,
       key: `${arc.from}-${arc.to}-${i}`,
       delay: (i * 0.15) % 3,
+      tooltip,
     });
   });
 
@@ -420,6 +430,7 @@ function ArcOverlay({
         const offset = ((animFrame * 2 + i * 30) % (dashLen + dashGap));
         return (
           <g key={arc.key} filter="url(#wm-arc-glow-live)">
+            <title>{arc.tooltip}</title>
             <path
               d={arc.d}
               fill="none"
@@ -435,6 +446,14 @@ function ArcOverlay({
               stroke={arc.color}
               strokeWidth={Math.max(0.4, Math.min(1.2, (arc.count / maxCount) * 1.5))}
               strokeOpacity={isDark ? 0.12 : 0.18}
+            />
+            {/* Invisible thick path widens the hover target so the native <title> tooltip is easy to trigger */}
+            <path
+              d={arc.d}
+              fill="none"
+              stroke="transparent"
+              strokeWidth={8}
+              style={{ cursor: "help" }}
             />
           </g>
         );
