@@ -1,5 +1,9 @@
 import { sql, relations } from "drizzle-orm";
-import { pgTable, text, varchar, serial, integer, timestamp, boolean, jsonb, pgEnum, real, doublePrecision, unique, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, serial, integer, timestamp, boolean, jsonb, pgEnum, real, doublePrecision, unique, uniqueIndex, customType } from "drizzle-orm/pg-core";
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() { return "bytea"; },
+});
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -14,7 +18,7 @@ export const ticketStatusEnum = pgEnum("ticket_status", ["open", "in_progress", 
 export const ticketPriorityEnum = pgEnum("ticket_priority", ["urgent", "high", "medium", "low"]);
 export const projectStatusEnum = pgEnum("project_status", ["planning", "active", "on_hold", "completed", "cancelled"]);
 export const taskStatusEnum = pgEnum("task_status", ["backlog", "todo", "in_progress", "review", "done"]);
-export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"]);
+export const eventTypeEnum = pgEnum("event_type", ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud", "web", "database", "ot_iot"]);
 export const pipelineStatusEnum = pgEnum("pipeline_status", ["received", "normalized", "enriched", "correlated", "stored"]);
 export const reportTypeEnum = pgEnum("report_type", ["executive_summary", "endpoint", "email", "vulnerability", "compliance", "threat_intelligence", "incident_response", "cloud_security", "asset_inventory", "threat_landscape", "sla_performance", "soc_operations", "risk_posture"]);
 
@@ -816,6 +820,11 @@ export const securityEvents = pgTable("security_events", {
   sigmaMatches: jsonb("sigma_matches"),
   enrichedDescription: text("enriched_description"),
   eventHash: varchar("event_hash", { length: 64 }),
+  parseConfidence: integer("parse_confidence"),
+  needsReview: boolean("needs_review").default(false),
+  aiReasoning: text("ai_reasoning"),
+  rawLog: text("raw_log"),
+  deviceFingerprintId: integer("device_fingerprint_id"),
   occurredAt: timestamp("occurred_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -1115,6 +1124,11 @@ export const securityIntegrations = pgTable("security_integrations", {
   lastAssetSyncAt: timestamp("last_asset_sync_at"),
   assetSyncStatus: varchar("asset_sync_status", { length: 30 }),
   assetSyncMessage: text("asset_sync_message"),
+  consecutiveFailures: integer("consecutive_failures").default(0).notNull(),
+  autoHealEnabled: boolean("auto_heal_enabled").default(true).notNull(),
+  lastHealAttemptAt: timestamp("last_heal_attempt_at"),
+  lastHealStatus: varchar("last_heal_status", { length: 50 }),
+  lastHealMessage: text("last_heal_message"),
 }, (t) => ({
   tenantPlatformUniq: unique("security_integrations_tenant_platform_key").on(t.tenantId, t.platformKey),
 }));
@@ -1143,6 +1157,31 @@ export const integrationAuditLog = pgTable("integration_audit_log", {
 export const insertIntegrationAuditLogSchema = createInsertSchema(integrationAuditLog).omit({ id: true, createdAt: true });
 export type InsertIntegrationAuditLog = z.infer<typeof insertIntegrationAuditLogSchema>;
 export type IntegrationAuditLog = typeof integrationAuditLog.$inferSelect;
+
+export const healFailureTypeEnum = pgEnum("heal_failure_type", [
+  "auth_failure", "endpoint_changed", "rate_limited", "schema_changed",
+  "connectivity", "api_version", "ssl_error", "unknown"
+]);
+
+export const integrationHealLogs = pgTable("integration_heal_logs", {
+  id: serial("id").primaryKey(),
+  integrationId: integer("integration_id").notNull().references(() => securityIntegrations.id, { onDelete: "cascade" }),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  platformKey: varchar("platform_key", { length: 100 }).notNull(),
+  platformName: varchar("platform_name", { length: 200 }).notNull(),
+  failureType: healFailureTypeEnum("failure_type").notNull(),
+  errorMessage: text("error_message"),
+  healStrategy: varchar("heal_strategy", { length: 200 }),
+  configPatch: jsonb("config_patch"),
+  succeeded: boolean("succeeded").notNull(),
+  resultMessage: text("result_message"),
+  aiDiagnosis: text("ai_diagnosis"),
+  consecutiveFailuresAtAttempt: integer("consecutive_failures_at_attempt").default(0),
+  attemptedAt: timestamp("attempted_at").defaultNow().notNull(),
+});
+
+export type IntegrationHealLog = typeof integrationHealLogs.$inferSelect;
+export type InsertIntegrationHealLog = typeof integrationHealLogs.$inferInsert;
 
 export const insertSecurityIntegrationSchema = createInsertSchema(securityIntegrations).omit({ id: true, createdAt: true, updatedAt: true, lastPollAt: true, lastPollStatus: true, lastPollMessage: true, eventsImported: true });
 
@@ -2452,14 +2491,62 @@ export type InsertHuntTemplate = z.infer<typeof insertHuntTemplateSchema>;
 export const playbookStatusEnum = pgEnum("playbook_status", ["active", "inactive", "draft"]);
 export const playbookExecStatusEnum = pgEnum("playbook_exec_status", ["running", "completed", "failed", "partial"]);
 
+export type PlaybookConditionConfig = {
+  field?: string;
+  operator?: "eq" | "neq" | "contains" | "in";
+  value?: string | string[];
+};
+
+export type PlaybookNodeConfig = {
+  actionType?: string;
+  blockType?: string;
+  severity?: string;
+  webhookUrl?: string;
+  channel?: string;
+  recipients?: string;
+  message?: string;
+  analysisType?: string;
+  storeResults?: boolean;
+  condition?: PlaybookConditionConfig;
+};
+
+export type PlaybookGraphNode = {
+  id: string;
+  type: "trigger" | "condition" | "action" | "notification" | "ai_enrichment" | "end";
+  label: string;
+  x: number;
+  y: number;
+  config: PlaybookNodeConfig;
+};
+
+export type PlaybookGraphEdge = {
+  id: string;
+  from: string;
+  fromPort: "default" | "true" | "false";
+  to: string;
+};
+
+export type PlaybookTriggerConditions = {
+  severity?: string[];
+  type?: string[];
+  source?: string[];
+  mitreTactics?: string[];
+  mitreTechniqueIds?: string[];
+  iocTypes?: string[];
+  assetCriticality?: string[];
+};
+
 export const playbooks = pgTable("playbooks", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull().references(() => tenants.id),
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
-  triggerConditions: jsonb("trigger_conditions").$type<{ severity?: string[]; type?: string[]; source?: string[] }>().default({}),
+  triggerConditions: jsonb("trigger_conditions").$type<PlaybookTriggerConditions>().default({}),
   steps: jsonb("steps").$type<{ id: string; type: string; label: string; config: Record<string, any>; order: number }[]>().default([]),
+  graphNodes: jsonb("graph_nodes").$type<PlaybookGraphNode[]>().default([]),
+  graphEdges: jsonb("graph_edges").$type<PlaybookGraphEdge[]>().default([]),
   isActive: boolean("is_active").default(true).notNull(),
+  isTemplate: boolean("is_template").default(false).notNull(),
   executionCount: integer("execution_count").default(0).notNull(),
   lastExecuted: timestamp("last_executed"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -2594,7 +2681,11 @@ export const threatIntelIocs = pgTable("threat_intel_iocs", {
   context: text("context"),
   malwareFamily: varchar("malware_family", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  tenantTypeValueSourceUniq: unique("threat_intel_iocs_tenant_type_value_source_unique").on(
+    table.tenantId, table.indicatorType, table.indicatorValue, table.source
+  ),
+}));
 
 export const insertThreatIntelIocSchema = createInsertSchema(threatIntelIocs).omit({ id: true, createdAt: true });
 export type ThreatIntelIoc = typeof threatIntelIocs.$inferSelect;
@@ -2871,6 +2962,23 @@ export const tenantIntelNominations = pgTable("tenant_intel_nominations", {
 export const insertTenantIntelNominationSchema = createInsertSchema(tenantIntelNominations).omit({ id: true, createdAt: true, updatedAt: true });
 export type TenantIntelNomination = typeof tenantIntelNominations.$inferSelect;
 export type InsertTenantIntelNomination = z.infer<typeof insertTenantIntelNominationSchema>;
+
+// ── Platform Settings (#182) — global key/value config tunable by admins ─────
+export const platformSettings = pgTable("platform_settings", {
+  key: varchar("key", { length: 128 }).primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  updatedBy: varchar("updated_by", { length: 255 }),
+});
+export type PlatformSetting = typeof platformSettings.$inferSelect;
+
+export const clickHouseIngestMonitorSettingsSchema = z.object({
+  enabled: z.boolean(),
+  thresholdMinutes: z.number().int().min(1).max(1440),
+  sampleWindowSeconds: z.number().int().min(30).max(3600),
+  intervalSeconds: z.number().int().min(30).max(3600),
+});
+export type ClickHouseIngestMonitorSettings = z.infer<typeof clickHouseIngestMonitorSettingsSchema>;
 
 // ── Tenant Intel Sharing Settings (#78) — opt-in/out per tenant ──────────────
 export const tenantIntelSharingSettings = pgTable("tenant_intel_sharing_settings", {
@@ -3210,6 +3318,7 @@ export const platformIntegrations = pgTable("platform_integrations", {
   lastTestedAt: timestamp("last_tested_at"),
   testStatus: varchar("test_status", { length: 20 }).default("untested"), // ok | error | untested
   testMessage: text("test_message"),
+  extraConfig: jsonb("extra_config"),                                  // TAXII/OpenCTI URL, pollInterval, etc.
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
@@ -3378,3 +3487,447 @@ export const ctiIntelReports = pgTable("cti_intel_reports", {
 export const insertCtiIntelReportSchema = createInsertSchema(ctiIntelReports).omit({ id: true, createdAt: true, updatedAt: true });
 export type CtiIntelReport = typeof ctiIntelReports.$inferSelect;
 export type InsertCtiIntelReport = z.infer<typeof insertCtiIntelReportSchema>;
+
+  // ─── TAXII STIX IOCs — indicators polled from external TAXII servers (#154) ───
+  export const taxiiStixIocs = pgTable("taxii_stix_iocs", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    indicatorType: varchar("indicator_type", { length: 50 }).notNull(),
+    indicatorValue: text("indicator_value").notNull(),
+    reputation: varchar("reputation", { length: 30 }).default("malicious"),
+    confidence: integer("confidence").default(70),
+    source: text("source").notNull(),
+    tags: jsonb("tags").default([]),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    rawStix: jsonb("raw_stix"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertTaxiiStixIocSchema = createInsertSchema(taxiiStixIocs).omit({ id: true, createdAt: true, updatedAt: true });
+  export type TaxiiStixIoc = typeof taxiiStixIocs.$inferSelect;
+  export type InsertTaxiiStixIoc = z.infer<typeof insertTaxiiStixIocSchema>;
+
+  // ─── TAXII Threat Actors ────────────────────────────────────────────────────
+  export const taxiiThreatActors = pgTable("taxii_threat_actors", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    aliases: jsonb("aliases").default([]),
+    sophistication: text("sophistication"),
+    primaryMotivation: text("primary_motivation"),
+    country: text("country"),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    description: text("description"),
+    source: text("source").notNull(),
+    tags: jsonb("tags").default([]),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertTaxiiThreatActorSchema = createInsertSchema(taxiiThreatActors).omit({ id: true, createdAt: true, updatedAt: true });
+  export type TaxiiThreatActor = typeof taxiiThreatActors.$inferSelect;
+  export type InsertTaxiiThreatActor = z.infer<typeof insertTaxiiThreatActorSchema>;
+
+  // ─── TAXII Campaigns ────────────────────────────────────────────────────────
+  export const taxiiCampaigns = pgTable("taxii_campaigns", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    description: text("description"),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    objective: text("objective"),
+    source: text("source").notNull(),
+    tags: jsonb("tags").default([]),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertTaxiiCampaignSchema = createInsertSchema(taxiiCampaigns).omit({ id: true, createdAt: true, updatedAt: true });
+  export type TaxiiCampaign = typeof taxiiCampaigns.$inferSelect;
+  export type InsertTaxiiCampaign = z.infer<typeof insertTaxiiCampaignSchema>;
+
+  // ─── TAXII Malware ──────────────────────────────────────────────────────────
+  export const taxiiMalware = pgTable("taxii_malware", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    malwareTypes: jsonb("malware_types").default([]),
+    description: text("description"),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    killChainPhases: text("kill_chain_phases"),
+    source: text("source").notNull(),
+    tags: jsonb("tags").default([]),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertTaxiiMalwareSchema = createInsertSchema(taxiiMalware).omit({ id: true, createdAt: true, updatedAt: true });
+  export type TaxiiMalware = typeof taxiiMalware.$inferSelect;
+  export type InsertTaxiiMalware = z.infer<typeof insertTaxiiMalwareSchema>;
+
+  // ─── OpenCTI IOC Cache — indicators synced from OpenCTI (#154) ─────────────
+  export const openctiIocCache = pgTable("opencti_ioc_cache", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    indicatorType: varchar("indicator_type", { length: 50 }).notNull(),
+    indicatorValue: text("indicator_value").notNull(),
+    reputation: varchar("reputation", { length: 30 }).default("malicious"),
+    confidence: integer("confidence").default(70),
+    score: integer("score").default(0),
+    source: text("source").notNull().default("opencti"),
+    labels: jsonb("labels").default([]),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertOpenctiIocCacheSchema = createInsertSchema(openctiIocCache).omit({ id: true, createdAt: true, updatedAt: true });
+  export type OpenctiIocCache = typeof openctiIocCache.$inferSelect;
+  export type InsertOpenctiIocCache = z.infer<typeof insertOpenctiIocCacheSchema>;
+
+  // ─── OpenCTI Threat Actors Cache ────────────────────────────────────────────
+  export const openctiThreatActors = pgTable("opencti_threat_actors_cache", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    aliases: jsonb("aliases").default([]),
+    description: text("description"),
+    sophistication: text("sophistication"),
+    primaryMotivation: text("primary_motivation"),
+    country: text("country"),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    confidence: integer("confidence").default(50),
+    score: integer("score").default(0),
+    linkedIocCount: integer("linked_ioc_count").default(0),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertOpenctiThreatActorSchema = createInsertSchema(openctiThreatActors).omit({ id: true, createdAt: true, updatedAt: true });
+  export type OpenctiThreatActor = typeof openctiThreatActors.$inferSelect;
+  export type InsertOpenctiThreatActor = z.infer<typeof insertOpenctiThreatActorSchema>;
+
+  // ─── OpenCTI Campaigns Cache ────────────────────────────────────────────────
+  export const openctiCampaigns = pgTable("opencti_campaigns_cache", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    description: text("description"),
+    aliases: jsonb("aliases").default([]),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    objective: text("objective"),
+    confidence: integer("confidence").default(50),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertOpenctiCampaignSchema = createInsertSchema(openctiCampaigns).omit({ id: true, createdAt: true, updatedAt: true });
+  export type OpenctiCampaign = typeof openctiCampaigns.$inferSelect;
+  export type InsertOpenctiCampaign = z.infer<typeof insertOpenctiCampaignSchema>;
+
+  // ─── OpenCTI Malware Cache ──────────────────────────────────────────────────
+  export const openctiMalware = pgTable("opencti_malware_cache", {
+    id: serial("id").primaryKey(),
+    stixId: text("stix_id").notNull().unique(),
+    name: text("name").notNull(),
+    description: text("description"),
+    aliases: jsonb("aliases").default([]),
+    malwareTypes: jsonb("malware_types").default([]),
+    killChainPhases: text("kill_chain_phases"),
+    firstSeen: timestamp("first_seen", { withTimezone: true }),
+    lastSeen: timestamp("last_seen", { withTimezone: true }),
+    confidence: integer("confidence").default(70),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertOpenctiMalwareSchema = createInsertSchema(openctiMalware).omit({ id: true, createdAt: true, updatedAt: true });
+  export type OpenctiMalware = typeof openctiMalware.$inferSelect;
+  export type InsertOpenctiMalware = z.infer<typeof insertOpenctiMalwareSchema>;
+
+  // ─── OpenCTI IOC Context — attribution table (#154) ─────────────────────────
+  // Written by the enrichment pipeline when an IOC is matched in OpenCTI;
+  // links the IOC value to its threat actor / campaign / malware attribution.
+
+  export const openctiIocContext = pgTable("opencti_ioc_context", {
+    id: serial("id").primaryKey(),
+    iocValue: text("ioc_value").notNull(),
+    iocType: text("ioc_type").notNull(),
+    stixId: text("stix_id"),
+    actorName: text("actor_name"),
+    actorStixId: text("actor_stix_id"),
+    campaignName: text("campaign_name"),
+    campaignStixId: text("campaign_stix_id"),
+    malwareFamily: text("malware_family"),
+    malwareStixId: text("malware_stix_id"),
+    confidence: integer("confidence").default(70),
+    score: integer("score").default(0),
+    incidentId: integer("incident_id"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertOpenctiIocContextSchema = createInsertSchema(openctiIocContext).omit({ id: true, createdAt: true, updatedAt: true });
+  export type OpenctiIocContext = typeof openctiIocContext.$inferSelect;
+  export type InsertOpenctiIocContext = z.infer<typeof insertOpenctiIocContextSchema>;
+
+  // ─── Universal Log Ingestion & Parsing (#157) ─────────────────────────────────
+  // Log source registry, device fingerprints, and source health tracking.
+
+  export const logSourceTypeEnum = pgEnum("log_source_type", [
+    "firewall", "ids_ips", "waf", "proxy", "edr", "email_gateway",
+    "database_monitor", "casb", "cloud", "ot_iot", "network_tap",
+    "siem", "identity", "vulnerability_scanner", "custom",
+  ]);
+
+  export const logSourceProtocolEnum = pgEnum("log_source_protocol", [
+    "syslog_udp", "syslog_tcp", "syslog_tls", "http_webhook", "cef", "leef",
+    "json", "xml", "plaintext", "file_upload", "api_pull",
+  ]);
+
+  export const logSources = pgTable("log_sources", {
+    id: serial("id").primaryKey(),
+    tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    sourceType: logSourceTypeEnum("source_type").default("custom").notNull(),
+    protocol: logSourceProtocolEnum("protocol").default("json").notNull(),
+    host: varchar("host", { length: 255 }),
+    port: integer("port"),
+    expectedFormat: varchar("expected_format", { length: 100 }),
+    tags: text("tags").array().default([]),
+    fingerprintId: integer("fingerprint_id"),
+    isActive: boolean("is_active").default(true).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, any>>().default({}),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertLogSourceSchema = createInsertSchema(logSources).omit({ id: true, createdAt: true, updatedAt: true });
+  export type LogSource = typeof logSources.$inferSelect;
+  export type InsertLogSource = z.infer<typeof insertLogSourceSchema>;
+
+  export const deviceFingerprints = pgTable("device_fingerprints", {
+    id: serial("id").primaryKey(),
+    tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    sourceIdentifier: varchar("source_identifier", { length: 255 }).notNull(),
+    vendor: varchar("vendor", { length: 200 }),
+    product: varchar("product", { length: 200 }),
+    logFormat: varchar("log_format", { length: 100 }),
+    eventCategory: varchar("event_category", { length: 100 }),
+    detectedFields: jsonb("detected_fields").$type<string[]>().default([]),
+    sampleLogLines: text("sample_log_lines").array().default([]),
+    aiConfidence: integer("ai_confidence").default(0),
+    aiReasoning: text("ai_reasoning"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertDeviceFingerprintSchema = createInsertSchema(deviceFingerprints).omit({ id: true, createdAt: true, updatedAt: true });
+  export type DeviceFingerprint = typeof deviceFingerprints.$inferSelect;
+  export type InsertDeviceFingerprint = z.infer<typeof insertDeviceFingerprintSchema>;
+
+  export const sourceHealth = pgTable("source_health", {
+    id: serial("id").primaryKey(),
+    sourceId: integer("source_id").notNull().references(() => logSources.id, { onDelete: "cascade" }),
+    tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    eventsPerMin: real("events_per_min").default(0),
+    parseSuccessRate: real("parse_success_rate").default(100),
+    lastSeen: timestamp("last_seen"),
+    errorRate: real("error_rate").default(0),
+    totalEventsToday: integer("total_events_today").default(0),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  });
+
+  export const insertSourceHealthSchema = createInsertSchema(sourceHealth).omit({ id: true, updatedAt: true });
+  export type SourceHealth = typeof sourceHealth.$inferSelect;
+  export type InsertSourceHealth = z.infer<typeof insertSourceHealthSchema>;
+  
+// ─── Attack Category Taxonomy ─────────────────────────────────────────────────
+export const ATTACK_CATEGORIES = [
+  "malware_ransomware",
+  "apt_targeted",
+  "phishing_social_engineering",
+  "spam_bulk_email",
+  "web_application_attack",
+  "network_intrusion",
+  "bot_automated",
+  "ai_generative",
+  "database_attack",
+  "fileless_inmemory",
+  "lateral_movement",
+  "suspicious_user_behavior",
+  "suspicious_network_activity",
+  "cloud_infrastructure",
+  "ot_iot",
+] as const;
+
+export type AttackCategory = typeof ATTACK_CATEGORIES[number];
+
+export const ATTACK_CATEGORY_LABELS: Record<AttackCategory, string> = {
+  malware_ransomware: "Malware & Ransomware",
+  apt_targeted: "APT / Targeted Attacks",
+  phishing_social_engineering: "Phishing & Social Engineering",
+  spam_bulk_email: "Spam & Bulk Email Threats",
+  web_application_attack: "Web Application Attacks",
+  network_intrusion: "Network Intrusion",
+  bot_automated: "BOT & Automated Attack Traffic",
+  ai_generative: "AI-Generative Attacks",
+  database_attack: "Database Attacks",
+  fileless_inmemory: "Fileless & In-Memory Attacks",
+  lateral_movement: "Lateral Movement",
+  suspicious_user_behavior: "Suspicious User Behavior (UEBA)",
+  suspicious_network_activity: "Suspicious Network Activity",
+  cloud_infrastructure: "Cloud & Infrastructure Attacks",
+  ot_iot: "OT/IoT Attacks",
+};
+
+// ─── Attack Detection Records ─────────────────────────────────────────────────
+export const attackDetections = pgTable("attack_detections", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  eventId: integer("event_id").references(() => securityEvents.id, { onDelete: "set null" }),
+  incidentId: integer("incident_id").references(() => incidents.id, { onDelete: "set null" }),
+  attackCategory: varchar("attack_category", { length: 100 }).notNull(),
+  subType: varchar("sub_type", { length: 200 }),
+  confidence: integer("confidence").notNull().default(0),
+  severity: varchar("severity", { length: 20 }).notNull().default("medium"),
+  mitreAttackId: varchar("mitre_attack_id", { length: 50 }),
+  mitreAttackIds: text("mitre_attack_ids").array().default([]),
+  killChainPhase: varchar("kill_chain_phase", { length: 100 }),
+  explanation: text("explanation"),
+  entities: jsonb("entities").$type<{
+    ips: string[];
+    users: string[];
+    hosts: string[];
+    hashes: string[];
+    domains: string[];
+  }>().default({ ips: [], users: [], hosts: [], hashes: [], domains: [] }),
+  signalScore: integer("signal_score").default(0),
+  signals: jsonb("signals").$type<Array<{ name: string; matched: boolean; weight: number; value?: string }>>().default([]),
+  behavioralDeviationScore: integer("behavioral_deviation_score").default(0),
+  attackChainId: varchar("attack_chain_id", { length: 100 }),
+  rawContext: jsonb("raw_context"),
+  detectedAt: timestamp("detected_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAttackDetectionSchema = createInsertSchema(attackDetections).omit({ id: true, createdAt: true, detectedAt: true });
+export type AttackDetection = typeof attackDetections.$inferSelect;
+export type InsertAttackDetection = z.infer<typeof insertAttackDetectionSchema>;
+
+// ─── Attack Chain Groups ──────────────────────────────────────────────────────
+export const attackChainGroups = pgTable("attack_chain_groups", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  chainId: varchar("chain_id", { length: 100 }).notNull().unique(),
+  title: varchar("title", { length: 500 }).notNull(),
+  description: text("description"),
+  attackCategories: text("attack_categories").array().default([]),
+  killChainPhases: text("kill_chain_phases").array().default([]),
+  sharedEntities: jsonb("shared_entities").$type<{
+    ips: string[];
+    users: string[];
+    hosts: string[];
+    hashes: string[];
+  }>().default({ ips: [], users: [], hosts: [], hashes: [] }),
+  eventIds: integer("event_ids").array().default([]),
+  detectionIds: integer("detection_ids").array().default([]),
+  incidentId: integer("incident_id").references(() => incidents.id, { onDelete: "set null" }),
+  overallConfidence: integer("overall_confidence").default(0),
+  severity: varchar("severity", { length: 20 }).default("medium"),
+  timeWindowMinutes: integer("time_window_minutes").default(60),
+  promotedToIncident: boolean("promoted_to_incident").default(false),
+  firstEventAt: timestamp("first_event_at"),
+  lastEventAt: timestamp("last_event_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertAttackChainGroupSchema = createInsertSchema(attackChainGroups).omit({ id: true, createdAt: true, updatedAt: true });
+export type AttackChainGroup = typeof attackChainGroups.$inferSelect;
+export type InsertAttackChainGroup = z.infer<typeof insertAttackChainGroupSchema>;
+
+// ─── Detection Feedback ───────────────────────────────────────────────────────
+export const detectionFeedbackTypeEnum = pgEnum("detection_feedback_type", ["true_positive", "false_positive", "benign"]);
+
+export const detectionFeedback = pgTable("detection_feedback", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  detectionId: integer("detection_id").references(() => attackDetections.id, { onDelete: "set null" }),
+  incidentId: integer("incident_id").references(() => incidents.id, { onDelete: "set null" }),
+  analystUserId: varchar("analyst_user_id", { length: 255 }).notNull(),
+  feedbackType: detectionFeedbackTypeEnum("feedback_type").notNull(),
+  attackCategory: varchar("attack_category", { length: 100 }),
+  originalConfidence: integer("original_confidence"),
+  notes: text("notes"),
+  usedForTraining: boolean("used_for_training").default(false),
+  trainingWeight: real("training_weight").default(1.0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertDetectionFeedbackSchema = createInsertSchema(detectionFeedback).omit({ id: true, createdAt: true });
+export type DetectionFeedback = typeof detectionFeedback.$inferSelect;
+export type InsertDetectionFeedback = z.infer<typeof insertDetectionFeedbackSchema>;
+
+// ─── Per-Category Confidence Thresholds ──────────────────────────────────────
+export const categoryConfidenceThresholds = pgTable("category_confidence_thresholds", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  attackCategory: varchar("attack_category", { length: 100 }).notNull(),
+  minConfidenceThreshold: integer("min_confidence_threshold").default(40),
+  tpCount: integer("tp_count").default(0),
+  fpCount: integer("fp_count").default(0),
+  benignCount: integer("benign_count").default(0),
+  fewShotExamples: jsonb("few_shot_examples").$type<Array<{ event: string; category: string; confidence: number; explanation: string }>>().default([]),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => ({
+  tenantCategoryUniq: unique("category_thresholds_tenant_category_uniq").on(t.tenantId, t.attackCategory),
+}));
+
+export const insertCategoryConfidenceThresholdSchema = createInsertSchema(categoryConfidenceThresholds).omit({ id: true, updatedAt: true });
+export type CategoryConfidenceThreshold = typeof categoryConfidenceThresholds.$inferSelect;
+
+// ── Log Investigation Sessions (Task #162) ───────────────────────────────────
+export const investigationSessions = pgTable("investigation_sessions", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  analystId: varchar("analyst_id", { length: 255 }).notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  sourceMode: varchar("source_mode", { length: 20 }).notNull().default("live"),
+  queryParams: jsonb("query_params").$type<Record<string, any>>().default({}),
+  lastRunAt: timestamp("last_run_at"),
+  resultCount: integer("result_count").default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInvestigationSessionSchema = createInsertSchema(investigationSessions).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertInvestigationSession = z.infer<typeof insertInvestigationSessionSchema>;
+export type InvestigationSession = typeof investigationSessions.$inferSelect;
+
+export const investigationExports = pgTable("investigation_exports", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => investigationSessions.id, { onDelete: "set null" }),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  analystId: varchar("analyst_id", { length: 255 }).notNull(),
+  exportName: varchar("export_name", { length: 255 }),
+  rowCount: integer("row_count").default(0),
+  fileHash: varchar("file_hash", { length: 64 }),
+  s3Key: varchar("s3_key", { length: 500 }),
+  queryParams: jsonb("query_params").$type<Record<string, unknown>>().default({}),
+  bundleData: bytea("bundle_data"),
+  exportedAt: timestamp("exported_at").defaultNow().notNull(),
+});
+
+export const insertInvestigationExportSchema = createInsertSchema(investigationExports).omit({ id: true, exportedAt: true });
+export type InsertInvestigationExport = z.infer<typeof insertInvestigationExportSchema>;
+export type InvestigationExport = typeof investigationExports.$inferSelect;

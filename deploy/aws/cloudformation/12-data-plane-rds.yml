@@ -17,8 +17,7 @@
 # Data plane plane separation:
 #   - Management Aurora (02):  OLTP -- tenants, users, incidents metadata, tickets
 #   - Data Plane Aurora (this): event enrichment state, correlation cache, IOC
-#   - ClickHouse (08):         OLAP -- fast SQL aggregations over raw events
-#   - OpenSearch (04):         Full-text search -- 30-day hot tier
+#   - ClickHouse (08):         OLAP -- fast SQL aggregations over raw events (single source of truth for security events)
 #
 # Depends on:
 #   10-data-plane-ha-vpc.yml  (VpcId, IsolatedSubnet1Id/2Id/3Id, AuroraSecurityGroupId,

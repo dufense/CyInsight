@@ -14,9 +14,12 @@ import {
   ArrowUpDown, Gauge, Zap, RefreshCw, Cable, Building2,
   Radio, Shield, BarChart3, TrendingUp, Package, CircleDot,
   Globe, HardDrive, Archive, MapPin, ArrowLeftRight,
-  Layers, GitMerge, Sliders,
+  Layers, GitMerge, Sliders, Boxes,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -798,7 +801,7 @@ function RegionHealthCards({ data }: { data: DataPlaneHealthResponse }) {
                     <span className="text-[10px] text-muted-foreground">ClickHouse</span>
                   </div>
                   <div className="text-sm font-bold">
-                    <StatusBadge status={region.health.clickHouseStatus === "connected" ? "healthy" : region.health.clickHouseStatus === "degraded" ? "warning" : "disconnected"} />
+                    <StatusBadge status={region.health.clickHouseStatus === "green" ? "healthy" : region.health.clickHouseStatus === "yellow" ? "warning" : "disconnected"} />
                   </div>
                 </div>
                 <div className="rounded-md bg-muted/50 p-2 text-center">
@@ -1049,12 +1052,137 @@ export default function PlatformHealthTab() {
 
       <PipelineStatus data={data} />
 
+      <ClickHouseHealthCard />
+
+      <ClickHouseIngestMonitorSettingsCard />
+
       <QuotaEnginePanel />
 
       <FederatedIntelPanel />
 
       <DataPlaneHealthSection />
     </div>
+  );
+}
+
+// ── ClickHouse Health Card (Task #172) ────────────────────────────────────────
+
+interface ClickHouseHealthData {
+  status: "connected" | "unreachable" | "not_enabled";
+  enabled: boolean;
+  version?: string | null;
+  latencyMs?: number;
+  activeQueries?: number | null;
+  recentInsertCount?: number | null;
+  recentInsertRatePerSec?: number | null;
+  insertRateWindowSeconds?: number;
+  error?: string | null;
+  message?: string;
+  checkedAt: string;
+}
+
+function ClickHouseHealthCard() {
+  const { data, isLoading, refetch, dataUpdatedAt } = useQuery<ClickHouseHealthData>({
+    queryKey: ["/api/platform/health/clickhouse"],
+    refetchInterval: 30000,
+  });
+
+  const status = data?.status ?? "unreachable";
+  const isNotEnabled = status === "not_enabled";
+  const isConnected = status === "connected";
+
+  const accent = isNotEnabled
+    ? "text-muted-foreground"
+    : isConnected
+      ? "text-emerald-500"
+      : "text-red-500";
+
+  const dotStatus = isNotEnabled ? "not_configured" : isConnected ? "connected" : "unreachable";
+  const badgeStatus = isNotEnabled ? "not_configured" : status;
+
+  return (
+    <Card className="border-border/40 bg-card/60" data-testid="clickhouse-health-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Boxes className={`w-4 h-4 ${accent}`} />
+            <CardTitle className="text-sm font-semibold">ClickHouse OLAP</CardTitle>
+            <HealthDot status={dotStatus} />
+            <StatusBadge status={badgeStatus} />
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-muted-foreground">
+              {dataUpdatedAt ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : "—"} • Auto-refresh 30s
+            </span>
+            <Button size="sm" variant="outline" className="h-6 text-[11px] px-2"
+              onClick={() => refetch()} data-testid="button-refresh-clickhouse-health">
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-16" />)}
+          </div>
+        ) : isNotEnabled ? (
+          <div className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 border border-border/30 text-[12px] text-muted-foreground" data-testid="clickhouse-not-enabled">
+            <Boxes className="w-4 h-4 shrink-0 mt-0.5 text-muted-foreground" />
+            <div>
+              <p className="font-medium text-foreground mb-0.5">Not enabled</p>
+              <p>{data?.message ?? "ClickHouse is not configured. Set CLICKHOUSE_URL and CLICKHOUSE_PASSWORD to enable the OLAP analytics tier."}</p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="rounded-lg bg-muted/30 border border-border/30 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Connection</p>
+                <p className={`text-xl font-bold ${isConnected ? "text-emerald-400" : "text-red-400"}`} data-testid="stat-clickhouse-status">
+                  {isConnected ? "Connected" : "Unreachable"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {typeof data?.latencyMs === "number" ? `${data.latencyMs}ms ping` : "—"}
+                </p>
+              </div>
+              <div className="rounded-lg bg-muted/30 border border-border/30 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Version</p>
+                <p className="text-xl font-bold text-foreground font-mono" data-testid="stat-clickhouse-version">
+                  {data?.version ?? "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">SELECT version()</p>
+              </div>
+              <div className="rounded-lg bg-muted/30 border border-border/30 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Active Queries</p>
+                <p className="text-xl font-bold text-foreground" data-testid="stat-clickhouse-active-queries">
+                  {data?.activeQueries ?? "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">system.processes</p>
+              </div>
+              <div className="rounded-lg bg-muted/30 border border-border/30 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Insert Rate</p>
+                <p className="text-xl font-bold text-foreground" data-testid="stat-clickhouse-insert-rate">
+                  {data?.recentInsertRatePerSec != null ? `${data.recentInsertRatePerSec}/s` : "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {data?.recentInsertCount != null && data?.insertRateWindowSeconds
+                    ? `${data.recentInsertCount.toLocaleString()} rows / last ${data.insertRateWindowSeconds}s`
+                    : "no recent inserts"}
+                </p>
+              </div>
+            </div>
+            {!isConnected && data?.error && (
+              <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/5 border border-red-500/20 text-[11px] text-red-400" data-testid="clickhouse-error">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <div className="break-all">{data.error}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1416,6 +1544,170 @@ function FederatedIntelPanel() {
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">No federated intelligence data available.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── ClickHouse Stalled-Ingest Monitor Settings (Task #182) ────────────────────
+
+interface IngestMonitorSettings {
+  enabled: boolean;
+  thresholdMinutes: number;
+  sampleWindowSeconds: number;
+  intervalSeconds: number;
+}
+
+function ClickHouseIngestMonitorSettingsCard() {
+  const { toast } = useToast();
+  const { data, isLoading } = useQuery<{ settings: IngestMonitorSettings }>({
+    queryKey: ["/api/admin/platform/clickhouse-ingest-monitor"],
+  });
+
+  const [draft, setDraft] = useState<IngestMonitorSettings | null>(null);
+
+  const current = data?.settings ?? null;
+  const value = draft ?? current;
+
+  const mutation = useMutation({
+    mutationFn: async (next: IngestMonitorSettings) => {
+      const res = await apiRequest("PATCH", "/api/admin/platform/clickhouse-ingest-monitor", next);
+      return res.json() as Promise<{ settings: IngestMonitorSettings }>;
+    },
+    onSuccess: (resp) => {
+      queryClient.setQueryData(["/api/admin/platform/clickhouse-ingest-monitor"], resp);
+      setDraft(null);
+      toast({ title: "Settings saved", description: "Stalled-ingest monitor updated. Changes apply immediately." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to save", description: err?.message || "Unknown error", variant: "destructive" });
+    },
+  });
+
+  const dirty = !!(draft && current && (
+    draft.enabled !== current.enabled ||
+    draft.thresholdMinutes !== current.thresholdMinutes ||
+    draft.sampleWindowSeconds !== current.sampleWindowSeconds ||
+    draft.intervalSeconds !== current.intervalSeconds
+  ));
+
+  const valid = !!value && (
+    Number.isInteger(value.thresholdMinutes) && value.thresholdMinutes >= 1 && value.thresholdMinutes <= 1440 &&
+    Number.isInteger(value.sampleWindowSeconds) && value.sampleWindowSeconds >= 30 && value.sampleWindowSeconds <= 3600 &&
+    Number.isInteger(value.intervalSeconds) && value.intervalSeconds >= 30 && value.intervalSeconds <= 3600
+  );
+
+  function update(patch: Partial<IngestMonitorSettings>) {
+    if (!value) return;
+    setDraft({ ...value, ...patch });
+  }
+
+  return (
+    <Card className="border-border/40 bg-card/60" data-testid="ingest-monitor-settings-card">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Sliders className="w-4 h-4 text-amber-500" />
+          ClickHouse Stalled-Ingest Alert
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          Tune the background monitor that emails platform admins when ClickHouse insert rate stays at zero.
+          Changes take effect on the next check — no restart required.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {isLoading || !value ? (
+          <div className="space-y-3">
+            <Skeleton className="h-10" />
+            <Skeleton className="h-10" />
+            <Skeleton className="h-10" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between rounded-md border border-border/40 px-3 py-2">
+              <div>
+                <Label htmlFor="ingest-monitor-enabled" className="text-sm font-medium">Monitor enabled</Label>
+                <p className="text-[11px] text-muted-foreground">Disable to suppress all stalled-ingest alerts.</p>
+              </div>
+              <Switch
+                id="ingest-monitor-enabled"
+                checked={value.enabled}
+                onCheckedChange={(v) => update({ enabled: v })}
+                data-testid="switch-monitor-enabled"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="threshold-minutes" className="text-xs font-medium">Alert threshold (minutes)</Label>
+                <Input
+                  id="threshold-minutes"
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={value.thresholdMinutes}
+                  onChange={(e) => update({ thresholdMinutes: parseInt(e.target.value, 10) || 0 })}
+                  data-testid="input-threshold-minutes"
+                />
+                <p className="text-[10px] text-muted-foreground">Fire alert after rate has been 0 for this many minutes (1–1440).</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="sample-window" className="text-xs font-medium">Sample window (seconds)</Label>
+                <Input
+                  id="sample-window"
+                  type="number"
+                  min={30}
+                  max={3600}
+                  value={value.sampleWindowSeconds}
+                  onChange={(e) => update({ sampleWindowSeconds: parseInt(e.target.value, 10) || 0 })}
+                  data-testid="input-sample-window"
+                />
+                <p className="text-[10px] text-muted-foreground">Window used to measure recent insert rate (30–3600).</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="interval-seconds" className="text-xs font-medium">Check interval (seconds)</Label>
+                <Input
+                  id="interval-seconds"
+                  type="number"
+                  min={30}
+                  max={3600}
+                  value={value.intervalSeconds}
+                  onChange={(e) => update({ intervalSeconds: parseInt(e.target.value, 10) || 0 })}
+                  data-testid="input-interval-seconds"
+                />
+                <p className="text-[10px] text-muted-foreground">How often the monitor evaluates rate (30–3600).</p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              {dirty && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setDraft(null)}
+                  disabled={mutation.isPending}
+                  data-testid="button-cancel-monitor-settings"
+                >
+                  Cancel
+                </Button>
+              )}
+              {dirty && !valid && (
+                <span className="text-[11px] text-red-500" data-testid="text-monitor-settings-invalid">
+                  Values out of range — check the limits below each field.
+                </span>
+              )}
+              <Button
+                size="sm"
+                onClick={() => draft && valid && mutation.mutate(draft)}
+                disabled={!dirty || !valid || mutation.isPending}
+                data-testid="button-save-monitor-settings"
+              >
+                {mutation.isPending ? "Saving..." : "Save changes"}
+              </Button>
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>

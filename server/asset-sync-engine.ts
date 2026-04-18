@@ -313,6 +313,6 @@ export function startAssetSyncScheduler(): void {
   };
 
   schedulerInterval = setInterval(runScheduledSync, CHECK_INTERVAL_MS);
-  setTimeout(runScheduledSync, 30000);
-  console.log("[AssetSync] Scheduler started (24h sync cycle, first run in 30s)");
+  setTimeout(runScheduledSync, 180000);
+  console.log("[AssetSync] Scheduler started (24h sync cycle, first run in 3 min)");
 }

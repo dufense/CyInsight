@@ -10,7 +10,7 @@ import {
   startMetricsReporter,
   getLocalMetrics,
 } from "../../../server/kafka/metrics";
-import { normalizeBatch, type NormalizedEvent } from "./normalize";
+import { normalizeBatch, normalizeBatchWithAI, type NormalizedEvent } from "./normalize";
 import { VendorRegistry } from "./vendor-registry";
 
 const PORT = parseInt(process.env.PORT || "5000", 10);
@@ -80,16 +80,13 @@ async function handleBatch(messages: ParsedMessage[]): Promise<void> {
     traceId: msg.value?.traceId || undefined,
   }));
 
-  const result = normalizeBatch(eventsToNormalize);
+  const result = await normalizeBatchWithAI(eventsToNormalize);
 
   if (result.normalized.length > 0) {
     const normalizedMessages: EventMessage[] = result.normalized.map((evt: NormalizedEvent) => ({
       tenantId: evt.tenantId,
       source: SERVICE_NAME,
-      payload: {
-        ...evt,
-        rawPayload: undefined,
-      },
+      payload: evt,
       traceId: evt.traceId || undefined,
     }));
 
@@ -101,6 +98,8 @@ async function handleBatch(messages: ParsedMessage[]): Promise<void> {
     } else {
       recordThroughput(SERVICE_NAME, publishResult.count);
     }
+
+    // CH write is handled by EventWriter (storage service) after PG insert.
   }
 
   if (result.errors.length > 0) {
@@ -197,6 +196,24 @@ async function main(): Promise<void> {
   if (!kafkaStarted) {
     await startDirectMode();
   }
+
+  // Log ClickHouse availability at startup.
+  (async () => {
+    try {
+      const chMod = await import("../../../server/clickhouse-client") as {
+        getClickHouseClient: () => ({ healthCheck: () => Promise<{ status: string }> } & { insertEvents: (rows: unknown[]) => Promise<void> }) | null;
+      };
+      const chClient = chMod.getClickHouseClient();
+      if (chClient) {
+        const health = await chClient.healthCheck().catch(() => ({ status: "error" }));
+        console.log(`[Normalizer] ClickHouse dual-write probe: ${health.status}`);
+      } else {
+        console.log("[Normalizer] ClickHouse dual-write: not configured (CLICKHOUSE_URL not set — skipping hot-tier write)");
+      }
+    } catch {
+      console.log("[Normalizer] ClickHouse dual-write: module unavailable in standalone build — skipping");
+    }
+  })();
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Normalizer] Service listening on port ${PORT}`);

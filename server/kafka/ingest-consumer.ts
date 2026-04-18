@@ -226,6 +226,17 @@ async function tryStartConsumer(): Promise<boolean> {
 
           await publishDownstream(tenantId, source, batchId, result);
 
+          // ── Real-time Attack Detection post-Kafka-ingest ──────────────────────
+          if (result.eventsStored > 0) {
+            import("../attack-detection-pipeline.js").then(({ runBatchDetectionPipeline }) => {
+              runBatchDetectionPipeline(tenantId, Math.min(result.eventsStored, 20)).then(detResult => {
+                if (detResult.detected > 0) {
+                  console.log(`[DetectionPipeline] Kafka post-ingest (tenant ${tenantId}): processed=${detResult.processed}, detected=${detResult.detected}, chained=${detResult.chained}`);
+                }
+              }).catch((e: any) => console.warn(`[DetectionPipeline] Kafka post-ingest error:`, e.message));
+            }).catch(() => {});
+          }
+
           incrementCounter("ingest.consumer.events_processed", events.length, {
             tenantId: String(tenantId),
           });

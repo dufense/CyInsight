@@ -97,14 +97,6 @@ kafkaExternal:
 redis:
   enabled: false
 
-# ── OpenSearch — Azure (self-hosted or Azure Marketplace offer) ────────────
-# Azure does not provide a managed OpenSearch service; use:
-#   Option A: Keep in-cluster OpenSearch (set enabled: true)
-#   Option B: Azure Cognitive Search with OpenSearch-compatible REST adapter
-#   Option C: Elastic Cloud on Azure Marketplace
-opensearch:
-  enabled: true    # or false if using an external OpenSearch-compatible endpoint
-
 # ── Network Policies ───────────────────────────────────────────────────────
 networkPolicies:
   enabled: true

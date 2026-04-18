@@ -223,24 +223,6 @@ redis:
       enabled: true
       minAvailable: 2
 
-opensearch:
-  enabled: true
-  singleNode: false
-  replicas: 3
-  resources:
-    requests:
-      memory: 2Gi
-      cpu: 1000m
-    limits:
-      memory: 8Gi
-      cpu: 4000m
-  pdb:
-    enabled: true
-    minAvailable: 2
-  persistence:
-    size: 200Gi
-    storageClass: vsphere-sc
-
 objectStorage:
   provider: minio
   bucket: ccc-events

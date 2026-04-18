@@ -143,7 +143,7 @@ aws cloudformation describe-stacks \
 
 1. **Enable Fargate Spot** (default): Saves 60-70% on compute costs
 2. **Use Single-AZ RDS**: Saves ~₹9,000/month vs Multi-AZ
-3. **ClickHouse replaces OpenSearch**: Saves ~₹5,000/month and simplifies the stack
+3. **Single-node ClickHouse OLAP**: Lean OLAP footprint that simplifies the stack
 4. **Reserved Capacity**: If you commit to 1 year, save 30-40% on RDS
 
 ## Operations

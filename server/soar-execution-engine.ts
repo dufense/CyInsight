@@ -1,5 +1,28 @@
 import { Pool } from "pg";
 
+// ─── Shared condition evaluator ────────────────────────────────────────────────
+// Used by both the simulation trace (routes.ts) and the real execution engine.
+export interface ConditionConfig {
+  field?: string;
+  operator?: "eq" | "neq" | "contains" | "in";
+  value?: string | string[];
+}
+
+export function evalCondition(config: ConditionConfig | undefined | null, incident: Record<string, unknown> | null): boolean {
+  if (!config?.field) return true;
+  const { field, operator, value } = config;
+  const incVal = incident ? String((incident as Record<string, unknown>)[field] || "").toLowerCase() : "";
+  const cmpVal = String(value || "").toLowerCase();
+  switch (operator) {
+    case "eq":       return incVal === cmpVal;
+    case "neq":      return incVal !== cmpVal;
+    case "contains": return incVal.includes(cmpVal);
+    case "in":       return Array.isArray(value) ? value.map((v) => String(v).toLowerCase()).includes(incVal) : incVal === cmpVal;
+    default:         return true;
+  }
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
 export interface StepResult {
   stepId: string;
   stepLabel: string;
@@ -379,14 +402,90 @@ export async function startPlaybookExecution(opts: {
 }): Promise<{ execId: string; dbId?: number }> {
   const { pool, playbook, tenantId, incidentId, triggeredBy, dryRun } = opts;
   const execId = `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // Resolve graph nodes/edges for visual playbooks; fall back to linear steps
+  const graphNodes: any[] = Array.isArray(playbook.graph_nodes) && playbook.graph_nodes.length > 0 ? playbook.graph_nodes : [];
+  const graphEdges: any[] = Array.isArray(playbook.graph_edges) ? playbook.graph_edges : [];
   const steps: any[] = Array.isArray(playbook.steps) ? playbook.steps : [];
 
-  const initialStepResults: StepResult[] = steps.map(s => ({
+  // Build ordered execution list from graph (BFS from trigger node) or fallback to linear steps
+  const buildGraphSteps = (nodes: any[], edges: any[], incident: any | null): any[] => {
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    const edgeMap = new Map<string, any[]>();
+    for (const e of edges) {
+      if (!edgeMap.has(e.from)) edgeMap.set(e.from, []);
+      edgeMap.get(e.from)!.push(e);
+    }
+    // Use the shared module-level evalCondition instead of an inline duplicate
+    const ordered: any[] = [];
+    const visited = new Set<string>();
+    const queue: string[] = [];
+    const startNode = nodes.find(n => n.type === 'trigger') || nodes[0];
+    if (startNode) queue.push(startNode.id);
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+      const node = nodeMap.get(nodeId);
+      if (!node) continue;
+      // Map graph node type to an executable step type.
+      // For 'action' nodes, prefer node.config.actionType (analyst-configured) with fallback chain.
+      // Supported step types in executeStep: isolate_asset, block_ioc, create_ticket, assign_agent,
+      //   run_ai_analysis, update_severity, add_watchlist, custom_webhook, notify
+      let resolvedType: string;
+      if (node.type === 'action') {
+        // Use analyst-configured actionType if present; fallback to config.type, then custom_webhook
+        resolvedType = node.config?.actionType || node.config?.type || 'custom_webhook';
+      } else if (node.type === 'notification') {
+        resolvedType = 'notify';
+      } else if (node.type === 'ai_enrichment') {
+        resolvedType = 'run_ai_analysis';
+      } else if (node.type === 'trigger') {
+        resolvedType = '__trigger__';
+      } else if (node.type === 'condition') {
+        resolvedType = '__condition__';
+      } else if (node.type === 'end') {
+        resolvedType = '__end__';
+      } else {
+        resolvedType = node.type;
+      }
+      ordered.push({
+        id: node.id, type: resolvedType, label: node.label,
+        config: node.config || {}, _graphNodeType: node.type,
+      });
+      const outEdges = edgeMap.get(nodeId) || [];
+      for (const edge of outEdges) {
+        if (node.type === 'condition') {
+          const cr = evalCondition(node.config?.condition as ConditionConfig, incident as Record<string, unknown> | null);
+          if ((edge.fromPort === 'true' && cr) || (edge.fromPort === 'false' && !cr) || edge.fromPort === 'default') {
+            queue.push(edge.to);
+          }
+        } else {
+          queue.push(edge.to);
+        }
+      }
+    }
+    return ordered;
+  };
+
+  // Fetch incident for condition evaluation if needed
+  let incident: any = null;
+  if (graphNodes.length > 0 && incidentId) {
+    try {
+      const incRes = await pool.query('SELECT * FROM incidents WHERE id=$1 AND tenant_id=$2', [incidentId, tenantId]);
+      incident = incRes.rows[0] || null;
+    } catch { /* non-fatal: conditions will evaluate with null incident */ }
+  }
+
+  // Effective steps: graph-derived (ordered BFS) or linear
+  const effectiveSteps: any[] = graphNodes.length > 0 ? buildGraphSteps(graphNodes, graphEdges, incident) : steps;
+
+  const initialStepResults: StepResult[] = effectiveSteps.map(s => ({
     stepId: s.id,
     stepLabel: s.label || s.type,
     stepType: s.type,
     status: "pending" as const,
-    message: "Waiting to execute",
+    message: s._graphNodeType === '__trigger__' ? "Trigger node" : s._graphNodeType === '__condition__' ? "Condition node" : s._graphNodeType === '__end__' ? "End node" : "Waiting to execute",
     dryRun,
   }));
 
@@ -420,13 +519,18 @@ export async function startPlaybookExecution(opts: {
     let anyFailed = false;
     const context = { incidentId, incidentName: playbook.name };
 
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
+    for (let i = 0; i < effectiveSteps.length; i++) {
+      const step = effectiveSteps[i];
       state.steps[i].status = "running";
       state.steps[i].startedAt = new Date().toISOString();
 
       const stepStart = Date.now();
-      const result = await executeStep(step, pool, tenantId, context, dryRun);
+      // Skip meta-nodes (trigger/condition/end) — they are graph routing nodes, not actionable steps
+      // type is resolved to '__trigger__', '__condition__', or '__end__' for graph meta-nodes
+      const isMetaNode = ['__trigger__', '__condition__', '__end__'].includes(step.type);
+      const result = isMetaNode
+        ? { success: true, message: `${step.label || step.type} (graph routing node)`, action: step.type, target: step.label }
+        : await executeStep(step, pool, tenantId, context, dryRun);
       const durationMs = Date.now() - stepStart;
 
       state.steps[i] = {

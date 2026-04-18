@@ -28,7 +28,7 @@ export interface EventRecord {
   normalizedAt?: string;
   enrichedAt?: string;
   correlatedAt?: string;
-  // Enriched ClickHouse columns (mapped from incoming payload)
+  // Enriched fields — populated from payload and forwarded to ClickHouse indexer
   host?: string;
   srcIp?: string;
   dstIp?: string;
@@ -46,6 +46,8 @@ export interface WriteResult {
   duplicates: number;
   errors: number;
   errorMessages: string[];
+  /** Hashes of the events that were actually inserted (not rejected by ON CONFLICT). */
+  insertedHashes?: Set<string>;
 }
 
 export function computeEventHash(event: EventRecord): string {
@@ -63,6 +65,49 @@ export function computeEventHash(event: EventRecord): string {
 }
 
 const BATCH_SIZE = 500;
+
+/** Best-effort ClickHouse write after each successful PG batch (non-fatal). */
+async function tryClickHouseDualWrite(events: EventRecord[], insertedCount: number): Promise<void> {
+  if (insertedCount === 0) return;
+  let chClient: { insertEvents: (rows: unknown[]) => Promise<void> } | null = null;
+  try {
+    // Use a resolved absolute path to avoid relative-path ambiguity when this
+    // module is loaded from different working directories.
+    const chModule = await import("../../../server/clickhouse-client") as {
+      getClickHouseClient: () => { insertEvents: (rows: unknown[]) => Promise<void> } | null;
+    };
+    chClient = chModule.getClickHouseClient();
+  } catch {
+    // Module not found (e.g. standalone storage service build) — skip silently.
+    return;
+  }
+  if (!chClient) return;
+
+  const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+  const IPV6_RE = /^[0-9a-fA-F:]+$/;
+  const validIp = (v: string | null | undefined): string | undefined =>
+    v && (IPV4_RE.test(v) || IPV6_RE.test(v)) ? v : undefined;
+
+  const chPayload = events.map((e) => ({
+    event_id:        computeEventHash(e),
+    tenant_id:       e.tenantId,
+    event_type:      e.eventType,
+    source_type:     e.sourceType ?? "",
+    severity:        e.severity,
+    host:            e.asset ?? "",
+    src_ip:          validIp(e.attacker),
+    dst_ip:          validIp(e.target),
+    user_name:       e.attacker && !validIp(e.attacker) ? e.attacker : "",
+    mitre_tactic:    e.mitreTactic ?? "",
+    mitre_technique: e.mitreTechnique ?? "",
+    raw_event:       e.rawPayload ? JSON.stringify(e.rawPayload) : "",
+    ingested_at:     e.occurredAt ?? new Date().toISOString(),
+  }));
+
+  chClient.insertEvents(chPayload).catch((err: Error) => {
+    console.warn(`[EventWriter] ClickHouse write error (non-fatal): ${err.message}`);
+  });
+}
 
 export class EventWriter {
   private pool: any;
@@ -86,6 +131,16 @@ export class EventWriter {
       result.duplicates += chunkResult.duplicates;
       result.errors += chunkResult.errors;
       result.errorMessages.push(...chunkResult.errorMessages);
+
+      if (chunkResult.inserted > 0) {
+        const insertedHashes = chunkResult.insertedHashes;
+        const newEvents = insertedHashes && insertedHashes.size > 0
+          ? chunk.filter(e => insertedHashes.has(computeEventHash(e)))
+          : chunk;
+        if (newEvents.length > 0) {
+          await tryClickHouseDualWrite(newEvents, chunkResult.inserted);
+        }
+      }
     }
 
     this.totalWritten += result.inserted;
@@ -149,11 +204,16 @@ export class EventWriter {
           event_hash, occurred_at, pipeline_status, stored_at
         ) VALUES ${values.join(", ")}
         ON CONFLICT (event_hash) DO NOTHING
+        RETURNING event_hash
       `;
 
       const res = await this.pool.query(query, params);
       result.inserted = res.rowCount || 0;
       result.duplicates = events.length - result.inserted;
+      // Track which hashes were actually persisted so dual-write can filter.
+      result.insertedHashes = new Set<string>(
+        (res.rows as Array<{ event_hash: string }>).map(r => r.event_hash),
+      );
     } catch (err: any) {
       result.errors = events.length;
       result.errorMessages.push(err.message);

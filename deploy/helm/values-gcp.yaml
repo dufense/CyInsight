@@ -84,10 +84,6 @@ kafkaExternal:
 redis:
   enabled: false   # use Memorystore; set REDIS_URL in the secret
 
-# ── OpenSearch — Google Cloud (Elasticsearch via GCP Marketplace or self-hosted) ─
-opensearch:
-  enabled: true    # or set to false and use OPENSEARCH_URL env var
-
 # ── Network Policies ───────────────────────────────────────────────────────
 networkPolicies:
   enabled: true

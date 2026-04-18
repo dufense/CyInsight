@@ -1403,6 +1403,7 @@ export default function DashboardPage() {
   const fmt = useTenantDateFormatter();
   const qc = useQueryClient();
   const [timeRange, setTimeRange] = useState("all");
+  const [endpointTimeRange, setEndpointTimeRange] = useState("24h");
   const [liveMode, setLiveMode] = useState(false);
   const [location] = useLocation();
   const getTabFromUrl = useCallback(() => {
@@ -1438,6 +1439,17 @@ export default function DashboardPage() {
     enabled: !!currentTenant,
     refetchInterval: liveMode ? 5000 : 60000,
   });
+  const { data: endpointStats } = useQuery<any>({
+    queryKey: ["/api/dashboard", currentTenant?.id, "endpoint", endpointTimeRange],
+    queryFn: async () => {
+      const res = await fetch(`/api/dashboard/${currentTenant!.id}?timeRange=${endpointTimeRange}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed");
+      return res.json();
+    },
+    enabled: !!currentTenant?.id && activeTab === "endpoint",
+    refetchInterval: liveMode ? 5000 : 60000,
+  });
+  const ep = endpointStats ?? stats;
   const { data: assetsData, isLoading: assetsLoading } = useQuery<any>({
     queryKey: ["/api/assets", currentTenant?.id],
     enabled: !!currentTenant?.id,
@@ -1679,6 +1691,18 @@ export default function DashboardPage() {
     ...stats,
   };
 
+  const epS = {
+    ...s,
+    endpointRemediation: ep?.endpointRemediation ?? s.endpointRemediation,
+    endpointTotal: ep?.endpointTotal ?? s.endpointTotal,
+    endpointIncidentByType: ep?.endpointIncidentByType ?? s.endpointIncidentByType,
+    endpointByThreat: ep?.endpointByThreat ?? s.endpointByThreat,
+    endpointThreatVectors: ep?.endpointThreatVectors ?? s.endpointThreatVectors,
+    endpointActions: ep?.endpointActions ?? s.endpointActions,
+    endpointLogSources: ep?.endpointLogSources ?? s.endpointLogSources,
+    topInfectedHosts: ep?.topInfectedHosts ?? s.topInfectedHosts,
+  };
+
   return (
     <div className="space-y-5 p-4 md:p-6 overflow-y-auto h-full" ref={dashboardRef}>
       <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -1731,7 +1755,7 @@ export default function DashboardPage() {
         stats={stats ? {
           criticalEvents: s.criticalEvents,
           openIncidents: s.openIncidents,
-          eventsPerHour: Math.round((s.totalEvents || 0) / 24),
+          eventsPerHour: parseFloat(((s.totalEvents || 0) / (timeRange === "1h" ? 1 : timeRange === "24h" ? 24 : timeRange === "7d" ? 168 : timeRange === "30d" ? 720 : timeRange === "90d" ? 2160 : 24)).toFixed(1)),
           slaBreachCount: stats.slaBreachCount ?? 0,
           avgRiskScore: s.avgRiskScore,
           severityCounts: stats.severityCounts,
@@ -3779,7 +3803,7 @@ export default function DashboardPage() {
             <div className="relative flex flex-col sm:flex-row items-start sm:items-center gap-4">
               <div className="flex-shrink-0">
                 {(() => {
-                  const rate = s.endpointRemediation?.rate || 0;
+                  const rate = epS.endpointRemediation?.rate || 0;
                   const r = 36; const circ = 2 * Math.PI * r;
                   const color = rate >= 80 ? "#22c55e" : rate >= 60 ? "#f59e0b" : "#ef4444";
                   return (
@@ -3797,10 +3821,10 @@ export default function DashboardPage() {
               </div>
               <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {[
-                  { label: "Total Events", value: s.endpointRemediation?.total || s.endpointTotal || 0, color: "#ef4444", icon: Monitor },
-                  { label: "Remediated", value: s.endpointRemediation?.remediated || 0, color: "#22c55e", icon: ShieldCheck },
-                  { label: "Auto-Remediation", value: `${s.endpointRemediation?.autoPct || 0}%`, color: "#3b82f6", icon: Zap },
-                  { label: "Unresolved", value: s.endpointRemediation?.none || 0, color: "#f59e0b", icon: ShieldOff },
+                  { label: "Total Events", value: epS.endpointRemediation?.total || epS.endpointTotal || 0, color: "#ef4444", icon: Monitor },
+                  { label: "Remediated", value: epS.endpointRemediation?.remediated || 0, color: "#22c55e", icon: ShieldCheck },
+                  { label: "Auto-Remediation", value: `${epS.endpointRemediation?.autoPct || 0}%`, color: "#3b82f6", icon: Zap },
+                  { label: "Unresolved", value: epS.endpointRemediation?.none || 0, color: "#f59e0b", icon: ShieldOff },
                 ].map((m) => (
                   <div key={m.label} className="bg-muted/50 rounded-lg p-2.5 border">
                     <div className="text-[9px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">{m.label}</div>
@@ -3820,17 +3844,17 @@ export default function DashboardPage() {
                   { label: "All", value: "all" },
                 ] as const).map(t => (
                   <button key={t.value} data-testid={`timeline-${t.label}`}
-                    onClick={() => setTimeRange(t.value)}
-                    className={`px-2 py-1 text-[9px] font-medium rounded transition-colors ${timeRange === t.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground hover:bg-muted"}`}
+                    onClick={() => setEndpointTimeRange(t.value)}
+                    className={`px-2 py-1 text-[9px] font-medium rounded transition-colors ${endpointTimeRange === t.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground hover:bg-muted"}`}
                   >{t.label}</button>
                 ))}
               </div>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <Top10 title="Threat Types" data={s.endpointIncidentByType?.length ? s.endpointIncidentByType : s.endpointByThreat} icon={Bug}
+            <Top10 title="Threat Types" data={epS.endpointIncidentByType?.length ? epS.endpointIncidentByType : epS.endpointByThreat} icon={Bug}
               onItemClick={(item) => openDrilldown("threat", item.name, `Threat: ${item.name}`, "endpoint")} />
-            <Top10 title="Top Infected Hosts" data={s.topInfectedHosts} icon={Monitor}
+            <Top10 title="Top Infected Hosts" data={epS.topInfectedHosts} icon={Monitor}
               onItemClick={(item) => openDrilldown("target", item.name, `Host: ${item.name}`, "endpoint")} />
             <Card data-testid="threat-vectors-enhanced">
               <CardHeader className="pb-2 pt-4 px-4">
@@ -3841,9 +3865,9 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent className="pt-0 px-4 pb-4">
                 <div className="space-y-2.5">
-                  {(s.endpointThreatVectors || []).map((item: any, idx: number) => {
+                  {(epS.endpointThreatVectors || []).map((item: any, idx: number) => {
                     const TIcon = getThreatIcon(item.name);
-                    const maxCount = Math.max(...(s.endpointThreatVectors || []).map((i: any) => i.count), 1);
+                    const maxCount = Math.max(...(epS.endpointThreatVectors || []).map((i: any) => i.count), 1);
                     const pct = Math.round((item.count / maxCount) * 100);
                     const color = PALETTE[idx % PALETTE.length];
                     return (
@@ -3870,7 +3894,7 @@ export default function DashboardPage() {
             <ExpandableCard title="EDR Action Distribution"
               headerExtra={<ChartTypeSelector active={ct("edrActions", "pie")} onChange={(v) => setCt("edrActions", v)} />}>
               <FlexChart
-                data={s.endpointActions}
+                data={epS.endpointActions}
                 chartType={ct("edrActions", "pie")}
                 dataKey="value"
                 height={250}
@@ -3880,7 +3904,7 @@ export default function DashboardPage() {
             <ExpandableCard title="EDR Platforms"
               headerExtra={<ChartTypeSelector active={ct("edrPlatforms", "pie")} onChange={(v) => setCt("edrPlatforms", v)} />}>
               <FlexChart
-                data={s.endpointLogSources.map((src: any) => ({ name: src.name, value: src.count }))}
+                data={epS.endpointLogSources.map((src: any) => ({ name: src.name, value: src.count }))}
                 chartType={ct("edrPlatforms", "pie")}
                 dataKey="value"
                 height={250}

@@ -40,7 +40,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "npm run build && node --max-old-space-size=512 start-prod.js"
+args = "npm run build && node --max-old-space-size=1536 start-prod.js"
 waitForPort = 5000
 
 [agent]

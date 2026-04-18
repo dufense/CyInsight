@@ -26,6 +26,10 @@ x-data-plane-env: &data-plane-env
   REGION: ${DATA_PLANE_REGION:-local-1}
   REGION_NAME: ${DATA_PLANE_REGION_NAME:-On-Premises (Local)}
   MANAGEMENT_PLANE_URL: ${MANAGEMENT_PLANE_URL:-http://nginx:80}
+  CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+  CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-ccc}
 
 x-restart-policy: &restart-policy
   restart: unless-stopped
@@ -333,6 +337,35 @@ services:
           cpus: "0.5"
           memory: 1G
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    <<: *restart-policy
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-ccc}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_TCP_PORT:-9000}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      <<: *healthcheck-defaults
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
   minio:
     image: minio/minio:latest
     <<: *restart-policy
@@ -356,72 +389,6 @@ services:
         reservations:
           cpus: "0.25"
           memory: 256M
-
-  opensearch-1:
-    image: opensearchproject/opensearch:2.12.0
-    <<: *restart-policy
-    environment:
-      cluster.name: secureops-onprem
-      node.name: opensearch-1
-      discovery.seed_hosts: opensearch-1,opensearch-2
-      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
-      DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: "${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}"
-      bootstrap.memory_lock: "true"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    ports:
-      - "${OPENSEARCH_PORT:-9200}:9200"
-    volumes:
-      - opensearch_data_1:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      <<: *healthcheck-defaults
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-        reservations:
-          cpus: "0.5"
-          memory: 1G
-
-  opensearch-2:
-    image: opensearchproject/opensearch:2.12.0
-    <<: *restart-policy
-    environment:
-      cluster.name: secureops-onprem
-      node.name: opensearch-2
-      discovery.seed_hosts: opensearch-1,opensearch-2
-      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
-      DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: "${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}"
-      bootstrap.memory_lock: "true"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    volumes:
-      - opensearch_data_2:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      <<: *healthcheck-defaults
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-        reservations:
-          cpus: "0.5"
-          memory: 1G
 
   nginx:
     image: nginx:1.27-alpine
@@ -664,7 +631,6 @@ services:
       PORT: 5000
       SERVICE_NAME: storage
       DATABASE_URL: ${DATAPLANE_DATABASE_URL:-postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@data-plane-db:5432/secureops_events}
-      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch-1:9200}
       BATCH_SIZE: ${STORAGE_BATCH_SIZE:-500}
       BACKPRESSURE_LATENCY_MS: ${BACKPRESSURE_LATENCY_MS:-5000}
       HOT_RETENTION_DAYS: ${HOT_RETENTION_DAYS:-90}
@@ -676,8 +642,6 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
     depends_on:
       data-plane-db:
-        condition: service_healthy
-      opensearch-1:
         condition: service_healthy
       kafka-1:
         condition: service_healthy
@@ -705,7 +669,6 @@ services:
       PLANE: data
       SERVICE_NAME: data-plane
       DATABASE_URL: ${DATAPLANE_DATABASE_URL:-postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@data-plane-db:5432/secureops_events}
-      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch-1:9200}
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-secureops-events-local}
       CLOUD_STORAGE_PROVIDER: ${CLOUD_STORAGE_PROVIDER:-minio}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
@@ -713,8 +676,6 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
     depends_on:
       data-plane-db:
-        condition: service_healthy
-      opensearch-1:
         condition: service_healthy
       kafka-1:
         condition: service_healthy
@@ -748,9 +709,7 @@ volumes:
     driver: local
   minio_data:
     driver: local
-  opensearch_data_1:
-    driver: local
-  opensearch_data_2:
+  clickhouse_data:
     driver: local
   management_data:
     driver: local

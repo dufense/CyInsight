@@ -1,4 +1,5 @@
 import { VendorRegistry, type VendorDetectionResult, type EventType } from "./vendor-registry";
+import { parseRawLog, parsedEventToSecurityEvent, type ParsedSecurityEvent } from "../../../server/ai-log-parser";
 
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
@@ -28,6 +29,10 @@ export interface NormalizedEvent {
   traceId: string | null;
   normalizedBy: "deterministic" | "ai-fallback" | "generic";
   vendorConfidence: number;
+  parseConfidence: number | null;
+  needsReview: boolean;
+  aiReasoning: string | null;
+  rawLog: string | null;
 }
 
 export interface NormalizationResult {
@@ -513,8 +518,108 @@ export function normalizeEvent(
     traceId,
     normalizedBy: method,
     vendorConfidence: detection?.confidence || 0,
+    parseConfidence: null,
+    needsReview: false,
+    aiReasoning: null,
+    rawLog: rawData.rawMessage || rawData.raw || rawData.message || null,
   };
 
+  return { event, method };
+}
+
+export async function normalizeEventWithAI(
+  rawData: Record<string, any>,
+  tenantId: number,
+  traceId: string | null = null
+): Promise<{ event: NormalizedEvent; method: "deterministic" | "ai-fallback" | "generic" }> {
+  const detection = vendorRegistry.detect(rawData);
+
+  if (detection) {
+    const normalizer = DETERMINISTIC_NORMALIZERS[detection.vendor];
+    if (normalizer) {
+      const partial = normalizer(rawData);
+      const event: NormalizedEvent = {
+        eventType: partial.eventType || "endpoint",
+        severity: partial.severity || "medium",
+        threat: partial.threat || null,
+        target: partial.target || null,
+        attacker: partial.attacker || null,
+        asset: partial.asset || null,
+        app: partial.app || null,
+        description: partial.description || null,
+        threatVector: partial.threatVector || null,
+        mitreTactic: partial.mitreTactic || null,
+        mitreTechnique: partial.mitreTechnique || null,
+        action: partial.action || null,
+        sourceType: partial.sourceType || null,
+        logSource: partial.logSource || null,
+        sender: partial.sender || null,
+        recipient: partial.recipient || null,
+        protocol: partial.protocol || null,
+        country: partial.country || null,
+        riskScore: partial.riskScore || null,
+        rawPayload: rawData,
+        occurredAt: rawData.timestamp || rawData.occurredAt || rawData.created_at || new Date().toISOString(),
+        tenantId,
+        traceId,
+        normalizedBy: "deterministic",
+        vendorConfidence: detection.confidence,
+        parseConfidence: null,
+        needsReview: false,
+        aiReasoning: null,
+        rawLog: rawData.rawMessage || rawData.raw || rawData.message || null,
+      };
+      return { event, method: "deterministic" };
+    }
+  }
+
+  const rawMessage: string | undefined =
+    rawData.rawMessage ||
+    rawData.message ||
+    rawData.raw ||
+    (typeof rawData === "object" && Object.keys(rawData).length === 1 ? String(Object.values(rawData)[0]) : undefined);
+
+  if (rawMessage && rawMessage.length > 0) {
+    try {
+      const parsed = await parseRawLog(rawMessage);
+      const mapped = parsedEventToSecurityEvent(parsed, tenantId);
+      const event: NormalizedEvent = {
+        eventType: mapped.eventType as EventType,
+        severity: mapped.severity as Severity,
+        threat: mapped.threat || null,
+        target: mapped.target || null,
+        attacker: mapped.attacker || null,
+        asset: mapped.asset || null,
+        app: null,
+        description: mapped.description || null,
+        threatVector: mapped.threatVector || null,
+        mitreTactic: mapped.mitreTactic || null,
+        mitreTechnique: mapped.mitreTechnique || null,
+        action: mapped.action || null,
+        sourceType: mapped.sourceType || null,
+        logSource: mapped.logSource || null,
+        sender: null,
+        recipient: null,
+        protocol: mapped.protocol || null,
+        country: mapped.country || null,
+        riskScore: mapped.riskScore || null,
+        rawPayload: { ...rawData, ...(mapped.rawPayload || {}) },
+        occurredAt: mapped.occurredAt ? mapped.occurredAt.toISOString() : new Date().toISOString(),
+        tenantId,
+        traceId,
+        normalizedBy: "ai-fallback",
+        vendorConfidence: parsed.parseConfidence ?? 0,
+        parseConfidence: parsed.parseConfidence ?? null,
+        needsReview: parsed.needsReview ?? false,
+        aiReasoning: parsed.aiReasoning ?? null,
+        rawLog: rawMessage,
+      };
+      return { event, method: "ai-fallback" };
+    } catch {
+    }
+  }
+
+  const { event, method } = normalizeEvent(rawData, tenantId, traceId);
   return { event, method };
 }
 
@@ -542,12 +647,122 @@ export function normalizeBatch(
       } else {
         result.stats.generic++;
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       result.stats.failed++;
       result.errors.push({
         index: i,
-        error: err.message || "Unknown normalization error",
+        error: err instanceof Error ? err.message : "Unknown normalization error",
         rawData: rawEvent.data,
+      });
+    }
+  }
+
+  return result;
+}
+
+const AI_BATCH_CONCURRENCY = parseInt(process.env.AI_NORMALIZATION_CONCURRENCY || "5", 10);
+
+async function runWithConcurrency<T>(
+  items: Array<() => Promise<T>>,
+  concurrency: number
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(items.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      try {
+        results[i] = { status: "fulfilled", value: await items[i]() };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
+function isPreParsedPayload(data: Record<string, any>): boolean {
+  return (
+    typeof data.eventType === "string" &&
+    typeof data.tenantId === "number" &&
+    (typeof data.parseConfidence === "number" || typeof data.needsReview === "boolean")
+  );
+}
+
+function passThruPreParsed(
+  data: Record<string, any>,
+  tenantId: number,
+  traceId: string | null
+): { event: NormalizedEvent; method: "deterministic" | "ai-fallback" | "generic" } {
+  const event: NormalizedEvent = {
+    eventType: (data.eventType as EventType) || "endpoint",
+    severity: (data.severity as Severity) || "medium",
+    threat: data.threat || null,
+    target: data.target || null,
+    attacker: data.attacker || null,
+    asset: data.asset || null,
+    app: data.app || null,
+    description: data.description || null,
+    threatVector: data.threatVector || null,
+    mitreTactic: data.mitreTactic || null,
+    mitreTechnique: data.mitreTechnique || null,
+    action: data.action || null,
+    sourceType: data.sourceType || null,
+    logSource: data.logSource || null,
+    sender: data.sender || null,
+    recipient: data.recipient || null,
+    protocol: data.protocol || null,
+    country: data.country || null,
+    riskScore: data.riskScore || null,
+    rawPayload: data.rawPayload || {},
+    occurredAt: data.occurredAt || new Date().toISOString(),
+    tenantId,
+    traceId,
+    normalizedBy: "ai-fallback",
+    vendorConfidence: data.parseConfidence ?? 0,
+    parseConfidence: typeof data.parseConfidence === "number" ? data.parseConfidence : null,
+    needsReview: data.needsReview === true,
+    aiReasoning: data.aiReasoning || null,
+    rawLog: data.rawLog || null,
+  };
+  return { event, method: "ai-fallback" };
+}
+
+export async function normalizeBatchWithAI(
+  events: Array<{ data: Record<string, any>; tenantId: number; traceId?: string }>
+): Promise<NormalizationResult> {
+  const result: NormalizationResult = {
+    normalized: [],
+    errors: [],
+    stats: { total: events.length, deterministic: 0, aiFallback: 0, generic: 0, failed: 0 },
+  };
+
+  const tasks = events.map((rawEvent) => () => {
+    if (isPreParsedPayload(rawEvent.data)) {
+      return Promise.resolve(
+        passThruPreParsed(rawEvent.data, rawEvent.tenantId, rawEvent.traceId || null)
+      );
+    }
+    return normalizeEventWithAI(rawEvent.data, rawEvent.tenantId, rawEvent.traceId || null);
+  });
+
+  const settled = await runWithConcurrency(tasks, AI_BATCH_CONCURRENCY);
+
+  for (let i = 0; i < settled.length; i++) {
+    const res = settled[i];
+    if (res.status === "fulfilled") {
+      const { event, method } = res.value;
+      result.normalized.push(event);
+      if (method === "deterministic") result.stats.deterministic++;
+      else if (method === "ai-fallback") result.stats.aiFallback++;
+      else result.stats.generic++;
+    } else {
+      result.stats.failed++;
+      result.errors.push({
+        index: i,
+        error: res.reason instanceof Error ? res.reason.message : "Unknown normalization error",
+        rawData: events[i].data,
       });
     }
   }

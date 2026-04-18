@@ -21,7 +21,3 @@ dependencies:
     version: "18.x.x"
     repository: https://charts.bitnami.com/bitnami
     condition: redis.enabled
-  - name: opensearch
-    version: "2.x.x"
-    repository: https://opensearch-project.github.io/helm-charts
-    condition: opensearch.enabled

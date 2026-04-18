@@ -6,14 +6,19 @@
  * `security_events_hourly_stats` aggregating materialized view) exist and
  * handles batched INSERTs from the storage microservice.
  *
+ * Scalability targets:
+ *   - Billions of events across all tenants
+ *   - Thousands of tenants (per-tenant partition pruning via tenant_id in ORDER BY)
+ *   - Millions of log sources (log_source stored as String, not LowCardinality)
+ *
  * Column mapping notes (storage → ClickHouse):
- *   - asset           → host (new enriched column) + asset (legacy)
- *   - attacker        → src_ip (new enriched column) + attacker (legacy IPv4)
- *   - sourceType / logSource → source_type (new enriched column) + log_source (legacy)
- *   - occurredAt      → occurred_at (legacy) + ingested_at (new enriched)
- *   - rawPayload      → raw_event (JSON string)
+ *   - asset           → host (enriched) + asset (legacy)
+ *   - attacker        → src_ip (enriched) + attacker (legacy)
+ *   - sourceType      → source_type (enriched) + log_source (legacy)
+ *   - occurredAt      → occurred_at (legacy) + ingested_at (enriched)
+ *   - rawPayload      → raw_event (JSON string, ZSTD compressed)
  *   - sigmaMatches    → iocs (JSON string)
- *   - riskScore       → risk_score (legacy) + confidence_score (new enriched)
+ *   - riskScore       → risk_score (legacy) + confidence_score (enriched)
  */
 
 import type { EventRecord } from "./event-writer";
@@ -37,6 +42,8 @@ export interface ClickHouseStats {
   totalIndexed: number;
   totalErrors: number;
   table: string;
+  circuitOpen: boolean;
+  lastErrorMs: number;
 }
 
 interface EventSearchParams {
@@ -62,108 +69,152 @@ interface EventSearchResult {
   totalPages: number;
 }
 
+// ── Circuit Breaker ───────────────────────────────────────────────────────────
+const CIRCUIT_FAILURE_THRESHOLD = 5;
+const CIRCUIT_OPEN_MS = 30_000;
+
 export class ClickHouseIndexer {
   private config: ClickHouseConfig;
   private totalIndexed = 0;
   private totalErrors = 0;
   private connected = false;
 
+  private circuitFailures = 0;
+  private circuitOpenAt = 0;
+  private lastErrorMs = 0;
+
   constructor(config: ClickHouseConfig) {
     this.config = config;
   }
 
-  /**
-   * Connect to ClickHouse and ensure table exists
-   */
+  private isCircuitOpen(): boolean {
+    if (this.circuitFailures < CIRCUIT_FAILURE_THRESHOLD) return false;
+    const elapsed = Date.now() - this.circuitOpenAt;
+    if (elapsed > CIRCUIT_OPEN_MS) {
+      this.circuitFailures = 0;
+      this.circuitOpenAt = 0;
+      return false;
+    }
+    return true;
+  }
+
+  private recordSuccess() {
+    this.circuitFailures = 0;
+    this.circuitOpenAt = 0;
+  }
+
+  private recordFailure() {
+    this.circuitFailures++;
+    this.lastErrorMs = Date.now();
+    if (this.circuitFailures >= CIRCUIT_FAILURE_THRESHOLD && !this.circuitOpenAt) {
+      this.circuitOpenAt = Date.now();
+      console.warn(`[ClickHouseIndexer] Circuit OPEN after ${this.circuitFailures} failures — pausing ${CIRCUIT_OPEN_MS / 1000}s`);
+    }
+  }
+
   async connect(): Promise<boolean> {
     if (!this.config.url) {
       console.log("[ClickHouseIndexer] No URL configured, indexing disabled");
       return false;
     }
 
-    try {
-      const response = await fetch(`${this.config.url}/ping`, {
-        method: "GET",
-      });
-      if (response.ok) {
-        this.connected = true;
-        console.log("[ClickHouseIndexer] Connected to ClickHouse");
-        await this.ensureTable();
-        return true;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await fetch(`${this.config.url}/ping`, { method: "GET", signal: AbortSignal.timeout(5000) });
+        if (response.ok) {
+          this.connected = true;
+          console.log("[ClickHouseIndexer] Connected to ClickHouse");
+          await this.ensureTable();
+          return true;
+        }
+      } catch (err: any) {
+        console.log(`[ClickHouseIndexer] Connection attempt ${attempt}/3 failed: ${err.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 2000));
       }
-    } catch (err: any) {
-      console.log(`[ClickHouseIndexer] Connection failed: ${err.message}`);
     }
     return false;
   }
 
   /**
-   * Ensure the security_events table exists with the enriched schema.
-   * Self-healing: re-runs CREATE IF NOT EXISTS on every connect.
+   * Ensure the security_events table and materialized views exist.
+   *
+   * Schema design for scale:
+   *  - PARTITION BY toYYYYMMDD(occurred_at) — daily partitions for fast TTL drops
+   *    and efficient range scans over billions of events
+   *  - ORDER BY (tenant_id, toStartOfHour(occurred_at), severity, event_type, event_id)
+   *    — tenant_id first for per-tenant partition pruning across 1000s of tenants
+   *  - log_source stored as String (not LowCardinality) — LowCardinality has a
+   *    65 536-value limit; millions of log sources require plain String
+   *  - TTL occurred_at + INTERVAL 90 DAY — hot-tier auto-expiry; adjust via env
+   *  - CODEC(ZSTD(3)) on all high-cardinality text fields
    */
   private async ensureTable(): Promise<void> {
-    // Create database if not exists
     await this.query(`CREATE DATABASE IF NOT EXISTS ${this.config.database}`);
 
-    // Canonical enriched schema — keeps legacy columns for backward
-    // compatibility and adds the richer fields required by the dashboard.
+    const hotDays = parseInt(process.env.HOT_RETENTION_DAYS ?? "90", 10);
+
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS ${this.config.database}.${this.config.table} (
-        event_id UUID DEFAULT generateUUIDv4(),
-        tenant_id Int32,
-        event_date Date MATERIALIZED toDate(occurred_at),
-        -- legacy columns (still populated by the storage service)
-        event_type LowCardinality(String),
-        severity LowCardinality(String),
-        threat String CODEC(ZSTD(3)),
-        target String CODEC(ZSTD(3)),
-        attacker IPv4,
-        asset String CODEC(ZSTD(3)),
-        description String CODEC(ZSTD(3)),
-        mitre_tactic LowCardinality(String),
-        mitre_technique LowCardinality(String),
-        action LowCardinality(String),
-        log_source LowCardinality(String),
-        country LowCardinality(String),
-        risk_score UInt8,
-        occurred_at DateTime64(3),
-        stored_at DateTime64(3) DEFAULT now64(3),
-        -- enriched columns required by the management server / dashboard
-        source_type LowCardinality(String),
-        host String CODEC(ZSTD(3)),
-        src_ip String CODEC(ZSTD(3)),
-        dst_ip String CODEC(ZSTD(3)),
-        user_name String CODEC(ZSTD(3)),
-        process_name String CODEC(ZSTD(3)),
+        event_id     UUID            DEFAULT generateUUIDv4(),
+        tenant_id    Int32,
+        event_date   Date            MATERIALIZED toDate(occurred_at),
+
+        -- Core event fields (legacy columns — still populated by storage service)
+        event_type       LowCardinality(String),
+        severity         LowCardinality(String),
+        threat           String CODEC(ZSTD(3)),
+        target           String CODEC(ZSTD(3)),
+        attacker         String CODEC(ZSTD(3)),
+        asset            String CODEC(ZSTD(3)),
+        description      String CODEC(ZSTD(3)),
+        mitre_tactic     LowCardinality(String),
+        mitre_technique  LowCardinality(String),
+        action           LowCardinality(String),
+
+        -- log_source is String (not LowCardinality) to support millions of unique sources
+        log_source       String CODEC(ZSTD(3)),
+        country          LowCardinality(String),
+        risk_score       UInt8,
+        occurred_at      DateTime64(3),
+        stored_at        DateTime64(3) DEFAULT now64(3),
+
+        -- Enriched columns (added by this PR — required by dashboard & SOC console)
+        -- source_type is the normalised source category (EDR, SIEM, Firewall, etc.)
+        source_type      LowCardinality(String),
+        host             String CODEC(ZSTD(3)),
+        src_ip           String CODEC(ZSTD(3)),
+        dst_ip           String CODEC(ZSTD(3)),
+        user_name        String CODEC(ZSTD(3)),
+        process_name     String CODEC(ZSTD(3)),
         kill_chain_phase LowCardinality(String),
         confidence_score UInt8 DEFAULT 0,
-        data_region LowCardinality(String),
-        raw_event String CODEC(ZSTD(3)),
+        data_region      LowCardinality(String),
+        raw_event        String CODEC(ZSTD(6)),
         normalized_event String CODEC(ZSTD(3)),
-        iocs String CODEC(ZSTD(3)),
-        ingested_at DateTime64(3) DEFAULT now64(3)
-      ) ENGINE = MergeTree()
-      PARTITION BY (tenant_id, toYYYYMM(event_date))
-      ORDER BY (tenant_id, event_date, severity, event_type, occurred_at)
+        iocs             String CODEC(ZSTD(3)),
+        ingested_at      DateTime64(3) DEFAULT now64(3)
+      )
+      ENGINE = MergeTree()
+      PARTITION BY toYYYYMMDD(occurred_at)
+      ORDER BY (tenant_id, toStartOfHour(occurred_at), severity, event_type, event_id)
+      SETTINGS index_granularity = 8192,
+               min_bytes_for_wide_part = 10485760,
+               min_rows_for_wide_part = 512000
+      TTL occurred_at + INTERVAL ${hotDays} DAY
     `;
 
     await this.query(createTableSQL);
-    console.log(`[ClickHouseIndexer] Table ${this.config.table} ready`);
+    console.log(`[ClickHouseIndexer] Table ${this.config.table} ready (TTL ${hotDays}d)`);
 
     await this.createMaterializedViews();
   }
 
   /**
-   * Create materialized views for common aggregations.
-   * The hourly-stats MV uses AggregatingMergeTree so that the management
-   * server can query it with countMerge() for sub-second KPI responses.
+   * AggregatingMergeTree hourly-stats MV — enables sub-second KPI queries
+   * via countMerge(cnt) instead of full table scans.
    */
   private async createMaterializedViews(): Promise<void> {
     const mvTable = `${this.config.table}_hourly_stats`;
-
-    // NOTE: We intentionally do NOT drop the MV here; dropping would erase
-    // historical aggregated data on every storage service restart.
-    // Schema migrations should be handled by explicit migration scripts.
 
     const createMVSQL = `
       CREATE MATERIALIZED VIEW IF NOT EXISTS ${this.config.database}.${mvTable}
@@ -172,304 +223,225 @@ export class ClickHouseIndexer {
       ORDER BY (tenant_id, hour, severity, event_type, source_type)
       AS SELECT
         tenant_id,
-        toStartOfHour(occurred_at) AS hour,
+        toStartOfHour(occurred_at)     AS hour,
         severity,
         event_type,
         source_type,
-        countState() AS cnt,
-        sumState(risk_score) AS total_risk_score_state,
-        uniqExactState(event_id) AS unique_events_state
+        countState()                   AS cnt,
+        sumState(risk_score)           AS total_risk_score_state,
+        uniqExactState(event_id)       AS unique_events_state
       FROM ${this.config.database}.${this.config.table}
       GROUP BY tenant_id, hour, severity, event_type, source_type
     `;
 
     try {
       await this.query(createMVSQL);
-      console.log(`[ClickHouseIndexer] Materialized view ${mvTable} ready`);
+      console.log(`[ClickHouseIndexer] MV ${mvTable} ready`);
     } catch (err: any) {
-      console.warn(`[ClickHouseIndexer] Failed to create MV: ${err.message}`);
+      console.warn(`[ClickHouseIndexer] MV create warning (may already exist): ${err.message.slice(0, 120)}`);
     }
   }
 
   /**
-   * Index a batch of events to ClickHouse
+   * Index a batch of events using JSONEachRow format (most efficient for large batches).
+   * Falls back to VALUES syntax for compatibility.
    */
   async indexBatch(events: EventRecord[]): Promise<IndexResult> {
-    if (!this.connected || events.length === 0) {
-      return { indexed: 0, errors: 0 };
+    if (!this.connected || events.length === 0) return { indexed: 0, errors: 0 };
+    if (this.isCircuitOpen()) {
+      console.warn(`[ClickHouseIndexer] Circuit open — skipping batch of ${events.length}`);
+      return { indexed: 0, errors: events.length };
     }
 
-    const values = events.map((e) => this.formatEventForInsert(e)).join(",");
+    const cols = [
+      "tenant_id", "event_type", "severity", "threat", "target", "attacker", "asset",
+      "description", "mitre_tactic", "mitre_technique", "action", "log_source",
+      "country", "risk_score", "occurred_at",
+      "source_type", "host", "src_ip", "dst_ip", "user_name", "process_name",
+      "kill_chain_phase", "confidence_score", "data_region", "raw_event",
+      "normalized_event", "iocs", "ingested_at",
+    ];
 
-    const sql = `
-      INSERT INTO ${this.config.database}.${this.config.table}
-      (tenant_id, event_type, severity, threat, target, attacker, asset,
-       description, mitre_tactic, mitre_technique, action, log_source,
-       country, risk_score, occurred_at,
-       source_type, host, src_ip, dst_ip, user_name, process_name,
-       kill_chain_phase, confidence_score, data_region, raw_event,
-       normalized_event, iocs, ingested_at)
-      VALUES ${values}
-    `;
+    const body = events.map(e => JSON.stringify(this.toClickHouseRow(e))).join("\n");
+    const insertSql = `INSERT INTO ${this.config.database}.${this.config.table} (${cols.join(",")}) FORMAT JSONEachRow`;
 
     try {
-      await this.query(sql);
+      await this.queryWithBody(insertSql, body);
       this.totalIndexed += events.length;
+      this.recordSuccess();
       return { indexed: events.length, errors: 0 };
     } catch (err: any) {
       this.totalErrors += events.length;
-      console.error(`[ClickHouseIndexer] Insert failed: ${err.message}`);
+      this.recordFailure();
+      console.error(`[ClickHouseIndexer] Batch insert failed: ${err.message.slice(0, 200)}`);
       return { indexed: 0, errors: events.length };
     }
   }
 
-  /**
-   * Format a single event for ClickHouse INSERT.
-   * Maps EventRecord fields to the enriched canonical schema.
-   */
-  private formatEventForInsert(e: EventRecord): string {
-    const escape = (str: string | undefined | null): string => {
-      if (!str) return "NULL";
-      return `'${str.replace(/'/g, "''")}'`;
+  /** Map EventRecord to a flat row object for JSONEachRow format */
+  private toClickHouseRow(e: EventRecord): Record<string, unknown> {
+    const now = new Date().toISOString();
+    const occurred = e.occurredAt ?? now;
+    const safeIp = (v?: string | null) => {
+      if (!v) return "0.0.0.0";
+      return /^(\d{1,3}\.){3}\d{1,3}$/.test(v) ? v : "0.0.0.0";
     };
-
-    const json = (obj: any): string => {
-      if (obj == null) return "NULL";
-      return escape(JSON.stringify(obj));
+    return {
+      tenant_id:        e.tenantId ?? 0,
+      event_type:       e.eventType ?? "endpoint",
+      severity:         e.severity ?? "medium",
+      threat:           e.threat ?? "",
+      target:           e.target ?? "",
+      attacker:         e.attacker ?? "",
+      asset:            e.asset ?? "",
+      description:      e.description ?? "",
+      mitre_tactic:     e.mitreTactic ?? "",
+      mitre_technique:  e.mitreTechnique ?? "",
+      action:           e.action ?? "",
+      log_source:       e.logSource ?? "",
+      country:          e.country ?? "",
+      risk_score:       e.riskScore ?? 0,
+      occurred_at:      occurred,
+      source_type:      e.sourceType ?? e.logSource ?? "",
+      host:             (e as any).host ?? e.asset ?? "",
+      src_ip:           safeIp((e as any).srcIp ?? e.attacker),
+      dst_ip:           safeIp((e as any).dstIp ?? e.target),
+      user_name:        (e as any).userName ?? "",
+      process_name:     (e as any).processName ?? "",
+      kill_chain_phase: (e as any).killChainPhase ?? "",
+      confidence_score: (e as any).confidenceScore ?? e.riskScore ?? 0,
+      data_region:      (e as any).dataRegion ?? "",
+      raw_event:        e.rawPayload ? JSON.stringify(e.rawPayload) : "",
+      normalized_event: (e as any).normalizedEvent ? JSON.stringify((e as any).normalizedEvent) : "",
+      iocs:             e.sigmaMatches ? JSON.stringify(e.sigmaMatches) : "[]",
+      ingested_at:      now,
     };
-
-    const occurredAtIso = e.occurredAt
-      ? escape(new Date(e.occurredAt).toISOString())
-      : "now64(3)";
-
-    return `(
-      ${e.tenantId || 0},
-      ${escape(e.eventType || "endpoint")},
-      ${escape(e.severity || "medium")},
-      ${escape(e.threat)},
-      ${escape(e.target)},
-      ${e.attacker ? `toIPv4('${this.escapeString(e.attacker)}')` : "NULL"},
-      ${escape(e.asset)},
-      ${escape(e.description)},
-      ${escape(e.mitreTactic)},
-      ${escape(e.mitreTechnique)},
-      ${escape(e.action)},
-      ${escape(e.logSource)},
-      ${escape(e.country)},
-      ${e.riskScore || 0},
-      ${occurredAtIso},
-      ${escape(e.sourceType || e.logSource)},
-      ${escape(e.host || e.asset)},
-      ${escape(e.srcIp || e.attacker)},
-      ${escape(e.dstIp)},
-      ${escape(e.userName)},
-      ${escape(e.processName)},
-      ${escape(e.killChainPhase)},
-      ${e.confidenceScore || e.riskScore || 0},
-      ${escape(e.dataRegion)},
-      ${json(e.rawPayload)},
-      ${json(e.normalizedEvent)},
-      ${json(e.sigmaMatches ?? [])},
-      ${occurredAtIso}
-    )`;
   }
 
-  /**
-   * Search events in ClickHouse
-   */
   async search(params: EventSearchParams): Promise<EventSearchResult> {
     const conditions: string[] = [];
 
-    // Tenant filter (required)
     if (params.tenantIds.length === 1) {
       conditions.push(`tenant_id = ${params.tenantIds[0]}`);
     } else {
       conditions.push(`tenant_id IN (${params.tenantIds.join(",")})`);
     }
 
-    // Optional filters
-    if (params.eventType) {
-      conditions.push(`event_type = '${this.escapeString(params.eventType)}'`);
-    }
+    if (params.eventType) conditions.push(`event_type = '${this.escapeString(params.eventType)}'`);
     if (params.severity) {
-      const severities = Array.isArray(params.severity)
-        ? params.severity
-        : [params.severity];
-      conditions.push(
-        `severity IN ('${severities.map((s) => this.escapeString(s)).join("','")}')`,
-      );
+      const sevs = Array.isArray(params.severity) ? params.severity : [params.severity];
+      conditions.push(`severity IN ('${sevs.map(s => this.escapeString(s)).join("','")}')`);
     }
-    if (params.threat) {
-      conditions.push(`threat ILIKE '%${this.escapeString(params.threat)}%'`);
-    }
-    if (params.target) {
-      conditions.push(`target ILIKE '%${this.escapeString(params.target)}%'`);
-    }
-    if (params.attacker) {
-      conditions.push(
-        `attacker = toIPv4('${this.escapeString(params.attacker)}')`,
-      );
-    }
-    if (params.description) {
-      conditions.push(
-        `description ILIKE '%${this.escapeString(params.description)}%'`,
-      );
-    }
-    if (params.dateFrom) {
-      conditions.push(
-        `occurred_at >= parseDateTime64BestEffort('${params.dateFrom.toISOString()}')`,
-      );
-    }
-    if (params.dateTo) {
-      conditions.push(
-        `occurred_at <= parseDateTime64BestEffort('${params.dateTo.toISOString()}')`,
-      );
-    }
+    if (params.threat) conditions.push(`threat ilike '%${this.escapeString(params.threat)}%'`);
+    if (params.target) conditions.push(`target ilike '%${this.escapeString(params.target)}%'`);
+    if (params.attacker) conditions.push(`attacker = '${this.escapeString(params.attacker)}'`);
+    if (params.description) conditions.push(`description ilike '%${this.escapeString(params.description)}%'`);
+    if (params.dateFrom) conditions.push(`occurred_at >= '${params.dateFrom.toISOString()}'`);
+    if (params.dateTo) conditions.push(`occurred_at <= '${params.dateTo.toISOString()}'`);
 
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const orderBy = `ORDER BY occurred_at ${params.sortOrder === "asc" ? "ASC" : "DESC"}`;
-    const offset = ((params.page || 1) - 1) * (params.pageSize || 50);
-    const limit = `LIMIT ${params.pageSize || 50} OFFSET ${offset}`;
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const order = `ORDER BY occurred_at ${params.sortOrder === "asc" ? "ASC" : "DESC"}`;
+    const pageSize = params.pageSize ?? 50;
+    const offset = ((params.page ?? 1) - 1) * pageSize;
 
-    // Get total count
-    const countQuery = `SELECT COUNT() as total FROM ${this.config.database}.${this.config.table} ${whereClause}`;
-    const countResult = await this.query(countQuery);
-    const totalCount = parseInt(countResult.data?.[0]?.total || "0");
+    const [countResult, dataResult] = await Promise.all([
+      this.query(`SELECT COUNT() AS total FROM ${this.config.database}.${this.config.table} ${where}`),
+      this.query(`SELECT * FROM ${this.config.database}.${this.config.table} ${where} ${order} LIMIT ${pageSize} OFFSET ${offset}`),
+    ]);
 
-    // Get data
-    const dataQuery = `SELECT * FROM ${this.config.database}.${this.config.table} ${whereClause} ${orderBy} ${limit}`;
-    const dataResult = await this.query(dataQuery);
-
+    const totalCount = parseInt(countResult?.data?.[0]?.total ?? "0", 10);
     return {
-      events: dataResult.data || [],
+      events: dataResult?.data ?? [],
       totalCount,
-      page: params.page || 1,
-      pageSize: params.pageSize || 50,
-      totalPages: Math.ceil(totalCount / (params.pageSize || 50)),
+      page: params.page ?? 1,
+      pageSize,
+      totalPages: Math.ceil(totalCount / pageSize),
     };
   }
 
-  /**
-   * Get event volume timeline (for charts)
-   */
   async getEventVolumeTimeline(
     tenantIds: number[],
     granularity: "hour" | "day" = "hour",
-    hoursBack: number = 24,
+    hoursBack = 24,
   ): Promise<Array<{ bucket: string; count: number }>> {
-    const tenantFilter =
-      tenantIds.length === 1
-        ? `tenant_id = ${tenantIds[0]}`
-        : `tenant_id IN (${tenantIds.join(",")})`;
-
-    const bucketFn = granularity === "hour" ? "toStartOfHour" : "toStartOfDay";
-
+    const tf = tenantIds.length === 1
+      ? `tenant_id = ${tenantIds[0]}`
+      : `tenant_id IN (${tenantIds.join(",")})`;
+    const fn = granularity === "hour" ? "toStartOfHour" : "toStartOfDay";
     const sql = `
-      SELECT
-        ${bucketFn}(occurred_at) as bucket,
-        count() as count
-      FROM ${this.config.database}.${this.config.table}
-      WHERE ${tenantFilter}
-        AND occurred_at >= now() - INTERVAL ${hoursBack} HOUR
-      GROUP BY bucket
-      ORDER BY bucket ASC
+      SELECT ${fn}(occurred_at) AS bucket, countMerge(cnt) AS count
+      FROM ${this.config.database}.${this.config.table}_hourly_stats
+      WHERE ${tf} AND hour >= now() - INTERVAL ${hoursBack} HOUR
+      GROUP BY bucket ORDER BY bucket ASC
     `;
-
     const result = await this.query(sql);
-    return (
-      result.data?.map((row: any) => ({
-        bucket: row.bucket,
-        count: parseInt(row.count),
-      })) || []
-    );
+    return (result?.data ?? []).map((r: any) => ({ bucket: r.bucket, count: parseInt(r.count, 10) }));
   }
 
-  /**
-   * Get severity distribution (for pie charts)
-   */
-  async getSeverityDistribution(
-    tenantIds: number[],
-  ): Promise<Array<{ severity: string; count: number }>> {
-    const tenantFilter =
-      tenantIds.length === 1
-        ? `tenant_id = ${tenantIds[0]}`
-        : `tenant_id IN (${tenantIds.join(",")})`;
-
+  async getSeverityDistribution(tenantIds: number[]): Promise<Array<{ severity: string; count: number }>> {
+    const tf = tenantIds.length === 1
+      ? `tenant_id = ${tenantIds[0]}`
+      : `tenant_id IN (${tenantIds.join(",")})`;
     const sql = `
-      SELECT
-        severity,
-        count() as count
-      FROM ${this.config.database}.${this.config.table}
-      WHERE ${tenantFilter}
-        AND occurred_at >= now() - INTERVAL 24 HOUR
-      GROUP BY severity
-      ORDER BY count DESC
+      SELECT severity, countMerge(cnt) AS count
+      FROM ${this.config.database}.${this.config.table}_hourly_stats
+      WHERE ${tf} AND hour >= now() - INTERVAL 24 HOUR
+      GROUP BY severity ORDER BY count DESC
     `;
-
     const result = await this.query(sql);
-    return (
-      result.data?.map((row: any) => ({
-        severity: row.severity,
-        count: parseInt(row.count),
-      })) || []
-    );
+    return (result?.data ?? []).map((r: any) => ({ severity: r.severity, count: parseInt(r.count, 10) }));
   }
 
-  /**
-   * Execute a ClickHouse query
-   */
   private async query(sql: string): Promise<any> {
-    const auth =
-      this.config.username && this.config.password
-        ? Buffer.from(`${this.config.username}:${this.config.password}`).toString("base64")
-        : null;
+    return this.queryWithBody(sql + " FORMAT JSON", "");
+  }
+
+  private async queryWithBody(sql: string, body: string): Promise<any> {
+    const auth = (this.config.username && this.config.password)
+      ? Buffer.from(`${this.config.username}:${this.config.password}`).toString("base64")
+      : null;
 
     const url = new URL(`${this.config.url}/`);
     url.searchParams.set("database", this.config.database);
+    url.searchParams.set("query", sql);
     url.searchParams.set("output_format_json_quote_64bit_integers", "0");
 
     const response = await fetch(url.toString(), {
       method: "POST",
       headers: {
-        "Content-Type": "text/plain",
-        Accept: "application/json",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Accept": "application/json",
         ...(auth ? { Authorization: `Basic ${auth}` } : {}),
       },
-      body: sql,
+      body: body || undefined,
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`ClickHouse query failed (${response.status}): ${errorText}`);
+      const text = await response.text();
+      throw new Error(`ClickHouse HTTP ${response.status}: ${text.slice(0, 300)}`);
     }
 
-    // ClickHouse returns JSON format
-    return await response.json();
+    const ct = response.headers.get("content-type") ?? "";
+    if (ct.includes("application/json")) return response.json();
+    return null;
   }
 
-  /**
-   * Escape special characters in strings for SQL
-   */
   private escapeString(str: string): string {
-    return str.replace(/'/g, "''");
+    return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   }
 
-  /**
-   * Get indexer statistics
-   */
   getStats(): ClickHouseStats {
     return {
       connected: this.connected,
       totalIndexed: this.totalIndexed,
       totalErrors: this.totalErrors,
       table: `${this.config.database}.${this.config.table}`,
+      circuitOpen: this.isCircuitOpen(),
+      lastErrorMs: this.lastErrorMs,
     };
   }
 
-  /**
-   * Check if connected to ClickHouse
-   */
   isConnected(): boolean {
     return this.connected;
   }

@@ -6,7 +6,7 @@
 # - Combined Management + Data + Receiver planes
 # - Single-AZ RDS for cost savings
 # - Fargate Spot for 60% compute savings
-# - Single-node ClickHouse (replaces legacy OpenSearch)
+# - Single-node ClickHouse for hot-tier OLAP analytics
 #
 # Deploy Time: ~30 minutes
 # Monthly Cost: ~₹30,000-45,000
@@ -409,7 +409,7 @@ Resources:
           Value: !Sub "cyinsight-redis-${EnvironmentName}"
 
   # ============================================================================
-  # ClickHouse - Single Node (Cost Optimized, replaces legacy OpenSearch)
+  # ClickHouse - Single Node (Cost Optimized hot-tier OLAP)
   # ============================================================================
 
   ClickHouseEFS:

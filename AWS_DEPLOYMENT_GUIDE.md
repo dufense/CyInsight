@@ -81,7 +81,7 @@ CyInsight follows a **three-plane distributed architecture**:
 │   │                        DATA PLANE                                    │   │
 │   │                                                                      │   │
 │   │   ┌─────────────┐   ┌─────────────┐   ┌─────────────────────────┐   │   │
-│   │   │ TimescaleDB │   │ OpenSearch  │   │ S3 + Glacier            │   │   │
+│   │   │ TimescaleDB │   │ ClickHouse │   │ S3 + Glacier            │   │   │
 │   │   │ (Hot 90d)   │   │ (30d index) │   │ (Warm/Cold/Archive)     │   │   │
 │   │   └─────────────┘   └─────────────┘   └─────────────────────────┘   │   │
 │   │                                                                      │   │
@@ -101,7 +101,7 @@ CyInsight follows a **three-plane distributed architecture**:
 | **Enrichment** | MITRE ATT&CK, IOC scoring | Node.js ECS |
 | **API Server** | REST API, authentication | Express.js ECS |
 | **PostgreSQL** | Configuration, metadata | Amazon RDS/Aurora |
-| **OpenSearch** | Log search, analytics | Amazon OpenSearch |
+| **ClickHouse** | Log search, analytics | self-managed ClickHouse |
 | **S3** | Long-term storage | Amazon S3 + Glacier |
 
 ---
@@ -161,7 +161,7 @@ CyInsight follows a **three-plane distributed architecture**:
 │           │                   │                   │                      │
 │           ▼                   ▼                   ▼                      │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐                 │
-│  │  RDS         │   │  ElastiCache │   │  ClickHouse  │                 │
+│  │  RDS         │   │  ElastiCache │   │ ClickHouse │                 │
 │  │ PostgreSQL   │   │  Redis       │   │  (Single)    │                 │
 │  │              │   │  (Single)    │   │              │                 │
 │  │ • db.t3.med  │   │              │   │ • 2 vCPU     │                 │
@@ -252,7 +252,7 @@ Month 1-3:  Option 1 (Starter)
 Month 4:    Begin Migration
     │
     ├─ Step 1: Create Multi-AZ RDS standby
-    ├─ Step 2: Add second OpenSearch node
+    ├─ Step 2: Add second ClickHouse replica
     ├─ Step 3: Separate planes to different ECS services
     └─ Step 4: Add MSK Kafka cluster
     │
@@ -326,13 +326,13 @@ Month 5-6:  Option 2 (Balanced Production)
 │  │                      SHARED DATA STORES                               │   │
 │  │                                                                       │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐    │   │
-│  │  │ Aurora Serverless│  │ ElastiCache      │  │ OpenSearch       │    │   │
+│  │  │ Aurora Serverless│  │ ElastiCache      │  │ ClickHouse      │    │   │
 │  │  │ PostgreSQL       │  │ Redis Cluster    │  │ Domain           │    │   │
 │  │  │                  │  │                  │  │                  │    │   │
-│  │  │ • 1-16 ACU       │  │ • 2+ nodes       │  │ • 2 data nodes   │    │   │
-│  │  │ • Multi-AZ       │  │ • Cluster mode   │  │ • 3 master nodes │    │   │
-│  │  │ • Auto-scaling   │  │ • Multi-AZ       │  │ • 2 UltraWarm    │    │   │
-│  │  │ • Read replica   │  │ • Failover       │  │ • 3-AZ           │    │   │
+│  │  │ • 1-16 ACU       │  │ • 2+ nodes       │  │ • 2 shards x 2   │    │   │
+│  │  │ • Multi-AZ       │  │ • Cluster mode   │  │   replicas       │    │   │
+│  │  │ • Auto-scaling   │  │ • Multi-AZ       │  │ • S3 cold tier   │    │   │
+│  │  │ • Read replica   │  │ • Failover       │  │ • 3-AZ ZooKeeper │    │   │
 │  │  │                  │  │                  │  │                  │    │   │
 │  │  │ Cost: ₹35K       │  │ Cost: ₹18K       │  │ Cost: ₹42K       │    │   │
 │  │  └──────────────────┘  └──────────────────┘  └──────────────────┘    │   │
@@ -353,7 +353,7 @@ Month 5-6:  Option 2 (Balanced Production)
 | **ECS Data** | Fargate Spot | 2-8 tasks, 2 vCPU/4GB | Multi-AZ | ₹28,000 |
 | **Aurora Serverless** | - | 1-16 ACU, Multi-AZ | ✅ Yes | ₹35,000 |
 | **Amazon MSK** | kafka.m5.large | 3 brokers, 500GB each | 3-AZ | ₹45,000 |
-| **OpenSearch** | r6g.large | 2 data + 3 master + 2 warm | ✅ Yes | ₹42,000 |
+| **ClickHouse** | r6g.large | 2 shards x 2 replicas + 3 ZK | ✅ Yes | ₹42,000 |
 | **ElastiCache** | cache.r6g.large | Cluster mode, 2+ nodes | ✅ Yes | ₹18,000 |
 | **ALB** | - | 2 ALBs (public + internal) | Multi-AZ | ₹7,000 |
 | **EFS** | Elastic | 100GB | Multi-AZ | ₹3,500 |
@@ -373,7 +373,7 @@ Month 5-6:  Option 2 (Balanced Production)
 1. **True High Availability**:
    - Multi-AZ Aurora with automatic failover (< 60 seconds)
    - 3-node Kafka cluster (tolerates 1 node failure)
-   - 2+ node OpenSearch with replica shards
+   - 2+ shard ClickHouse with replica shards
    - Redis cluster with failover
 
 2. **Auto-Scaling**:
@@ -495,7 +495,7 @@ Result: Option 3 (Multi-Region Enterprise)
 │  │  │ • 4-20 tasks  │  │    │  │ • 4-20 tasks  │  │    │  │ • 4-20 tasks  │  │          │
 │  │  │ • Aurora Global│  │    │  │ • Aurora      │  │    │  │ • Aurora      │  │          │
 │  │  │ • MSK (5 brkr)│  │    │  │   (regional)  │  │    │  │   (regional)  │  │          │
-│  │  │ • OS (6 node) │  │    │  │ • OS (6 node) │  │    │  │ • OS (6 node) │  │          │
+│  │  │ • CH (6 node) │  │    │  │ • CH (6 node) │  │    │  │ • CH (6 node) │  │          │
 │  │  └───────────────┘  │    │  └───────────────┘  │    │  └───────────────┘  │          │
 │  │                     │    │                     │    │                     │          │
 │  │  ┌───────────────┐  │    │  ┌───────────────┐  │    │  ┌───────────────┐  │          │
@@ -538,7 +538,7 @@ Result: Option 3 (Multi-Region Enterprise)
 | **ECS Data** | Fargate Spot | 4-20 tasks, 2 vCPU/4GB | Multi-AZ | ₹55,000 |
 | **Aurora Global** | - | 4-128 ACU, cross-region replica | Global | ₹1,25,000 |
 | **Amazon MSK** | kafka.m5.xlarge | 5 brokers, 1TB each | 3-AZ | ₹1,50,000 |
-| **OpenSearch** | r6g.xlarge | 6 data + 3 master + 3 warm | 3-AZ | ₹1,80,000 |
+| **ClickHouse** | r6g.xlarge | 6 shards x 2 replicas + 3 ZK | 3-AZ | ₹1,80,000 |
 | **ElastiCache** | cache.r6g.xlarge | 6 nodes cluster | Multi-AZ | ₹45,000 |
 | **ALB** | - | 3 ALBs per region | Multi-AZ | ₹12,000 |
 | **Transit GW** | - | Cross-region connectivity | - | ₹25,000 |
@@ -657,7 +657,7 @@ Result: Option 3 (Multi-Region Enterprise)
 | **Read Replicas** | ❌ | ✅ | ✅ Global |
 | **Auto-scaling** | Manual | Target tracking | Predictive |
 | **MSK Kafka** | Self-hosted | Managed 3-node | Managed 5-node |
-| **OpenSearch HA** | ❌ | 2-node | 6-node |
+| **ClickHouse HA** | ❌ | 2-node | 6-node |
 | **Redis Cluster** | ❌ | ✅ | ✅ Multi-region |
 | **Separate Planes** | ❌ | ✅ | ✅ |
 | **Data Lifecycle** | Manual | Automatic | Automatic + AI |
@@ -743,7 +743,7 @@ Deploy order:
 1. VPC (01-vpc.yml)
 2. Aurora (02-aurora-management.yml)
 3. MSK (03-msk-kafka.yml)
-4. OpenSearch (04-opensearch.yml)
+4. ClickHouse (08-clickhouse-cluster.yml)
 5. Data Lake (05-data-lake.yml)
 6. Management ECS (06-management-ecs.yml)
 7. Data Plane ECS (07-data-plane-ecs.yml)
@@ -770,8 +770,8 @@ Contact AWS Solutions Architect for:
 | RDS | CPUUtilization | > 80% | 5 min |
 | MSK | UnderReplicatedPartitions | > 0 | 1 min |
 | MSK | DiskUsage | > 80% | 5 min |
-| OpenSearch | ClusterStatus.red | = 1 | 1 min |
-| OpenSearch | JVMMemoryPressure | > 85% | 5 min |
+| ClickHouse | cluster_replica_unavailable | = 1 | 1 min |
+| ClickHouse | MemoryUsagePercent | > 85% | 5 min |
 | ALB | UnHealthyHostCount | > 0 | 1 min |
 | S3 | BucketSizeBytes | > 80% limit | Daily |
 
@@ -782,7 +782,7 @@ Contact AWS Solutions Architect for:
 | RDS | Automated snapshots | Daily | 35 days |
 | RDS | Manual snapshots | Weekly | 90 days |
 | S3 | Versioning | Continuous | 7 years |
-| OpenSearch | Manual snapshots | Daily | 30 days |
+| ClickHouse | Manual snapshots | Daily | 30 days |
 | EFS | AWS Backup | Daily | 30 days |
 
 ---
@@ -809,7 +809,7 @@ Contact AWS Solutions Architect for:
 - Fargate Spot 4:1 ratio
 - Aurora Serverless (scale to zero when possible)
 - S3 lifecycle policies for data tiering
-- 1-year reserved for MSK/OpenSearch
+- 1-year reserved for MSK/ClickHouse
 
 #### Option 3 (Enterprise)
 - 3-year Savings Plans for Fargate
@@ -854,7 +854,7 @@ Month 1-3 (Ramp-up):
   ecs_receiver: 2 tasks (vs 2-10)
   ecs_data: 2 tasks (vs 2-8)
   msk: 3 × kafka.m5.large (vs m5.xlarge)
-  opensearch: 2 × r6g.large (vs r6g.xlarge)
+  clickhouse: 2 × r6g.large (vs r6g.xlarge)
   Cost: ₹80,000-1,00,000/month
 
 Month 4+ (Scale as needed):

@@ -6,6 +6,10 @@ x-data-plane-env: &data-plane-env
   REGION: ${DATA_PLANE_REGION:-in-west-1}
   REGION_NAME: ${DATA_PLANE_REGION_NAME:-India (Mumbai)}
   MANAGEMENT_PLANE_URL: ${MANAGEMENT_PLANE_URL:-http://host.docker.internal:80}
+  CLICKHOUSE_URL: ${CLICKHOUSE_URL:?CLICKHOUSE_URL must point to the ClickHouse cluster (single source of truth for security events)}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+  CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-ccc}
 
 services:
   data-plane-db:
@@ -81,77 +85,6 @@ services:
           cpus: "0.5"
           memory: 512M
 
-  opensearch-1:
-    image: opensearchproject/opensearch:2.12.0
-    restart: unless-stopped
-    environment:
-      cluster.name: secureops-${DATA_PLANE_REGION:-in-west-1}
-      node.name: opensearch-1
-      discovery.seed_hosts: opensearch-1,opensearch-2
-      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
-      DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
-      bootstrap.memory_lock: "true"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    ports:
-      - "${DP_OPENSEARCH_PORT:-9200}:9200"
-    volumes:
-      - opensearch_data_1:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-        reservations:
-          cpus: "0.5"
-          memory: 1G
-
-  opensearch-2:
-    image: opensearchproject/opensearch:2.12.0
-    restart: unless-stopped
-    environment:
-      cluster.name: secureops-${DATA_PLANE_REGION:-in-west-1}
-      node.name: opensearch-2
-      discovery.seed_hosts: opensearch-1,opensearch-2
-      cluster.initial_cluster_manager_nodes: opensearch-1,opensearch-2
-      DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
-      bootstrap.memory_lock: "true"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    volumes:
-      - opensearch_data_2:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-        reservations:
-          cpus: "0.5"
-          memory: 1G
 
   kafka-1:
     image: bitnami/kafka:3.8
@@ -418,7 +351,6 @@ services:
       PORT: 5000
       SERVICE_NAME: storage
       DATABASE_URL: postgresql://secureops:${DB_PASSWORD:-secureops_dev_password}@data-plane-db:5432/secureops_events
-      OPENSEARCH_URL: http://opensearch-1:9200
       BATCH_SIZE: "500"
       BACKPRESSURE_LATENCY_MS: "5000"
       HOT_RETENTION_DAYS: "90"
@@ -430,8 +362,6 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
     depends_on:
       data-plane-db:
-        condition: service_healthy
-      opensearch-1:
         condition: service_healthy
       kafka-1:
         condition: service_healthy
@@ -450,10 +380,6 @@ volumes:
   dataplane_pgdata:
     driver: local
   dataplane_pgdata_replica:
-    driver: local
-  opensearch_data_1:
-    driver: local
-  opensearch_data_2:
     driver: local
   kafka_data_1:
     driver: local

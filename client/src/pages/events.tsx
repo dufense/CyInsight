@@ -226,9 +226,64 @@ const ACTION_CODE_LABELS: Record<string, string> = {
   "10": "Reported",
 };
 
-function formatActionLabel(action: string | null | undefined): string {
-  if (!action) return "\u2014";
+const EPS_REMEDIATION_CODE_LABELS: Record<string, string> = {
+  "0": "No Action", "1": "Detected Only", "2": "Process Killed", "3": "File Quarantined",
+  "4": "File Deleted", "5": "Network Connection Blocked", "6": "Registry Key Removed",
+  "7": "Scheduled Task Removed", "8": "Service Stopped", "9": "File Restored",
+  "10": "Endpoint Isolated", "11": "Memory Scan Completed", "12": "Script Blocked",
+  "13": "Exploit Prevented", "14": "Ransomware Rolled Back", "15": "Credential Theft Prevented",
+  "16": "Lateral Movement Blocked", "17": "USB Device Blocked", "18": "USB Device Allowed",
+  "19": "MTP Device Blocked", "20": "MTP Device Allowed", "21": "CD/DVD Device Blocked",
+  "22": "CD/DVD Device Allowed", "23": "Bluetooth Device Blocked", "24": "Bluetooth Device Allowed",
+  "25": "WiFi Adapter Blocked", "26": "WiFi Adapter Allowed", "27": "Printer Blocked",
+  "28": "Printer Allowed", "29": "Storage Device Detected (Blocked)", "30": "Storage Device Detected (Allowed)",
+  "31": "Device Control Policy Applied", "32": "Device Blocked", "33": "Device Allowed",
+  "34": "File Transfer Blocked", "35": "File Transfer Allowed", "36": "Shadow Copy Deleted",
+  "37": "Boot Sector Protected", "38": "MBR Protected", "39": "Honeypot File Triggered",
+  "40": "Decoy Document Accessed",
+};
+
+function deriveDeviceControlLabel(meta: any): string | null {
+  if (!meta || !meta.isDeviceControl) return null;
+  const dt = (meta.deviceType || "").toLowerCase();
+  const dn = (meta.deviceName || "").toLowerCase();
+  const blocked = (meta.deviceStatus || "").toLowerCase().includes("block") ||
+    (meta.epsPrevention || "").toLowerCase().includes("block");
+  const allowed = (meta.deviceStatus || "").toLowerCase().includes("allow") ||
+    (meta.epsPrevention || "").toLowerCase().includes("allow");
+  const state = blocked ? "Blocked" : allowed ? "Allowed" : "Detected";
+
+  if (dt === "mtp" || dn.includes("mtp")) return `MTP USB Device ${state}`;
+  if (dt === "usb" || dn.includes("usb") || dt === "removable") return `USB Device ${state}`;
+  if (dt === "bluetooth" || dn.includes("bluetooth")) return `Bluetooth Device ${state}`;
+  if (dt === "cdrom" || dt === "cd" || dt === "dvd" || dn.includes("cd") || dn.includes("dvd")) return `CD/DVD Device ${state}`;
+  if (dt === "printer" || dn.includes("printer")) return `Printer ${state}`;
+  if (dt === "wifi" || dt === "wireless" || dn.includes("wifi")) return `WiFi Adapter ${state}`;
+  if (dt === "storage" || dn.includes("storage")) return `Storage Device ${state}`;
+  if (meta.deviceName) return `${meta.deviceName} ${state}`;
+  return `Device ${state}`;
+}
+
+function deriveSmartAction(event: any): string {
+  if (!event) return "—";
+  const action = event.action;
+  const meta: any = event.rawPayload?.rawPayload?._cynetMeta ?? null;
+
+  if (meta) {
+    const deviceLabel = deriveDeviceControlLabel(meta);
+    if (deviceLabel) return deviceLabel;
+    if (meta.epsRemediationCode != null) {
+      const fromCode = EPS_REMEDIATION_CODE_LABELS[String(meta.epsRemediationCode)];
+      if (fromCode) return fromCode;
+    }
+  }
+
+  if (!action) return "—";
   const trimmed = action.trim();
+  const epsCodeMatch = trimmed.match(/^EPS Code (\d+)$/i);
+  if (epsCodeMatch) {
+    return EPS_REMEDIATION_CODE_LABELS[epsCodeMatch[1]] || trimmed;
+  }
   if (/^\d+$/.test(trimmed)) {
     return ACTION_CODE_LABELS[trimmed] || `Action Code ${trimmed}`;
   }
@@ -466,6 +521,13 @@ export default function EventsPage() {
     toast({ title: "Copied", description: `Event ID ${id} copied to clipboard` });
   };
 
+  const [triageState, setTriageState] = useState<Record<number, "acknowledged" | "escalated" | "suppressed" | null>>({});
+  const [highFidelityMode, setHighFidelityMode] = useState(true);
+
+  const setTriage = (eventId: number, action: "acknowledged" | "escalated" | "suppressed") => {
+    setTriageState(prev => ({ ...prev, [eventId]: prev[eventId] === action ? null : action }));
+  };
+
   const [eventEnrichProgress, setEventEnrichProgress] = useState<{ enriched: number; total: number; active: boolean; currentTenant?: string }>({ enriched: 0, total: 0, active: false });
   const [correlateProgress, setCorrelateProgress] = useState<{ phase: string; active: boolean; correlated: number }>({ phase: "", active: false, correlated: 0 });
 
@@ -521,6 +583,19 @@ export default function EventsPage() {
     enabled: !!currentTenant?.id && !!advancedSearchQuery,
   });
 
+  const connectedIntegrationsQuery = useQuery<any[]>({
+    queryKey: ["/api/tenants", currentTenant?.id, "security-integrations", "connected"],
+    queryFn: async () => {
+      if (!currentTenant?.id) return [];
+      const res = await fetch(`/api/tenants/${currentTenant.id}/security-integrations`, { credentials: "include" });
+      if (!res.ok) return [];
+      const all = await res.json();
+      return (all || []).filter((i: any) => i.status === "connected");
+    },
+    enabled: !!currentTenant?.id,
+  });
+  const hasConnectedIntegrations = (connectedIntegrationsQuery.data?.length ?? 1) > 0;
+
   const stats = statsQuery.data;
   const events = advancedSearchQuery
     ? (advancedSearchResults.data?.data || [])
@@ -552,12 +627,30 @@ export default function EventsPage() {
 
 
   const renderEventsTable = () => {
+    const displayEvents = highFidelityMode
+      ? events.filter((e: any) => ["critical", "high", "medium"].includes(e.severity))
+      : events;
+
     return (
       <Card data-testid="events-table-card">
         <div className="flex items-center justify-between px-4 py-2 border-b">
           <div className="flex items-center gap-3">
-            <p className="text-sm font-medium flex items-center gap-1.5"><Database className="w-4 h-4 text-blue-500" />Security Events</p>
-            <Badge variant="secondary" className="text-xs">{eventsTotalCount.toLocaleString()}</Badge>
+            <p className="text-sm font-medium flex items-center gap-1.5"><Shield className="w-4 h-4 text-primary" />SOC Alert Console</p>
+            {highFidelityMode ? (
+              <Badge variant="secondary" className="text-xs" title={`${eventsTotalCount.toLocaleString()} total events across all severities`}>
+                {displayEvents.length} shown <span className="opacity-60 ml-0.5">/ {eventsTotalCount.toLocaleString()}</span>
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="text-xs">{eventsTotalCount.toLocaleString()}</Badge>
+            )}
+            <Badge
+              variant={highFidelityMode ? "default" : "outline"}
+              className="text-[10px] cursor-pointer select-none"
+              onClick={() => setHighFidelityMode(m => !m)}
+              data-testid="toggle-high-fidelity"
+            >
+              {highFidelityMode ? "Medium+ Only" : "All Severities"}
+            </Badge>
           </div>
           <Select value={String(eventsPageSize)} onValueChange={v => { setEventsPageSize(Number(v)); setEventsPage(1); }}>
             <SelectTrigger className="h-8 w-20 text-xs" data-testid="select-page-size"><SelectValue /></SelectTrigger>
@@ -581,19 +674,33 @@ export default function EventsPage() {
                   <SortableHeader label="Severity" field="severity" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
                   <TableHead className="text-xs">Detected By</TableHead>
                   <TableHead className="text-xs">{activeDomain !== "overview" ? getFieldLabel(DOMAIN_EVENT_TYPE_MAP[activeDomain]?.[0] || "", "action") : "Action"}</TableHead>
-                  <TableHead className="text-xs">MITRE</TableHead>
+                  <TableHead className="text-xs">MITRE / IOC</TableHead>
+                  <TableHead className="text-xs">Triage</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {events.length === 0 ? (
-                  <TableRow><TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                    <Database className="w-6 h-6 mx-auto mb-2 opacity-40" />
-                    <p className="text-sm">No events found</p>
+                {displayEvents.length === 0 ? (
+                  <TableRow><TableCell colSpan={7} className="text-center py-10 text-muted-foreground">
+                    <Shield className="w-6 h-6 mx-auto mb-2 opacity-40" />
+                    {!hasConnectedIntegrations && !connectedIntegrationsQuery.isLoading ? (
+                      <>
+                        <p className="text-sm font-medium">No connected integrations</p>
+                        <p className="text-xs mt-1 max-w-xs mx-auto">Security events will appear here once you connect at least one integration. Events are only shown from active, connected sources.</p>
+                        <Link href="/integrations"><a className="inline-block mt-3 text-xs underline text-primary">Go to Integrations Settings</a></Link>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm">No alerts found</p>
+                        {highFidelityMode && <p className="text-xs mt-1">High-fidelity mode active — <button className="underline" onClick={() => setHighFidelityMode(false)}>show all severities</button></p>}
+                      </>
+                    )}
                   </TableCell></TableRow>
-                ) : events.map((event: any) => {
+                ) : displayEvents.map((event: any) => {
                   const TypeIcon = EVENT_TYPE_ICONS[event.eventType] || Shield;
+                  const triage = triageState[event.id] ?? null;
+                  const iocCount = event.iocReputation?.length || 0;
                   return (
-                    <TableRow key={event.id} className="cursor-pointer" onClick={() => openEventDetail(event)} data-testid={`event-row-${event.id}`}>
+                    <TableRow key={event.id} className={`cursor-pointer ${triage === "suppressed" ? "opacity-40" : ""}`} onClick={() => openEventDetail(event)} data-testid={`event-row-${event.id}`}>
                       <TableCell className="text-xs whitespace-nowrap font-mono">
                         <div className="flex items-center gap-1">
                           {fmt.formatDateTime(event.occurredAt)}
@@ -613,8 +720,28 @@ export default function EventsPage() {
                       </TableCell>
                       <TableCell><Badge variant="outline" className={`text-[10px] ${SEVERITY_COLORS[event.severity] || ""}`}>{event.severity}</Badge></TableCell>
                       <TableCell className="text-xs max-w-[120px] truncate" title={event.logSource || ""}>{event.logSource || event.sourceType || "—"}</TableCell>
-                      <TableCell className="text-xs">{formatActionLabel(event.action)}</TableCell>
-                      <TableCell>{event.mitreTactic ? <Badge variant="outline" className="text-[9px] font-mono">{event.mitreTactic}</Badge> : "—"}</TableCell>
+                      <TableCell className="text-xs">{deriveSmartAction(event)}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-col gap-0.5">
+                          {event.mitreTactic ? <Badge variant="outline" className="text-[9px] font-mono">{event.mitreTactic}</Badge> : null}
+                          {iocCount > 0 && <Badge variant="secondary" className="text-[9px]">{iocCount} IOC</Badge>}
+                          <Link href={`/log-intelligence/explorer?eventId=${event.id}`} onClick={e => e.stopPropagation()} className="text-[9px] text-blue-500 hover:underline whitespace-nowrap" data-testid={`link-raw-log-${event.id}`}>View Raw Log →</Link>
+                        </div>
+                      </TableCell>
+                      <TableCell onClick={e => e.stopPropagation()}>
+                        {isMSS ? (
+                          <div className="flex gap-1 flex-wrap" data-testid={`triage-actions-${event.id}`}>
+                            <Button size="sm" variant={triage === "acknowledged" ? "default" : "outline"} className="h-6 px-1.5 text-[9px]" onClick={() => setTriage(event.id, "acknowledged")} data-testid={`btn-ack-${event.id}`} title="Acknowledge">ACK</Button>
+                            <Button size="sm" variant={triage === "escalated" ? "default" : "outline"} className="h-6 px-1.5 text-[9px] border-orange-400 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950" onClick={() => setTriage(event.id, "escalated")} data-testid={`btn-esc-${event.id}`} title="Escalate">ESC</Button>
+                            <Button size="sm" variant="outline" className="h-6 px-1.5 text-[9px] border-indigo-400 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950" onClick={() => { toast({ title: "Link to Incident", description: `Select an incident to link event #${event.id}` }); }} data-testid={`btn-link-${event.id}`} title="Link to Incident">LNK</Button>
+                            <Button size="sm" variant={triage === "suppressed" ? "default" : "outline"} className="h-6 px-1.5 text-[9px] border-muted-foreground text-muted-foreground" onClick={() => setTriage(event.id, "suppressed")} data-testid={`btn-sup-${event.id}`} title="Suppress">SUP</Button>
+                          </div>
+                        ) : (
+                          <Badge variant="outline" className={`text-[9px] ${triage ? (triage === "acknowledged" ? "border-green-500 text-green-600" : triage === "escalated" ? "border-orange-500 text-orange-600" : "border-muted-foreground text-muted-foreground") : event.status === "investigating" ? "border-orange-400 text-orange-600" : event.status === "resolved" ? "border-green-500 text-green-600" : event.status === "contained" ? "border-blue-500 text-blue-600" : "border-muted-foreground/40 text-muted-foreground"}`}>
+                            {triage || event.status || "open"}
+                          </Badge>
+                        )}
+                      </TableCell>
                     </TableRow>
                   );
                 })}
@@ -647,10 +774,10 @@ export default function EventsPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
             <Shield className="w-6 h-6 text-primary" />
-            Security Operations Console
+            SOC Alert Console
           </h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            {currentTenant?.name} — Unified SOC visibility across all security domains
+            {currentTenant?.name} — High-fidelity alert triage across all security domains
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -1041,7 +1168,7 @@ export default function EventsPage() {
                   <DetailRow label={getFieldLabel(selectedEvent.eventType, "target")} value={selectedEvent.target} />
                   <DetailRow label={getFieldLabel(selectedEvent.eventType, "attacker")} value={selectedEvent.attacker} />
                   <DetailRow label={getFieldLabel(selectedEvent.eventType, "asset")} value={selectedEvent.asset} />
-                  <DetailRow label={getFieldLabel(selectedEvent.eventType, "action")} value={formatActionLabel(selectedEvent.action)} />
+                  <DetailRow label={getFieldLabel(selectedEvent.eventType, "action")} value={deriveSmartAction(selectedEvent)} />
                   <DetailRow label="Log Source" value={selectedEvent.logSource || selectedEvent.sourceType} />
                   <DetailRow label="Country" value={selectedEvent.country} />
                   <DetailRow label="Risk Score" value={selectedEvent.riskScore} />

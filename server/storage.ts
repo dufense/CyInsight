@@ -46,10 +46,26 @@ import {
   type SuppressionRule, type InsertSuppressionRule,
   integrationAuditLog,
   type IntegrationAuditLog, type InsertIntegrationAuditLog,
+  logSources, deviceFingerprints, sourceHealth,
+  type LogSource, type InsertLogSource,
+  type DeviceFingerprint, type InsertDeviceFingerprint,
+  type SourceHealth, type InsertSourceHealth,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, desc, and, count, sql, gte, lte, inArray, isNull, isNotNull } from "drizzle-orm";
+import { eq, desc, and, or, count, sql, gte, lte, inArray, isNull, isNotNull, getTableColumns } from "drizzle-orm";
 import crypto from "crypto";
+import { buildIntegrationGuardSql } from "./log-source-map";
+
+// Per-row EXISTS guards — enforce integration-aware filtering at query level.
+// The guard checks whether each row's tenant currently has the connected
+// integration that maps to that row's log_source / detection_source value,
+// completely eliminating the multi-tenant union problem.
+const EVENT_INTEGRATION_GUARD = sql.raw(
+  buildIntegrationGuardSql('"security_events"."tenant_id"', '"security_events"."log_source"'),
+);
+const INCIDENT_INTEGRATION_GUARD = sql.raw(
+  buildIntegrationGuardSql('"incidents"."tenant_id"', '"incidents"."detection_source"'),
+);
 
 export function computeEventHash(data: Partial<InsertSecurityEvent>): string {
   const parts = [
@@ -134,6 +150,7 @@ export interface IStorage {
 
   getIncidents(tenantId: number): Promise<Incident[]>;
   getIncident(id: number): Promise<Incident | undefined>;
+  getIncidentGuarded(id: number): Promise<Incident | undefined>;
   getIncidentsPaginated(tenantIds: number[], page: number, pageSize: number, filters?: { severity?: string | string[]; status?: string; classification?: string }): Promise<{ data: Incident[]; total: number }>;
   createIncident(data: InsertIncident): Promise<Incident>;
   updateIncident(id: number, data: Partial<InsertIncident>): Promise<Incident>;
@@ -162,13 +179,18 @@ export interface IStorage {
   updateReport(id: number, data: Partial<InsertReport>): Promise<Report>;
   deleteReport(id: number): Promise<void>;
 
-  getSecurityEvents(tenantId: number): Promise<SecurityEvent[]>;
+  getSecurityEvents(tenantId: number, maxRows?: number): Promise<SecurityEvent[]>;
   getSecurityEventsByType(tenantId: number, eventType: string): Promise<SecurityEvent[]>;
   createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent>;
   createSecurityEvents(data: InsertSecurityEvent[]): Promise<SecurityEvent[]>;
   updateSecurityEvent(id: number, data: Partial<InsertSecurityEvent>): Promise<SecurityEvent>;
   searchSecurityEvents(params: EventSearchParams): Promise<EventSearchResult>;
   getEventPipelineStats(tenantId: number, tenantIds?: number[]): Promise<EventPipelineStats>;
+  getEventPipelineCounters(tenantId: number, tenantIds?: number[]): Promise<{
+    received: number; normalized: number; enriched: number;
+    correlated: number; stored: number; total: number;
+    dlqFailed: number; pending: number;
+  }>;
   getEventVolumeTimeline(tenantId: number, tenantIds?: number[], interval?: string, dateFrom?: Date, dateTo?: Date): Promise<EventVolumePoint[]>;
   getSecurityEventById(id: number, tenantId: number): Promise<SecurityEvent | undefined>;
 
@@ -245,11 +267,14 @@ export interface IStorage {
   getIntegrationAuditLog(tenantId: number, integrationId?: number): Promise<IntegrationAuditLog[]>;
 
   getAssets(tenantId: number): Promise<Asset[]>;
+  getAssetsLight(tenantId: number): Promise<any[]>;
+  getAssetsSoftwareData(tenantId: number, limit?: number): Promise<any[]>;
   getAsset(id: number): Promise<Asset | undefined>;
   createAsset(data: InsertAsset): Promise<Asset>;
   createAssets(data: InsertAsset[]): Promise<Asset[]>;
   updateAsset(id: number, data: Partial<InsertAsset>): Promise<Asset>;
   getAssetsByHostnames(tenantId: number, hostnames: string[]): Promise<Asset[]>;
+  getAssetsByHostnamesLight(tenantId: number, hostnames: string[]): Promise<any[]>;
 
   getUserAssets(tenantId: number): Promise<UserAsset[]>;
   getUserAsset(id: number): Promise<UserAsset | undefined>;
@@ -314,6 +339,22 @@ export interface IStorage {
   createSuppressionRule(data: InsertSuppressionRule): Promise<SuppressionRule>;
   updateSuppressionRule(id: number, tenantId: number, data: Partial<InsertSuppressionRule>): Promise<SuppressionRule>;
   deleteSuppressionRule(id: number, tenantId: number): Promise<void>;
+
+  getLogSources(tenantId: number): Promise<LogSource[]>;
+  getLogSource(id: number, tenantId: number): Promise<LogSource | undefined>;
+  createLogSource(data: InsertLogSource): Promise<LogSource>;
+  updateLogSource(id: number, tenantId: number, data: Partial<InsertLogSource>): Promise<LogSource>;
+  deleteLogSource(id: number, tenantId: number): Promise<void>;
+
+  getDeviceFingerprint(tenantId: number, sourceIdentifier: string): Promise<DeviceFingerprint | undefined>;
+  getDeviceFingerprintById(id: number): Promise<DeviceFingerprint | undefined>;
+  createDeviceFingerprint(data: InsertDeviceFingerprint): Promise<DeviceFingerprint>;
+  updateDeviceFingerprint(id: number, data: Partial<InsertDeviceFingerprint>): Promise<DeviceFingerprint>;
+
+  getSourceHealth(sourceId: number, tenantId?: number): Promise<SourceHealth | undefined>;
+  getSourceHealthByTenant(tenantId: number): Promise<SourceHealth[]>;
+  upsertSourceHealth(sourceId: number, tenantId: number, data: Partial<InsertSourceHealth>): Promise<SourceHealth>;
+  resolveTenantBySourceIp(ip: string): Promise<number | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -368,7 +409,7 @@ export class DatabaseStorage implements IStorage {
 
   async getIncidents(tenantId: number, includeNonSecurity = false, maxRows = 500): Promise<Incident[]> {
     if (!tenantId || isNaN(tenantId) || tenantId <= 0) return [];
-    const conditions: any[] = [eq(incidents.tenantId, tenantId)];
+    const conditions: any[] = [eq(incidents.tenantId, tenantId), INCIDENT_INTEGRATION_GUARD];
     if (!includeNonSecurity) conditions.push(DatabaseStorage.nonSecurityFilter);
     return db.select().from(incidents)
       .where(and(...conditions))
@@ -378,6 +419,12 @@ export class DatabaseStorage implements IStorage {
 
   async getIncident(id: number): Promise<Incident | undefined> {
     const [inc] = await db.select().from(incidents).where(eq(incidents.id, id));
+    return inc;
+  }
+
+  async getIncidentGuarded(id: number): Promise<Incident | undefined> {
+    const [inc] = await db.select().from(incidents)
+      .where(and(eq(incidents.id, id), INCIDENT_INTEGRATION_GUARD));
     return inc;
   }
 
@@ -517,16 +564,68 @@ export class DatabaseStorage implements IStorage {
   async getSecurityEvents(tenantId: number, maxRows = 1000): Promise<SecurityEvent[]> {
     if (!tenantId || isNaN(tenantId) || tenantId <= 0) return [];
     return db.select().from(securityEvents)
-      .where(eq(securityEvents.tenantId, tenantId))
+      .where(and(
+        eq(securityEvents.tenantId, tenantId),
+        EVENT_INTEGRATION_GUARD,
+      ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(maxRows);
   }
 
   async getSecurityEventsByType(tenantId: number, eventType: string, maxRows = 1000): Promise<SecurityEvent[]> {
     return db.select().from(securityEvents)
-      .where(and(eq(securityEvents.tenantId, tenantId), eq(securityEvents.eventType, eventType as any)))
+      .where(and(
+        eq(securityEvents.tenantId, tenantId),
+        eq(securityEvents.eventType, eventType as any),
+        EVENT_INTEGRATION_GUARD,
+      ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(maxRows);
+  }
+
+  // ── ClickHouse dual-write helper ──────────────────────────────────────────
+  // Called after each successful PG insert so every storage path automatically
+  // mirrors events to the hot tier without per-route wiring.
+  private async chDualWrite(events: SecurityEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    let chClient: { insertEvents: (rows: unknown[]) => Promise<void> } | null = null;
+    try {
+      const m = await import("./clickhouse-client") as {
+        getClickHouseClient: () => { insertEvents: (rows: unknown[]) => Promise<void> } | null;
+      };
+      chClient = m.getClickHouseClient();
+    } catch { return; }
+    if (!chClient) return;
+
+    const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const IPV6_RE = /^[0-9a-fA-F:]+$/;
+    const validIp = (v: string | null | undefined) =>
+      v && (IPV4_RE.test(v) || IPV6_RE.test(v)) ? v : undefined;
+
+    const payload = events.map((ev) => ({
+      event_id:        ev.eventHash ?? String(ev.id),
+      tenant_id:       ev.tenantId,
+      event_type:      ev.eventType,
+      source_type:     ev.sourceType ?? "",
+      // log_source carries the product-name identifier (e.g. "Cynet 360") used
+      // by the integration-awareness guard. The CH read path enforces the same
+      // guard against log_source, so PG and CH visibility stay in parity.
+      log_source:      ev.logSource ?? "",
+      severity:        ev.severity,
+      host:            ev.asset ?? "",
+      src_ip:          validIp(ev.attacker),
+      dst_ip:          validIp(ev.target),
+      user_name:       ev.attacker && !validIp(ev.attacker) ? ev.attacker : "",
+      mitre_tactic:    ev.mitreTactic ?? "",
+      mitre_technique: ev.mitreTechnique ?? "",
+      raw_event:       ev.rawPayload ? JSON.stringify(ev.rawPayload) : "",
+      ingested_at:     ev.occurredAt instanceof Date
+        ? ev.occurredAt.toISOString()
+        : (ev.occurredAt as string | undefined) ?? new Date().toISOString(),
+    }));
+    chClient.insertEvents(payload).catch((err: Error) => {
+      console.warn(`[Storage] ClickHouse write error (non-fatal): ${err.message}`);
+    });
   }
 
   async createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent> {
@@ -553,7 +652,10 @@ export class DatabaseStorage implements IStorage {
         hash, dataWithHash.occurredAt || new Date(), new Date(),
       ]
     );
-    if (result.rows.length > 0) return result.rows[0] as SecurityEvent;
+    if (result.rows.length > 0) {
+      this.chDualWrite([result.rows[0] as SecurityEvent]);
+      return result.rows[0] as SecurityEvent;
+    }
     const existing = await pool.query(
       `SELECT * FROM security_events WHERE event_hash = $1 LIMIT 1`, [hash]
     );
@@ -642,6 +744,7 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
+    this.chDualWrite(allStored);
     return allStored;
   }
 
@@ -652,7 +755,7 @@ export class DatabaseStorage implements IStorage {
 
   async getSecurityEventById(id: number, tenantId: number): Promise<SecurityEvent | undefined> {
     const [event] = await db.select().from(securityEvents)
-      .where(and(eq(securityEvents.id, id), eq(securityEvents.tenantId, tenantId)));
+      .where(and(eq(securityEvents.id, id), eq(securityEvents.tenantId, tenantId), EVENT_INTEGRATION_GUARD));
     return event;
   }
 
@@ -672,6 +775,10 @@ export class DatabaseStorage implements IStorage {
       conditions.push(`tenant_id = ANY($${paramIdx++})`);
       values.push(params.tenantIds);
     }
+
+    // Per-row integration guard: only surface events whose log_source maps to
+    // a connected integration for that specific row's tenant.
+    conditions.push(buildIntegrationGuardSql("security_events.tenant_id", "security_events.log_source"));
 
     if (params.eventType) {
       if (params.eventType.includes(",")) {
@@ -810,12 +917,14 @@ export class DatabaseStorage implements IStorage {
     const ids = tenantIds && tenantIds.length > 0 ? tenantIds : [tenantId];
     const tenantFilter = ids.length === 1 ? `tenant_id = $1` : `tenant_id = ANY($1)`;
     const tenantParam = ids.length === 1 ? ids[0] : ids;
+    const baseParams = [tenantParam];
+    const srcGuard = buildIntegrationGuardSql("security_events.tenant_id", "security_events.log_source");
 
     const [statusResult, typeResult, sevResult, sourceResult, dlqResult] = await Promise.all([
-      pool.query(`SELECT pipeline_status, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} GROUP BY pipeline_status`, [tenantParam]),
-      pool.query(`SELECT event_type, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} GROUP BY event_type ORDER BY cnt DESC`, [tenantParam]),
-      pool.query(`SELECT severity, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} GROUP BY severity ORDER BY cnt DESC`, [tenantParam]),
-      pool.query(`SELECT COALESCE(log_source, 'Unknown') as log_source, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} GROUP BY log_source ORDER BY cnt DESC LIMIT 20`, [tenantParam]),
+      pool.query(`SELECT pipeline_status, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} AND ${srcGuard} GROUP BY pipeline_status`, baseParams),
+      pool.query(`SELECT event_type, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} AND ${srcGuard} GROUP BY event_type ORDER BY cnt DESC`, baseParams),
+      pool.query(`SELECT severity, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} AND ${srcGuard} GROUP BY severity ORDER BY cnt DESC`, baseParams),
+      pool.query(`SELECT COALESCE(log_source, 'Unknown') as log_source, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} AND ${srcGuard} GROUP BY log_source ORDER BY cnt DESC LIMIT 20`, baseParams),
       pool.query(`SELECT COUNT(*) as cnt FROM event_dead_letter_queue WHERE status = 'failed' AND ($1::int IS NULL OR tenant_id = $1)`, [tenantIds && tenantIds.length === 1 ? tenantIds[0] : tenantId]).catch(() => ({ rows: [{ cnt: 0 }] })),
     ]);
 
@@ -855,6 +964,61 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  /**
+   * Lightweight pipeline counters only (received/normalized/.../dlqFailed) —
+   * skips the heavy GROUP BY queries (byEventType, bySeverity, byLogSource)
+   * that the CH fast-path serves on its own. Used by the /stats route when
+   * ClickHouse is available so PG is touched only for the small pipeline-state
+   * data CH cannot represent.
+   */
+  async getEventPipelineCounters(tenantId: number, tenantIds?: number[]) {
+    const ids = tenantIds && tenantIds.length > 0 ? tenantIds : [tenantId];
+    const tenantFilter = ids.length === 1 ? `tenant_id = $1` : `tenant_id = ANY($1)`;
+    const tenantParam = ids.length === 1 ? ids[0] : ids;
+    const srcGuard = buildIntegrationGuardSql("security_events.tenant_id", "security_events.log_source");
+
+    const [statusResult, dlqResult] = await Promise.all([
+      pool.query(
+        `SELECT pipeline_status, COUNT(*) as cnt FROM security_events WHERE ${tenantFilter} AND ${srcGuard} GROUP BY pipeline_status`,
+        [tenantParam],
+      ),
+      pool.query(
+        `SELECT COUNT(*) as cnt FROM event_dead_letter_queue WHERE status = 'failed' AND ($1::int IS NULL OR tenant_id = $1)`,
+        [ids.length === 1 ? ids[0] : tenantId],
+      ).catch(() => ({ rows: [{ cnt: 0 }] })),
+    ]);
+
+    const statusMap: Record<string, number> = {};
+    let total = 0;
+    for (const row of statusResult.rows) {
+      const count = parseInt(row.cnt, 10);
+      statusMap[row.pipeline_status || "stored"] = count;
+      total += count;
+    }
+    const dlqFailed = parseInt(dlqResult.rows[0]?.cnt || "0", 10);
+    const pipelineOrder = ["received", "normalized", "enriched", "correlated", "stored"];
+    const cumulative: Record<string, number> = {};
+    let runningTotal = 0;
+    for (let i = pipelineOrder.length - 1; i >= 0; i--) {
+      runningTotal += statusMap[pipelineOrder[i]] || 0;
+      cumulative[pipelineOrder[i]] = runningTotal;
+    }
+    const received = total + dlqFailed;
+    cumulative["received"] = received;
+    const normalized = cumulative["normalized"] || 0;
+    const pending = received - normalized - dlqFailed;
+    return {
+      received,
+      normalized,
+      enriched:    cumulative["enriched"]   || 0,
+      correlated:  cumulative["correlated"] || 0,
+      stored:      cumulative["stored"]     || 0,
+      total,
+      dlqFailed,
+      pending: pending > 0 ? pending : 0,
+    };
+  }
+
   async getEventVolumeTimeline(
     tenantId: number,
     tenantIds?: number[],
@@ -865,6 +1029,7 @@ export class DatabaseStorage implements IStorage {
     const ids = tenantIds && tenantIds.length > 0 ? tenantIds : [tenantId];
     const tenantFilter = ids.length === 1 ? `tenant_id = $1` : `tenant_id = ANY($1)`;
     const tenantParam = ids.length === 1 ? ids[0] : ids;
+    const srcGuard = buildIntegrationGuardSql("security_events.tenant_id", "security_events.log_source");
 
     const bucketMap: Record<string, string> = {
       "1h": "15 minutes", "24h": "1 hour", "7d": "6 hours",
@@ -872,7 +1037,7 @@ export class DatabaseStorage implements IStorage {
     };
     const bucket = bucketMap[interval] || "1 day";
 
-    const conditions = [tenantFilter];
+    const conditions = [tenantFilter, srcGuard];
     const params: any[] = [tenantParam];
     let paramIdx = 2;
 
@@ -1011,7 +1176,7 @@ export class DatabaseStorage implements IStorage {
   async getIncidentsPaginated(tenantIds: number[], page: number, pageSize: number, filters?: { severity?: string | string[]; status?: string; classification?: string }): Promise<{ data: Incident[]; total: number }> {
     if (tenantIds.length === 0) return { data: [], total: 0 };
     const clampedPageSize = Math.min(pageSize, 100);
-    const conditions: any[] = [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter];
+    const conditions: any[] = [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter, INCIDENT_INTEGRATION_GUARD];
     if (filters?.severity) {
       const sevList = Array.isArray(filters.severity) ? filters.severity : filters.severity.includes(",") ? filters.severity.split(",").map(s => s.trim()) : [filters.severity];
       conditions.push(sevList.length === 1 ? eq(incidents.severity, sevList[0] as any) : inArray(incidents.severity, sevList as any));
@@ -1038,9 +1203,10 @@ export class DatabaseStorage implements IStorage {
   async getIncidentsForTenants(tenantIds: number[], timeRange: string = "all"): Promise<Incident[]> {
     if (tenantIds.length === 0) return [];
     const timeFilter = this.getTimeRangeDate(timeRange);
-    const conditions = tenantIds.length === 1
+    const conditions: any[] = tenantIds.length === 1
       ? [eq(incidents.tenantId, tenantIds[0]), DatabaseStorage.nonSecurityFilter]
       : [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter];
+    conditions.push(INCIDENT_INTEGRATION_GUARD);
     if (timeFilter) conditions.push(gte(incidents.createdAt, timeFilter));
     return db.select().from(incidents)
       .where(and(...conditions))
@@ -1053,7 +1219,10 @@ export class DatabaseStorage implements IStorage {
     const hardCap = Math.min(maxRows, 1000);
     if (tenantIds.length === 1) return this.getSecurityEvents(tenantIds[0], hardCap);
     return db.select().from(securityEvents)
-      .where(inArray(securityEvents.tenantId, tenantIds))
+      .where(and(
+        inArray(securityEvents.tenantId, tenantIds),
+        EVENT_INTEGRATION_GUARD,
+      ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(hardCap);
   }
@@ -1061,11 +1230,11 @@ export class DatabaseStorage implements IStorage {
   async getSSEEventsWithPayloadForTenants(tenantIds: number[], maxRows?: number): Promise<any[]> {
     if (tenantIds.length === 0) return [];
     const rowLimit = Math.min(maxRows || 1000, 1000);
-    const condition = tenantIds.length === 1
-      ? and(eq(securityEvents.tenantId, tenantIds[0]), eq(securityEvents.eventType, "sse"))
-      : and(inArray(securityEvents.tenantId, tenantIds), eq(securityEvents.eventType, "sse"));
+    const tenantCond = tenantIds.length === 1
+      ? eq(securityEvents.tenantId, tenantIds[0])
+      : inArray(securityEvents.tenantId, tenantIds);
     return db.select().from(securityEvents)
-      .where(condition!)
+      .where(and(tenantCond, eq(securityEvents.eventType, "sse"), EVENT_INTEGRATION_GUARD))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(rowLimit);
   }
@@ -1098,9 +1267,10 @@ export class DatabaseStorage implements IStorage {
       occurredAt: securityEvents.occurredAt,
       createdAt: securityEvents.createdAt,
     };
-    const conditions = tenantIds.length === 1
+    const conditions: any[] = tenantIds.length === 1
       ? [eq(securityEvents.tenantId, tenantIds[0])]
       : [inArray(securityEvents.tenantId, tenantIds)];
+    conditions.push(EVENT_INTEGRATION_GUARD);
     if (timeFilter) conditions.push(gte(securityEvents.occurredAt, timeFilter));
     return db.select(cols).from(securityEvents)
       .where(and(...conditions))
@@ -2945,6 +3115,25 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(assets).where(eq(assets.tenantId, tenantId)).orderBy(assets.hostname).limit(1000);
   }
 
+  async getAssetsLight(tenantId: number): Promise<any[]> {
+    if (!tenantId || isNaN(tenantId) || tenantId <= 0) return [];
+    const { softwareInventory, enrichmentData, eolFindings, ...lightCols } = getTableColumns(assets);
+    return db.select(lightCols).from(assets).where(eq(assets.tenantId, tenantId)).orderBy(assets.hostname).limit(1000);
+  }
+
+  async getAssetsSoftwareData(tenantId: number, limit = 500): Promise<any[]> {
+    if (!tenantId || isNaN(tenantId) || tenantId <= 0) return [];
+    const r = await pool.query(
+      `SELECT id, tenant_id as "tenantId", hostname, operating_system as "operatingSystem",
+              status, risk_level as "riskLevel", risk_score as "riskScore",
+              endpoint_type as "endpointType", source, last_seen as "lastSeen",
+              software_inventory as "softwareInventory"
+       FROM assets WHERE tenant_id = $1 ORDER BY hostname LIMIT $2`,
+      [tenantId, limit]
+    );
+    return r.rows;
+  }
+
   async getAsset(id: number): Promise<Asset | undefined> {
     const [asset] = await db.select().from(assets).where(eq(assets.id, id));
     return asset;
@@ -2976,6 +3165,13 @@ export class DatabaseStorage implements IStorage {
     if (hostnames.length === 0) return [];
     const lowerHostnames = hostnames.map(h => h.toLowerCase());
     return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames)));
+  }
+
+  async getAssetsByHostnamesLight(tenantId: number, hostnames: string[]): Promise<any[]> {
+    if (hostnames.length === 0) return [];
+    const lowerHostnames = hostnames.map(h => h.toLowerCase());
+    const { eolFindings, ...lightCols } = getTableColumns(assets);
+    return db.select(lightCols).from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames)));
   }
 
   async getUserAssets(tenantId: number): Promise<UserAsset[]> {
@@ -3302,6 +3498,111 @@ export class DatabaseStorage implements IStorage {
 
   async deleteSuppressionRule(id: number, tenantId: number): Promise<void> {
     await db.delete(suppressionRules).where(and(eq(suppressionRules.id, id), eq(suppressionRules.tenantId, tenantId)));
+  }
+
+  async getLogSources(tenantId: number): Promise<LogSource[]> {
+    return db.select().from(logSources).where(eq(logSources.tenantId, tenantId)).orderBy(logSources.createdAt);
+  }
+
+  async getLogSource(id: number, tenantId: number): Promise<LogSource | undefined> {
+    const [s] = await db.select().from(logSources).where(and(eq(logSources.id, id), eq(logSources.tenantId, tenantId)));
+    return s;
+  }
+
+  async createLogSource(data: InsertLogSource): Promise<LogSource> {
+    const [s] = await db.insert(logSources).values(data).returning();
+    return s;
+  }
+
+  async updateLogSource(id: number, tenantId: number, data: Partial<InsertLogSource>): Promise<LogSource> {
+    const updateData: Partial<InsertLogSource> & { updatedAt: Date } = { ...data, updatedAt: new Date() };
+    const [s] = await db.update(logSources).set(updateData).where(and(eq(logSources.id, id), eq(logSources.tenantId, tenantId))).returning();
+    return s;
+  }
+
+  async deleteLogSource(id: number, tenantId: number): Promise<void> {
+    await db.delete(logSources).where(and(eq(logSources.id, id), eq(logSources.tenantId, tenantId)));
+  }
+
+  async getDeviceFingerprint(tenantId: number, sourceIdentifier: string): Promise<DeviceFingerprint | undefined> {
+    const [fp] = await db.select().from(deviceFingerprints)
+      .where(and(eq(deviceFingerprints.tenantId, tenantId), eq(deviceFingerprints.sourceIdentifier, sourceIdentifier)));
+    return fp;
+  }
+
+  async getDeviceFingerprintById(id: number): Promise<DeviceFingerprint | undefined> {
+    const [fp] = await db.select().from(deviceFingerprints).where(eq(deviceFingerprints.id, id));
+    return fp;
+  }
+
+  async createDeviceFingerprint(data: InsertDeviceFingerprint): Promise<DeviceFingerprint> {
+    const [fp] = await db.insert(deviceFingerprints).values(data).returning();
+    return fp;
+  }
+
+  async updateDeviceFingerprint(id: number, data: Partial<InsertDeviceFingerprint>): Promise<DeviceFingerprint> {
+    const updateData: Partial<InsertDeviceFingerprint> & { updatedAt: Date } = { ...data, updatedAt: new Date() };
+    const [fp] = await db.update(deviceFingerprints).set(updateData).where(eq(deviceFingerprints.id, id)).returning();
+    return fp;
+  }
+
+  async getSourceHealth(sourceId: number, tenantId?: number): Promise<SourceHealth | undefined> {
+    const conditions = tenantId !== undefined
+      ? and(eq(sourceHealth.sourceId, sourceId), eq(sourceHealth.tenantId, tenantId))
+      : eq(sourceHealth.sourceId, sourceId);
+    const [h] = await db.select().from(sourceHealth).where(conditions);
+    return h;
+  }
+
+  async getSourceHealthByTenant(tenantId: number): Promise<SourceHealth[]> {
+    return db.select().from(sourceHealth).where(eq(sourceHealth.tenantId, tenantId)).orderBy(desc(sourceHealth.updatedAt));
+  }
+
+  async upsertSourceHealth(sourceId: number, tenantId: number, data: Partial<InsertSourceHealth>): Promise<SourceHealth> {
+    const existing = await this.getSourceHealth(sourceId);
+
+    if (existing) {
+      const now = new Date();
+      const prevSeen = existing.lastSeen ? new Date(existing.lastSeen) : now;
+      const elapsedMinutes = Math.max((now.getTime() - prevSeen.getTime()) / 60000, 0.01667);
+      const incomingEvents = data.totalEventsToday !== undefined ? data.totalEventsToday - (existing.totalEventsToday ?? 0) : 0;
+      const computedEventsPerMin = incomingEvents > 0 ? Math.round((incomingEvents / elapsedMinutes) * 100) / 100 : existing.eventsPerMin ?? 0;
+
+      const successRate = data.parseSuccessRate !== undefined ? data.parseSuccessRate : existing.parseSuccessRate ?? 100;
+      const computedErrorRate = Math.max(0, Math.round((100 - successRate) * 100) / 100);
+
+      const updateData: Partial<InsertSourceHealth> & { eventsPerMin: number; errorRate: number; updatedAt: Date } = {
+        ...data,
+        eventsPerMin: computedEventsPerMin,
+        errorRate: computedErrorRate,
+        updatedAt: now,
+      };
+      const [h] = await db.update(sourceHealth)
+        .set(updateData)
+        .where(eq(sourceHealth.sourceId, sourceId))
+        .returning();
+      return h;
+    }
+
+    const [h] = await db.insert(sourceHealth).values({
+      sourceId,
+      tenantId,
+      eventsPerMin: data.eventsPerMin ?? 0,
+      parseSuccessRate: data.parseSuccessRate ?? 100,
+      lastSeen: data.lastSeen ?? new Date(),
+      errorRate: data.errorRate ?? 0,
+      totalEventsToday: data.totalEventsToday ?? 0,
+    }).returning();
+    return h;
+  }
+
+  async resolveTenantBySourceIp(ip: string): Promise<number | null> {
+    const rows = await db
+      .select({ tenantId: logSources.tenantId })
+      .from(logSources)
+      .where(and(eq(logSources.host, ip), eq(logSources.isActive, true)))
+      .limit(1);
+    return rows[0]?.tenantId ?? null;
   }
 }
 

@@ -11,6 +11,7 @@ import type { IngestBatch, InsertSecurityEvent, InsertIncident } from "@shared/s
 import crypto from "crypto";
 import { matchEvent, detectCorrelationPatterns, type SigmaMatch } from "./sigma-engine";
 import { securityEventBus, type LiveSecurityEvent } from "./event-bus";
+import { getClickHouseClient, type IngestEventPayload } from "./clickhouse-client";
 
 function parseExcelSerialDate(serial: number): Date | null {
   if (serial < 1000 || serial > 100000) return null;
@@ -1050,6 +1051,9 @@ export async function runEnrichmentPipeline(
           const stored = await storage.createSecurityEvents(batch);
           storedEventIds.push(...stored.map(e => e.id));
           result.eventsStored += stored.length;
+
+          // CH dual-write is handled by storage.createSecurityEvents via chDualWrite().
+
           for (const ev of stored) {
             securityEventBus.emit("security_event", {
               id: ev.id,
@@ -1498,22 +1502,45 @@ export async function runPipelineAsync(
           lastPollStatus: "success",
           lastPollMessage: `Pipeline complete — ${result.eventsStored} event(s) stored, ${result.incidentsCreated} incident(s) created`,
         }).catch(() => {});
+        import("./integration-autoheal.js").then(({ onIntegrationSuccess }) => {
+          onIntegrationSuccess(options.integrationId!).catch(() => {});
+        }).catch(() => {});
       } else {
+        const schemaMsg = `Pipeline finished but 0 events were stored — check storage layer or event schema compatibility`;
         storage.updateSecurityIntegration(options.integrationId, {
           lastPollStatus: "error",
-          lastPollMessage: `Pipeline finished but 0 events were stored — check storage layer or event schema compatibility`,
+          lastPollMessage: schemaMsg,
+        }).catch(() => {});
+        import("./integration-autoheal.js").then(({ onIntegrationFailure }) => {
+          onIntegrationFailure(options.integrationId!, schemaMsg).catch(() => {});
         }).catch(() => {});
       }
+    }
+
+    // ── Real-time Attack Detection — trigger detection on newly ingested events ──
+    if (result.eventsStored > 0) {
+      const eventsToDetect = Math.min(result.eventsStored, 20);
+      import("./attack-detection-pipeline.js").then(({ runBatchDetectionPipeline }) => {
+        runBatchDetectionPipeline(tenantId, eventsToDetect).then(detResult => {
+          if (detResult.detected > 0) {
+            console.log(`[DetectionPipeline] Post-ingest detection (tenant ${tenantId}): processed=${detResult.processed}, detected=${detResult.detected}, chained=${detResult.chained}`);
+          }
+        }).catch((e: any) => console.warn(`[DetectionPipeline] Post-ingest detection error (tenant ${tenantId}):`, e.message));
+      }).catch(() => {});
     }
   }).catch(err => {
     console.error(`[Pipeline] Fatal failure for batch ${batchId} (tenant ${tenantId}):`, err);
     if (options?.integrationId) {
+      const fatalMsg = `Pipeline failed: ${(err as Error).message || "Unknown error"}`;
       storage.updateSecurityIntegration(options.integrationId, {
         lastPollStatus: "error",
-        lastPollMessage: `Pipeline failed: ${(err as Error).message || "Unknown error"}`,
+        lastPollMessage: fatalMsg,
       }).catch(updateErr => {
         console.error(`[Pipeline] Failed to write fatal error to integration ${options.integrationId}:`, updateErr);
       });
+      import("./integration-autoheal.js").then(({ onIntegrationFailure }) => {
+        onIntegrationFailure(options.integrationId!, fatalMsg).catch(() => {});
+      }).catch(() => {});
     }
   });
 }
@@ -2194,7 +2221,45 @@ export async function enrichIncidentAfterCreation(incidentId: number, tenantId: 
       const contextRaw = (incident as any).rawPayload;
       const newIOCs = extractIOCsFromText(contextText, contextRaw, incident.affectedAssets || undefined);
       if (newIOCs.length > 0 && !incident.iocData) {
-        updates.iocData = { indicators: newIOCs };
+        try {
+          const { loadOpenCTIConfig, lookupOpenCTIIOC } = await import("./opencti-connector");
+          const octiConfig = await loadOpenCTIConfig();
+          const enriched = await Promise.all(
+            newIOCs.map(async (ioc) => {
+              if (!octiConfig) return ioc;
+              try {
+                const octiMatch = await lookupOpenCTIIOC(octiConfig, ioc.value, ioc.type);
+                if (octiMatch) {
+                  // Persist attribution context to opencti_ioc_context table
+                  pool.query(
+                    `INSERT INTO opencti_ioc_context
+                      (ioc_value, ioc_type, stix_id, actor_name, actor_stix_id,
+                       campaign_name, campaign_stix_id, malware_family, malware_stix_id,
+                       confidence, score, incident_id)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                     ON CONFLICT DO NOTHING`,
+                    [
+                      ioc.value, ioc.type, octiMatch.stixId ?? null,
+                      octiMatch.actorName ?? null, octiMatch.actorStixId ?? null,
+                      octiMatch.campaignName ?? null, octiMatch.campaignStixId ?? null,
+                      octiMatch.malwareFamily ?? null, octiMatch.malwareStixId ?? null,
+                      octiMatch.confidence ?? 70, octiMatch.score ?? 0,
+                      incidentId,
+                    ]
+                  ).catch((dbErr: Error) => console.warn(`[IncidentEnrich] opencti_ioc_context insert: ${dbErr.message}`));
+                  return { ...ioc, reputation: "malicious" as const, source: `opencti:${octiMatch.source || "live"}` };
+                }
+              } catch (lookupErr: unknown) {
+                console.warn(`[IncidentEnrich] OpenCTI lookup failed for ${ioc.value}:`, lookupErr instanceof Error ? lookupErr.message : String(lookupErr));
+              }
+              return ioc;
+            })
+          );
+          updates.iocData = { indicators: enriched };
+        } catch (enrichErr: unknown) {
+          console.warn(`[IncidentEnrich] OpenCTI enrichment block failed:`, enrichErr instanceof Error ? enrichErr.message : String(enrichErr));
+          updates.iocData = { indicators: newIOCs };
+        }
       }
 
       if (Object.keys(updates).length > 0) {

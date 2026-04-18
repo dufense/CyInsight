@@ -20,7 +20,7 @@
 #   - NAT Gateway per AZ (3 NATs) -- no single-AZ outbound dependency
 #   - VPC Endpoints (S3 Gateway, Secrets Manager Interface)
 #   - VPC Flow Logs to CloudWatch
-#   - Security Groups mirroring management plane (ALB, ECS, Aurora, MSK, OpenSearch)
+#   - Security Groups mirroring management plane (ALB, ECS, Aurora, MSK, ClickHouse)
 #
 # VPC Peering (Mumbai only):
 #   When PeeringRequesterVpcId is set (management plane VPC ID), this template
@@ -673,26 +673,6 @@ Resources:
         - Key: Name
           Value: !Sub "ccc-dp-msk-sg-${DataPlaneId}"
 
-  OpenSearchSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: CCC Data Plane OpenSearch - allow HTTPS from ECS tasks
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref ECSSecurityGroup
-          Description: OpenSearch HTTPS from ECS
-        - IpProtocol: tcp
-          FromPort: 9200
-          ToPort: 9200
-          SourceSecurityGroupId: !Ref ECSSecurityGroup
-          Description: OpenSearch REST from ECS
-      Tags:
-        - Key: Name
-          Value: !Sub "ccc-dp-opensearch-sg-${DataPlaneId}"
-
 Outputs:
 
   VpcId:
@@ -815,11 +795,6 @@ Outputs:
     Value: !Ref MSKSecurityGroup
     Export:
       Name: !Sub "${AWS::StackName}-MSKSecurityGroupId"
-
-  OpenSearchSecurityGroupId:
-    Value: !Ref OpenSearchSecurityGroup
-    Export:
-      Name: !Sub "${AWS::StackName}-OpenSearchSecurityGroupId"
 
   # ── VPC Peering (Mumbai only) ─────────────────────────────────────────────────
   VpcPeeringConnectionId:

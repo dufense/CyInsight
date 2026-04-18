@@ -1,0 +1,544 @@
+42160→      const { callAI } = await import("./ai-providers");
+42161→      const prompt = `You are a senior CTI analyst. Generate a concise 3-5 sentence intelligence assessment for campaign "${campaign.name}". Attribution: ${campaign.attribution || "Unknown"}. Status: ${campaign.active ? "Active" : "Inactive"}. Target sectors: ${(campaign.targetSectors || []).join(", ") || "Unknown"}. Target regions: ${(campaign.targetRegions || []).join(", ") || "Unknown"}. Cover campaign objectives, key TTPs observed, and recommended mitigations.`;
+42162→      const brief = await callAI(prompt, tenantId);
+42163→      res.json({ brief, campaign: campaign.name, generatedAt: new Date().toISOString() });
+42164→    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
+42165→  });
+42166→
+42167→  app.post("/api/cti/:tenantId/malware-families/:id/ai-brief", async (req, res) => {
+42168→    try {
+42169→      const tenantId = parseInt(req.params.tenantId);
+42170→      const id = parseInt(req.params.id);
+42171→      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
+42172→      await assertTenantAccess(req, tenantId);
+42173→      const { db } = await import("./db");
+42174→      const { ctiMalwareFamilies } = await import("@shared/schema");
+42175→      const [malware] = await db.select().from(ctiMalwareFamilies).where(and(eq(ctiMalwareFamilies.id, id), eq(ctiMalwareFamilies.tenantId, tenantId)));
+42176→      if (!malware) return res.status(404).json({ message: "Malware family not found" });
+42177→      const { callAI } = await import("./ai-providers");
+42178→      const prompt = `You are a malware analyst. Generate a concise 3-5 sentence technical brief for "${malware.name}" (types: ${(malware.malwareTypes || []).join(", ")}). Platforms: ${(malware.operatingSystems || []).join(", ") || "Unknown"}. Active: ${malware.active}. CVSS: ${malware.cvssScore || "N/A"}. Cover infection vector, key capabilities, detection signatures approach, and recommended containment actions.`;
+42179→      const brief = await callAI(prompt, tenantId);
+42180→      res.json({ brief, malware: malware.name, generatedAt: new Date().toISOString() });
+42181→    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
+42182→  });
+42183→
+42184→  // ── TAXII 2.1 Feed Management ──────────────────────────────────────────────
+42185→
+42186→  // List all configured TAXII servers
+42187→  app.get("/api/integrations/taxii/servers", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42188→    try {
+42189→      const { loadTaxiiServerConfigs } = await import("./taxii-client");
+42190→      const configs = await loadTaxiiServerConfigs();
+42191→      // Strip credentials before sending
+42192→      const safe = configs.map(c => ({
+42193→        id: c.id,
+42194→        name: c.name,
+42195→        displayName: c.displayName,
+42196→        url: c.url,
+42197→        authType: c.authType,
+42198→        username: c.username,
+42199→        collectionIds: c.collectionIds,
+42200→        pollIntervalHours: c.pollIntervalHours,
+42201→        lastSyncedAt: c.lastSyncedAt,
+42202→        enabled: c.enabled,
+42203→        status: c.status,
+42204→        objectCount: c.objectCount,
+42205→      }));
+42206→      res.json(safe);
+42207→    } catch (err: any) {
+42208→      res.status(500).json({ message: err.message });
+42209→    }
+42210→  });
+42211→
+42212→  // Create a new TAXII server
+42213→  app.post("/api/integrations/taxii/servers", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42214→    try {
+42215→      const { displayName, url, authType, username, password, bearerToken, collectionIds, pollIntervalHours, enabled } = req.body;
+42216→      if (!displayName || !url) return res.status(400).json({ message: "displayName and url are required" });
+42217→      const name = `taxii_${displayName.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${Date.now()}`;
+42218→      const extra = JSON.stringify({ url, authType: authType || "none", username, collectionIds: collectionIds || [], pollIntervalHours: pollIntervalHours || 6 });
+42219→      const result = await pool.query(
+42220→        `INSERT INTO platform_integrations (name, display_name, category, description, enabled, requires_key, api_key, extra_config)
+42221→         VALUES ($1, $2, 'threat_intel', 'TAXII 2.1 Feed Server', $3, $4, $5, $6::jsonb)
+42222→         RETURNING id, name, display_name, enabled, test_status, last_tested_at, extra_config`,
+42223→        [name, displayName, enabled !== false, !!bearerToken, bearerToken || null, extra]
+42224→      );
+42225→      if (password && authType === "basic") {
+42226→        const row = result.rows[0];
+42227→        const existingExtra = typeof row.extra_config === "string" ? JSON.parse(row.extra_config || "{}") : (row.extra_config || {});
+42228→        existingExtra.password = password;
+42229→        await pool.query(`UPDATE platform_integrations SET extra_config = $1::jsonb WHERE id = $2`, [JSON.stringify(existingExtra), row.id]);
+42230→      }
+42231→      res.json({ id: result.rows[0].id, name, displayName, message: "TAXII server added" });
+42232→    } catch (err: any) {
+42233→      res.status(500).json({ message: err.message });
+42234→    }
+42235→  });
+42236→
+42237→  // Update an existing TAXII server
+42238→  app.patch("/api/integrations/taxii/servers/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42239→    try {
+42240→      const id = parseInt(req.params.id);
+42241→      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
+42242→      const { displayName, url, authType, username, password, bearerToken, collectionIds, pollIntervalHours, enabled } = req.body;
+42243→      const existing = await pool.query(`SELECT extra_config, api_key FROM platform_integrations WHERE id = $1 AND name LIKE 'taxii_%'`, [id]);
+42244→      if (!existing.rows.length) return res.status(404).json({ message: "TAXII server not found" });
+42245→      const prevExtra = typeof existing.rows[0].extra_config === "string" ? JSON.parse(existing.rows[0].extra_config || "{}") : (existing.rows[0].extra_config || {});
+42246→      const newExtra = { ...prevExtra };
+42247→      if (url !== undefined) newExtra.url = url;
+42248→      if (authType !== undefined) newExtra.authType = authType;
+42249→      if (username !== undefined) newExtra.username = username;
+42250→      if (password !== undefined && authType === "basic") newExtra.password = password;
+42251→      if (collectionIds !== undefined) newExtra.collectionIds = collectionIds;
+42252→      if (pollIntervalHours !== undefined) newExtra.pollIntervalHours = pollIntervalHours;
+42253→      await pool.query(
+42254→        `UPDATE platform_integrations SET display_name = COALESCE($1, display_name), enabled = COALESCE($2, enabled), api_key = COALESCE($3, api_key), extra_config = $4::jsonb WHERE id = $5`,
+42255→        [displayName || null, enabled !== undefined ? enabled : null, bearerToken || null, JSON.stringify(newExtra), id]
+42256→      );
+42257→      res.json({ message: "TAXII server updated" });
+42258→    } catch (err: any) {
+42259→      res.status(500).json({ message: err.message });
+42260→    }
+42261→  });
+42262→
+42263→  // Delete a TAXII server
+42264→  app.delete("/api/integrations/taxii/servers/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42265→    try {
+42266→      const id = parseInt(req.params.id);
+42267→      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
+42268→      await pool.query(`DELETE FROM platform_integrations WHERE id = $1 AND name LIKE 'taxii_%'`, [id]);
+42269→      res.json({ message: "TAXII server deleted" });
+42270→    } catch (err: any) {
+42271→      res.status(500).json({ message: err.message });
+42272→    }
+42273→  });
+42274→
+42275→  // Test TAXII server connection
+42276→  app.post("/api/integrations/taxii/servers/:id/test", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42277→    try {
+42278→      const id = parseInt(req.params.id);
+42279→      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
+42280→      const { loadTaxiiServerConfigs, testTaxiiConnection } = await import("./taxii-client");
+42281→      const configs = await loadTaxiiServerConfigs();
+42282→      const cfg = configs.find(c => c.id === id);
+42283→      if (!cfg) return res.status(404).json({ message: "TAXII server not found" });
+42284→      const result = await testTaxiiConnection(cfg);
+42285→      await pool.query(
+42286→        `UPDATE platform_integrations SET test_status = $1, test_message = $2, last_tested_at = NOW() WHERE id = $3`,
+42287→        [result.success ? "ok" : "error", result.message, id]
+42288→      );
+42289→      res.json(result);
+42290→    } catch (err: any) {
+42291→      res.status(500).json({ message: err.message });
+42292→    }
+42293→  });
+42294→
+42295→  // Manually trigger TAXII poll for one server
+42296→  app.post("/api/integrations/taxii/servers/:id/poll", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42297→    try {
+42298→      const id = parseInt(req.params.id);
+42299→      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
+42300→      const { loadTaxiiServerConfigs, pollTaxiiServer } = await import("./taxii-client");
+42301→      const configs = await loadTaxiiServerConfigs();
+42302→      const cfg = configs.find(c => c.id === id);
+42303→      if (!cfg) return res.status(404).json({ message: "TAXII server not found" });
+42304→      const results = await pollTaxiiServer(cfg);
+42305→      const totals = results.reduce((acc, r) => ({ iocCount: acc.iocCount + r.iocCount, actorCount: acc.actorCount + r.actorCount, campaignCount: acc.campaignCount + r.campaignCount, malwareCount: acc.malwareCount + r.malwareCount }), { iocCount: 0, actorCount: 0, campaignCount: 0, malwareCount: 0 });
+42306→      res.json({ results, totals, message: `Polled ${results.length} collection(s)` });
+42307→    } catch (err: any) {
+42308→      res.status(500).json({ message: err.message });
+42309→    }
+42310→  });
+42311→
+42312→  // Get TAXII IOCs
+42313→  app.get("/api/integrations/taxii/iocs", isAuthenticated, async (req, res) => {
+42314→    try {
+42315→      const { source, type, limit = "100", offset = "0" } = req.query;
+42316→      const whereClauses = ["1=1"];
+42317→      const filterParams: unknown[] = [];
+42318→      if (source) { filterParams.push(`taxii:${source}`); whereClauses.push(`source = $${filterParams.length}`); }
+42319→      if (type) { filterParams.push(type); whereClauses.push(`indicator_type = $${filterParams.length}::ioc_type`); }
+42320→      const whereStr = whereClauses.join(" AND ");
+42321→      const lim = parseInt(String(limit), 10) || 100;
+42322→      const off = parseInt(String(offset), 10) || 0;
+42323→      const [result, countRes] = await Promise.all([
+42324→        pool.query(
+42325→          `SELECT id, stix_id, indicator_type, indicator_value, reputation, confidence, source, tags, first_seen, last_seen, created_at, updated_at
+42326→           FROM taxii_stix_iocs WHERE ${whereStr}
+42327→           ORDER BY updated_at DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
+42328→          [...filterParams, lim, off]
+42329→        ),
+42330→        pool.query(`SELECT COUNT(*) FROM taxii_stix_iocs WHERE ${whereStr}`, filterParams),
+42331→      ]);
+42332→      res.json({ iocs: result.rows, total: parseInt(String(countRes.rows[0]?.count || "0"), 10) });
+42333→    } catch (err: any) {
+42334→      res.status(500).json({ message: err.message });
+42335→    }
+42336→  });
+42337→
+42338→  // Get TAXII threat actors
+42339→  app.get("/api/integrations/taxii/actors", isAuthenticated, async (req, res) => {
+42340→    try {
+42341→      const result = await pool.query(
+42342→        `SELECT id, stix_id, name, aliases, sophistication, primary_motivation, country, first_seen, last_seen, source, tags, created_at, updated_at
+42343→         FROM taxii_threat_actors ORDER BY updated_at DESC LIMIT 200`
+42344→      );
+42345→      res.json(result.rows);
+42346→    } catch (err: any) {
+42347→      res.status(500).json({ message: err.message });
+42348→    }
+42349→  });
+42350→
+42351→  // ── OpenCTI Integration ────────────────────────────────────────────────────
+42352→
+42353→  // Get OpenCTI config (safe — no token)
+42354→  app.get("/api/integrations/opencti/config", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42355→    try {
+42356→      const result = await pool.query(
+42357→        `SELECT id, enabled, test_status, last_tested_at, extra_config
+42358→         FROM platform_integrations WHERE name = 'opencti' LIMIT 1`
+42359→      );
+42360→      if (!result.rows.length) return res.json({ configured: false });
+42361→      const row = result.rows[0];
+42362→      let extra: Record<string, unknown> = {};
+42363→      if (row.extra_config) { extra = typeof row.extra_config === "string" ? JSON.parse(row.extra_config) : row.extra_config; }
+42364→      const { loadOpenCTIConfig, getStreamStatus } = await import("./opencti-connector");
+42365→      const streamStatus = getStreamStatus();
+42366→      res.json({
+42367→        configured: true,
+42368→        id: row.id,
+42369→        enabled: row.enabled,
+42370→        testStatus: row.test_status,
+42371→        lastTestedAt: row.last_tested_at,
+42372→        lastSyncedAt: extra.lastSyncedAt || null,
+42373→        url: String(extra.url || ""),
+42374→        syncEnabled: extra.syncEnabled !== false,
+42375→        liveStreamEnabled: extra.liveStreamEnabled === true,
+42376→        iocCount: extra.iocCount || 0,
+42377→        streamStatus,
+42378→      });
+42379→    } catch (err: unknown) {
+42380→      const message = err instanceof Error ? err.message : "Internal error";
+42381→      res.status(500).json({ message });
+42382→    }
+42383→  });
+42384→
+42385→  // Upsert OpenCTI config (token is optional for partial updates — omit to keep existing)
+42386→  app.put("/api/integrations/opencti/config", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42387→    try {
+42388→      const { url, apiToken, syncEnabled, liveStreamEnabled } = req.body;
+42389→      if (!url) return res.status(400).json({ message: "url is required" });
+42390→
+42391→      // If token is omitted, keep existing value from the DB
+42392→      let resolvedToken: string | null = apiToken || null;
+42393→      if (!resolvedToken) {
+42394→        const existing = await pool.query(
+42395→          `SELECT api_key FROM platform_integrations WHERE name = 'opencti' LIMIT 1`
+42396→        );
+42397→        resolvedToken = existing.rows[0]?.api_key || null;
+42398→      }
+42399→      if (!resolvedToken) return res.status(400).json({ message: "apiToken is required for first-time setup" });
+42400→
+42401→      const extra = JSON.stringify({ url, syncEnabled: syncEnabled !== false, liveStreamEnabled: !!liveStreamEnabled });
+42402→      const result = await pool.query(
+42403→        `INSERT INTO platform_integrations (name, display_name, category, description, enabled, requires_key, api_key, extra_config)
+42404→         VALUES ('opencti', 'OpenCTI', 'threat_intel', 'OpenCTI Threat Intelligence Platform', true, true, $1, $2::jsonb)
+42405→         ON CONFLICT (name) DO UPDATE SET
+42406→           api_key = $1,
+42407→           extra_config = $2::jsonb,
+42408→           enabled = true,
+42409→           updated_at = NOW()
+42410→         RETURNING id`,
+42411→        [resolvedToken, extra]
+42412→      );
+42413→      res.json({ id: result.rows[0].id, message: "OpenCTI configured" });
+42414→    } catch (err: any) {
+42415→      res.status(500).json({ message: err.message });
+42416→    }
+42417→  });
+42418→
+42419→  // Test OpenCTI connection
+42420→  app.post("/api/integrations/opencti/test", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42421→    try {
+42422→      const { loadOpenCTIConfig, testOpenCTIConnection } = await import("./opencti-connector");
+42423→      const config = await loadOpenCTIConfig();
+42424→      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
+42425→      const result = await testOpenCTIConnection(config);
+42426→      await pool.query(
+42427→        `UPDATE platform_integrations SET test_status = $1, test_message = $2, last_tested_at = NOW() WHERE name = 'opencti'`,
+42428→        [result.success ? "ok" : "error", result.message]
+42429→      );
+42430→      res.json(result);
+42431→    } catch (err: any) {
+42432→      res.status(500).json({ message: err.message });
+42433→    }
+42434→  });
+42435→
+42436→  // Trigger manual OpenCTI sync
+42437→  app.post("/api/integrations/opencti/sync", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42438→    try {
+42439→      const { loadOpenCTIConfig, runOpenCTISync } = await import("./opencti-connector");
+42440→      const config = await loadOpenCTIConfig();
+42441→      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
+42442→      const result = await runOpenCTISync(config);
+42443→      // Write lastSyncedAt to extra_config so it is distinct from last_tested_at
+42444→      await pool.query(
+42445→        `UPDATE platform_integrations
+42446→         SET extra_config = jsonb_set(COALESCE(extra_config, '{}'), '{lastSyncedAt}', $1::jsonb)
+42447→         WHERE name = 'opencti'`,
+42448→        [JSON.stringify(new Date().toISOString())]
+42449→      ).catch((e: Error) => console.warn("[OpenCTI] Failed to write lastSyncedAt:", e.message));
+42450→      res.json(result);
+42451→    } catch (err: unknown) {
+42452→      const message = err instanceof Error ? err.message : "Internal error";
+42453→      res.status(500).json({ message });
+42454→    }
+42455→  });
+42456→
+42457→  // Start/stop OpenCTI live stream
+42458→  app.post("/api/integrations/opencti/stream", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
+42459→    try {
+42460→      const { action } = req.body;
+42461→      const { loadOpenCTIConfig, startLiveStream, stopLiveStream, getStreamStatus } = await import("./opencti-connector");
+42462→      if (action === "stop") {
+42463→        stopLiveStream();
+42464→        return res.json({ active: false, message: "Stream stopped" });
+42465→      }
+42466→      const config = await loadOpenCTIConfig();
+42467→      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
+42468→      if (!config.liveStreamEnabled) return res.status(400).json({ success: false, message: "Live stream not enabled in config" });
+42469→      await startLiveStream(config);
+42470→      res.json({ active: true, message: "Stream started", status: getStreamStatus() });
+42471→    } catch (err: unknown) {
+42472→      const message = err instanceof Error ? err.message : "Internal error";
+42473→      res.status(500).json({ message });
+42474→    }
+42475→  });
+42476→
+42477→  // Get live stream status
+42478→  app.get("/api/integrations/opencti/stream-status", isAuthenticated, async (req, res) => {
+42479→    try {
+42480→      const { getStreamStatus } = await import("./opencti-connector");
+42481→      res.json(getStreamStatus());
+42482→    } catch (err: any) {
+42483→      res.status(500).json({ message: err.message });
+42484→    }
+42485→  });
+42486→
+42487→  // Get OpenCTI threat actors (from cache)
+42488→  app.get("/api/integrations/opencti/actors", isAuthenticated, async (req, res) => {
+42489→    try {
+42490→      const result = await pool.query(
+42491→        `SELECT id, stix_id, name, aliases, description, sophistication, primary_motivation, country, first_seen, last_seen, confidence, score, linked_ioc_count, created_at, updated_at
+42492→         FROM opencti_threat_actors_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
+42493→      );
+42494→      res.json(result.rows);
+42495→    } catch (err: any) {
+42496→      if (err.message?.includes("does not exist")) return res.json([]);
+42497→      res.status(500).json({ message: err.message });
+42498→    }
+42499→  });
+42500→
+42501→  // Get OpenCTI campaigns (from cache)
+42502→  app.get("/api/integrations/opencti/campaigns", isAuthenticated, async (req, res) => {
+42503→    try {
+42504→      const result = await pool.query(
+42505→        `SELECT id, stix_id, name, description, aliases, first_seen, last_seen, objective, confidence, created_at, updated_at
+42506→         FROM opencti_campaigns_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
+42507→      );
+42508→      res.json(result.rows);
+42509→    } catch (err: any) {
+42510→      if (err.message?.includes("does not exist")) return res.json([]);
+42511→      res.status(500).json({ message: err.message });
+42512→    }
+42513→  });
+42514→
+42515→  // Get OpenCTI malware (from cache)
+42516→  app.get("/api/integrations/opencti/malware", isAuthenticated, async (req, res) => {
+42517→    try {
+42518→      const result = await pool.query(
+42519→        `SELECT id, stix_id, name, description, aliases, malware_types, kill_chain_phases, first_seen, last_seen, confidence, created_at, updated_at
+42520→         FROM opencti_malware_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
+42521→      );
+42522→      res.json(result.rows);
+42523→    } catch (err: any) {
+42524→      if (err.message?.includes("does not exist")) return res.json([]);
+42525→      res.status(500).json({ message: err.message });
+42526→    }
+42527→  });
+42528→
+42529→  // Get OpenCTI IOCs (from cache)
+42530→  app.get("/api/integrations/opencti/iocs", isAuthenticated, async (req, res) => {
+42531→    try {
+42532→      const { type, limit = "100", offset = "0" } = req.query;
+42533→      const whereClauses = ["1=1"];
+42534→      const filterParams: unknown[] = [];
+42535→      if (type) { filterParams.push(type); whereClauses.push(`indicator_type = $${filterParams.length}::ioc_type`); }
+42536→      const whereStr = whereClauses.join(" AND ");
+42537→      const lim = parseInt(String(limit), 10) || 100;
+42538→      const off = parseInt(String(offset), 10) || 0;
+42539→      const [result, countResult] = await Promise.all([
+42540→        pool.query(
+42541→          `SELECT id, stix_id, indicator_type, indicator_value, reputation, confidence, score, source, labels, first_seen, last_seen, created_at, updated_at
+42542→           FROM opencti_ioc_cache WHERE ${whereStr}
+42543→           ORDER BY score DESC, updated_at DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
+42544→          [...filterParams, lim, off]
+42545→        ),
+42546→        pool.query(`SELECT COUNT(*) FROM opencti_ioc_cache WHERE ${whereStr}`, filterParams),
+42547→      ]);
+42548→      const total = parseInt(String(countResult.rows[0]?.count || "0"), 10);
+42549→      res.json({ iocs: result.rows, total });
+42550→    } catch (err: any) {
+42551→      if (err.message?.includes("does not exist")) return res.json({ iocs: [], total: 0 });
+42552→      res.status(500).json({ message: err.message });
+42553→    }
+42554→  });
+42555→
+42556→  // Get OpenCTI IOC attribution context for a specific incident
+42557→  app.get("/api/integrations/opencti/ioc-context", isAuthenticated, async (req, res) => {
+42558→    try {
+42559→      const incidentId = req.query.incidentId ? parseInt(String(req.query.incidentId), 10) : null;
+42560→      if (!incidentId || isNaN(incidentId)) {
+42561→        return res.status(400).json({ message: "incidentId is required" });
+42562→      }
+42563→
+42564→      // Verify the requesting user has access to the incident's tenant
+42565→      const incidentRow = await pool.query<{ tenant_id: number }>(
+42566→        `SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`,
+42567→        [incidentId]
+42568→      );
+42569→      if (incidentRow.rows.length === 0) {
+42570→        return res.status(404).json({ message: "Incident not found" });
+42571→      }
+42572→      const incidentTenantId = incidentRow.rows[0].tenant_id;
+42573→      await assertTenantAccess(req, incidentTenantId);
+42574→
+42575→      const result = await pool.query(
+42576→        `SELECT id, ioc_value, ioc_type, stix_id, actor_name, actor_stix_id, campaign_name, campaign_stix_id,
+42577→                malware_family, malware_stix_id, confidence, score, incident_id, created_at
+42578→         FROM opencti_ioc_context WHERE incident_id = $1 ORDER BY score DESC, created_at DESC LIMIT 50`,
+42579→        [incidentId]
+42580→      );
+42581→      res.json(result.rows);
+42582→    } catch (err: unknown) {
+42583→      const msg = err instanceof Error ? err.message : String(err);
+42584→      if (msg.includes('does not exist')) return res.json([]);
+42585→      const httpStatus = (err !== null && typeof err === "object" && "status" in err && typeof (err as Record<string, unknown>).status === "number") ? (err as { status: number }).status : 500;
+42586→      res.status(httpStatus).json({ message: msg });
+42587→    }
+42588→  });
+42589→
+42590→  // Combined STIX IOC search across all sources
+42591→  app.get("/api/integrations/stix/iocs", isAuthenticated, async (req, res) => {
+42592→    try {
+42593→      const { source, type, search, dateFrom, dateTo, limit = "100", offset = "0" } = req.query;
+42594→      const lim = Math.min(parseInt(String(limit), 10) || 100, 500);
+42595→      const off = parseInt(String(offset), 10) || 0;
+42596→
+42597→      const whereParts: string[] = [];
+42598→      const params: unknown[] = [];
+42599→
+42600→      if (source && source !== "all") {
+42601→        if (source === "opencti") {
+42602→          params.push("opencti");
+42603→          whereParts.push(`source = $${params.length}`);
+42604→        } else if (source === "taxii") {
+42605→          params.push("taxii:%");
+42606→          whereParts.push(`source LIKE $${params.length}`);
+42607→        } else {
+42608→          params.push(String(source));
+42609→          whereParts.push(`source = $${params.length}`);
+42610→        }
+42611→      }
+42612→      if (type && type !== "all") {
+42613→        if (type === "hash") {
+42614→          whereParts.push(`indicator_type IN ('hash_md5'::ioc_type, 'hash_sha256'::ioc_type, 'hash_sha1'::ioc_type)`);
+42615→        } else {
+42616→          params.push(type);
+42617→          whereParts.push(`indicator_type = $${params.length}::ioc_type`);
+42618→        }
+42619→      }
+42620→      if (search) {
+42621→        params.push(`%${search}%`);
+42622→        whereParts.push(`indicator_value ILIKE $${params.length}`);
+42623→      }
+42624→      if (dateFrom) {
+42625→        params.push(dateFrom);
+42626→        whereParts.push(`first_seen >= $${params.length}`);
+42627→      }
+42628→      if (dateTo) {
+42629→        params.push(dateTo);
+42630→        whereParts.push(`first_seen <= $${params.length}`);
+42631→      }
+42632→
+42633→      const where = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+42634→
+42635→      // Proper UNION ALL query for correct mixed-source pagination
+42636→      const unionQuery = `
+42637→        SELECT stix_id, indicator_type, indicator_value, reputation, confidence, source,
+42638→               tags::text AS labels, first_seen, last_seen, updated_at, 'taxii' AS source_type
+42639→        FROM taxii_stix_iocs ${where}
+42640→        UNION ALL
+42641→        SELECT stix_id, indicator_type, indicator_value, reputation, confidence, source,
+42642→               labels::text AS labels, first_seen, last_seen, updated_at, 'opencti' AS source_type
+42643→        FROM opencti_ioc_cache ${where}
+42644→      `;
+42645→      const dataParams = [...params, lim, off];
+42646→      const [dataResult, countResult] = await Promise.all([
+42647→        pool.query(
+42648→          `SELECT * FROM (${unionQuery}) u ORDER BY updated_at DESC LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+42649→          dataParams
+42650→        ),
+42651→        pool.query(
+42652→          `SELECT COUNT(*) FROM (${unionQuery}) u`,
+42653→          params
+42654→        ),
+42655→      ]);
+42656→
+42657→      const total = parseInt(String(countResult.rows[0]?.count || "0"), 10);
+42658→
+42659→      // Get source stats from both TAXII and OpenCTI caches
+42660→      const sourcesResult = await pool.query(
+42661→        `SELECT source, COUNT(*) AS count FROM taxii_stix_iocs GROUP BY source
+42662→         UNION ALL
+42663→         SELECT source, COUNT(*) AS count FROM opencti_ioc_cache GROUP BY source`
+42664→      );
+42665→
+42666→      res.json({ iocs: dataResult.rows, total, sources: sourcesResult.rows });
+42667→    } catch (err: unknown) {
+42668→      const message = err instanceof Error ? err.message : "Internal error";
+42669→      console.error("[STIX IOC] Query error:", err);
+42670→      res.status(500).json({ message });
+42671→    }
+42672→  });
+42673→
+42674→  // CTI AI Brief — AI-generated threat intelligence summary
+42675→  app.post("/api/cti/:tenantId/ai-brief", async (req, res) => {
+42676→    try {
+42677→      const tenantId = parseInt(req.params.tenantId);
+42678→      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+42679→      await assertTenantAccess(req, tenantId);
+42680→      const { db } = await import("./db");
+42681→      const { ctiThreatActors, ctiCampaigns, ctiMalwareFamilies } = await import("@shared/schema");
+42682→      await seedCtiDataForTenant(tenantId);
+42683→      const [actors, campaigns, malware] = await Promise.all([
+42684→        db.select({ name: ctiThreatActors.name, country: ctiThreatActors.country, active: ctiThreatActors.active, confidence: ctiThreatActors.confidence }).from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)).limit(10),
+42685→        db.select({ name: ctiCampaigns.name, active: ctiCampaigns.active, attribution: ctiCampaigns.attribution, targetSectors: ctiCampaigns.targetSectors }).from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)).limit(10),
+42686→        db.select({ name: ctiMalwareFamilies.name, malwareTypes: ctiMalwareFamilies.malwareTypes, active: ctiMalwareFamilies.active }).from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)).limit(8),
+42687→      ]);
+42688→      const { callAI } = await import("./ai-providers");
+42689→      const prompt = `You are a senior threat intelligence analyst. Generate a concise executive-level CTI brief (4-6 sentences) covering the current threat landscape based on this data:
+42690→Active Threat Actors: ${actors.filter(a => a.active).map(a => `${a.name} (${a.country || 'Unknown'})`).join(', ')}
+42691→Active Campaigns: ${campaigns.filter(c => c.active).map(c => c.name).join(', ')}
+42692→Active Malware: ${malware.filter(m => m.active).map(m => `${m.name} (${(m.malwareTypes || []).join('/')})`).join(', ')}
+42693→Write a professional threat intelligence narrative suitable for a CISO briefing. Focus on most critical threats, emerging patterns, and recommended priorities.`;
+42694→      const brief = await callAI(prompt, tenantId);
+42695→      res.json({ brief, generatedAt: new Date().toISOString() });
+42696→    } catch (err: any) {
+42697→      res.status(err.status ?? 500).json({ message: err.message });
+42698→    }
+42699→  });
+42700→
+42701→  return httpServer;
+42702→}
+42703→

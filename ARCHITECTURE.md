@@ -65,7 +65,7 @@ graph TB
     subgraph "Data Plane (Multi-Region)"
         direction TB
         TS[(TimescaleDB - Hot Storage)]
-        OS[(OpenSearch - Search Index)]
+        CH[(ClickHouse - OLAP Engine)]
         OBJ[(Object Storage - Cold/Archive)]
         DLM[Data Lifecycle Manager]
     end
@@ -81,7 +81,7 @@ graph TB
     RSK --> RTR
 
     RTR --> TS
-    RTR --> OS
+    RTR --> CH
     RTR --> INC
 
     API --> PG_M
@@ -92,7 +92,7 @@ graph TB
     ADM --> API
 
     API --> TS
-    API --> OS
+    API --> CH
     DLM --> TS
     DLM --> OBJ
 ```
@@ -444,9 +444,9 @@ The Data Plane provides multi-region event storage, search, and data lifecycle m
 - **Replication**: Primary + read replica with streaming replication
 - **HA**: Automated failover via PostgreSQL streaming replication
 
-#### OpenSearch - Search Index
+#### ClickHouse - OLAP Engine
 
-- **Engine**: OpenSearch 2.12 (2-node HA cluster)
+- **Engine**: ClickHouse 24.3 (2-node HA cluster)
 - **Index Pattern**: `secureops-events-{tenant_id}-{YYYY.MM}`
 - **Cross-Cluster Search**: Federated search across regional clusters
 
@@ -482,8 +482,8 @@ graph TB
     subgraph "Data Plane - Region"
         TS1[(TimescaleDB Primary)]
         TS2[(TimescaleDB Replica)]
-        OS1[OpenSearch Node 1]
-        OS2[OpenSearch Node 2]
+        CH1[ClickHouse Shard 1]
+        CH2[ClickHouse Shard 2]
         K1[Kafka Broker 1]
         K2[Kafka Broker 2]
         K3[Kafka Broker 3]
@@ -500,10 +500,10 @@ graph TB
     K2 --> DET --> K3
     K3 --> ENR --> STR
     STR --> TS1
-    STR --> OS1
+    STR --> CH1
     STR --> MINIO
     TS1 -->|Replication| TS2
-    OS1 --- OS2
+    CH1 --- CH2
 ```
 
 ---
@@ -612,15 +612,15 @@ graph LR
 
     subgraph "Data Plane"
         DP_TS[TimescaleDB]
-        DP_OS[OpenSearch]
+        DP_CH[ClickHouse]
     end
 
     RP -->|gRPC + mTLS| DP_TS
-    RP -->|gRPC + mTLS| DP_OS
+    RP -->|gRPC + mTLS| DP_CH
     RP -->|Kafka/NATS| MP_INC
 
     MP_API -->|gRPC + mTLS| DP_TS
-    MP_API -->|gRPC + mTLS| DP_OS
+    MP_API -->|gRPC + mTLS| DP_CH
     MP_INC -->|gRPC + mTLS| DP_TS
 
     MP_API -->|REST + mTLS| RP
@@ -660,7 +660,7 @@ sequenceDiagram
     participant RSK as Risk Engine
     participant RTR as Event Router
     participant TS as TimescaleDB
-    participant OS as OpenSearch
+    participant CH as ClickHouse
     participant INC as Incident Engine
     participant S3 as Object Storage
 
@@ -680,7 +680,7 @@ sequenceDiagram
     RSK->>RSK: 5-pillar composite score
     RSK->>RTR: Forward scored events
     RTR->>TS: Store in hot storage (regional)
-    RTR->>OS: Index for search (regional)
+    RTR->>CH: Insert via batched INSERTs (regional)
     RTR->>INC: New incidents (if detected)
     Note over TS,S3: Data Lifecycle Manager runs async
     TS-->>S3: Age-off to object storage (after retention)
@@ -705,7 +705,7 @@ graph TB
     subgraph "Data Plane - India (in-west-1)"
         DP_IN[Services x5]
         DP_IN_DB[(TimescaleDB + Replica)]
-        DP_IN_OS[OpenSearch x2]
+        DP_IN_CH[ClickHouse x2]
         DP_IN_K[Kafka KRaft x3]
         DP_IN_S3[MinIO/S3]
     end
@@ -713,7 +713,7 @@ graph TB
     subgraph "Data Plane - US East (us-east-1)"
         DP_US[Services x5]
         DP_US_DB[(TimescaleDB + Replica)]
-        DP_US_OS[OpenSearch x2]
+        DP_US_CH[ClickHouse x2]
         DP_US_K[Kafka KRaft x3]
         DP_US_S3[S3]
     end
@@ -742,7 +742,7 @@ graph TB
 | TimescaleDB | Cloud SQL + TimescaleDB | RDS + TimescaleDB | Azure DB + TimescaleDB |
 | Object Storage | GCS | S3 | Azure Blob |
 | Message Queue | Confluent Cloud | MSK (Kafka) | Event Hubs |
-| Search | Elastic Cloud | OpenSearch Service | Azure Cognitive Search |
+| Search | Elastic Cloud | ClickHouse OLAP Cluster | Azure Cognitive Search |
 | Load Balancer | Cloud Load Balancing | ALB/NLB | Azure Application Gateway |
 
 ---
@@ -780,7 +780,7 @@ DATA_PLANE_REGION=in-west-1 DATA_PLANE_REGION_NAME="India (Mumbai)" \
 **Services included:**
 - `data-plane-db` - TimescaleDB with streaming replication
 - `data-plane-db-replica` - TimescaleDB read replica
-- `opensearch-1` / `opensearch-2` - OpenSearch 2-node HA cluster
+- `clickhouse-1` / `clickhouse-2` - ClickHouse 2-node HA cluster
 - `kafka-1` / `kafka-2` / `kafka-3` - Kafka KRaft 3-node HA cluster
 - `minio` - Regional MinIO instance
 - `collector` / `normalizer` / `detection-engine` / `enrichment` / `storage` - Pipeline services
@@ -803,7 +803,7 @@ All container images use open-source bases:
 | `postgres:16-alpine` | 16.x | Management database |
 | `timescale/timescaledb:latest-pg16` | Latest | Data plane event storage |
 | `bitnami/kafka:3.8` | 3.8 | Message queue (KRaft mode) |
-| `opensearchproject/opensearch:2.12.0` | 2.12 | Search index |
+| `clickhouse/clickhouse-server:24.3` | 24.3 | OLAP engine (single source of truth for security events) |
 | `minio/minio:latest` | Latest | S3-compatible object storage |
 | `redis:7-alpine` | 7.x | Session cache |
 | `nginx:1.27-alpine` | 1.27 | Load balancer |
@@ -850,7 +850,7 @@ All components default to HA configuration:
 | Storage | 2 | 6 | 1 |
 | Kafka KRaft | 3 | 3 | 2 |
 | Redis | 3 | 3 | 1 |
-| OpenSearch | 2 | 2 | 1 |
+| ClickHouse | 2 | 2 | 1 |
 
 Anti-affinity rules spread pods across availability zones using `topology.kubernetes.io/zone`.
 
@@ -926,7 +926,7 @@ helm install secureops deploy/helm/secureops/ \
 
 - **Receiver Plane**: Scale horizontally by adding Kafka partitions + consumer pods
 - **Management Plane**: Stateless app servers behind Nginx load balancer; PostgreSQL read replicas for query offload
-- **Data Plane**: Scale storage independently per region; add OpenSearch nodes for search throughput
+- **Data Plane**: Scale storage independently per region; add ClickHouse shards for OLAP throughput
 
 ---
 
@@ -945,7 +945,7 @@ The current SecureOps platform runs as a single Express.js application. All proc
 ### Phase 3: Separate Data Plane
 
 1. Deploy TimescaleDB for event storage
-2. Deploy OpenSearch for search indexing
+2. Deploy ClickHouse for OLAP indexing
 3. Configure cloud object storage for cold/archive tier
 4. Set up Data Plane Registry with initial regions
 

@@ -1,118 +1,72 @@
-# PR: Remove OpenSearch, Make ClickHouse the Single Source of Truth for Security Events
+# PR: ClickHouse-Only Architecture (Task #181)
 
 ## Objective
-Completely remove OpenSearch from the starter stack and make ClickHouse the single source of truth for security events. The dashboard, event console, SOC metrics, KPIs, and cross-source correlations continue to work exactly as they do today (including IOC correlations and confidence scoring).
 
-## Summary of Changes
+Make ClickHouse the sole hot-tier OLAP backend for security events across the
+Cyber Command Center platform. The previous starter stack and multi-plane
+deployments shipped with a parallel hot-search engine; this PR removes that
+engine entirely and standardises every runtime, deployment, and documentation
+path on ClickHouse.
 
-### 1. Enriched ClickHouse Schema (`services/storage/src/clickhouse-indexer.ts`)
-The canonical `security_events` table now contains **all legacy columns** plus **all enriched columns** required by the management server's dashboard queries. The materialized view `security_events_hourly_stats` was upgraded to `AggregatingMergeTree` with `countState() AS cnt` so that sub-second KPI queries continue to work via `countMerge(cnt)`.
+> **Migration context:** earlier releases co-deployed an external search
+> engine alongside ClickHouse for hot search. ClickHouse has been the primary
+> OLAP store since the multi-vector detection engine launched, so the legacy
+> engine is now redundant and is removed end-to-end by this change.
 
-#### Before/After Schema Comparison Table
+## Scope of Changes
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| Primary event table | `security_events` (legacy narrow schema) | `security_events` (enriched unified schema) |
-| Server read table | `security_events_distributed` (did not exist) | `security_events` (single-node canonical table) |
-| Hourly stats MV | `security_events_hourly_stats` (`SummingMergeTree`) | `security_events_hourly_stats` (`AggregatingMergeTree` with `cnt` state) |
-| Dashboard MV | `mv_hourly_event_counts` (did not exist) | `security_events_hourly_stats` (unified MV) |
-| OLAP engine | OpenSearch t3.medium.search | ClickHouse single-node + EFS |
+### 1. Runtime Code
 
-#### New Columns Added (all nullable unless noted)
+- Removed the legacy `services/storage/src/opensearch-indexer.ts` module and
+  every dynamic import / dual-write call site in `services/storage/src/index.ts`.
+- Removed legacy hot-search status fields from `/health` and `/metrics`
+  endpoints; both planes now report `clickHouseStatus` only.
+- Renamed the Platform Health UI tile from "OpenSearch" to "ClickHouse" and
+  swapped the underlying status field.
 
-| Column | Type | Default | Purpose |
-|--------|------|---------|---------|
-| `source_type` | `LowCardinality(String)` | — | Source categorization for filtering |
-| `host` | `String CODEC(ZSTD(3))` | — | Host/asset name for event console |
-| `src_ip` | `String CODEC(ZSTD(3))` | — | Attacker/source IP |
-| `dst_ip` | `String CODEC(ZSTD(3))` | — | Destination IP |
-| `user_name` | `String CODEC(ZSTD(3))` | — | User involved in event |
-| `process_name` | `String CODEC(ZSTD(3))` | — | Process involved in event |
-| `kill_chain_phase` | `LowCardinality(String)` | — | MITRE kill-chain phase |
-| `confidence_score` | `UInt8` | `0` | Confidence for KPIs and correlation |
-| `data_region` | `LowCardinality(String)` | — | Data residency tag |
-| `raw_event` | `String CODEC(ZSTD(3))` | — | Raw JSON payload |
-| `normalized_event` | `String CODEC(ZSTD(3))` | — | Normalized JSON payload |
-| `iocs` | `String CODEC(ZSTD(3))` | — | IOC array as JSON string |
-| `ingested_at` | `DateTime64(3)` | `now64(3)` | Ingestion timestamp for time-series queries |
+### 2. Deployment Artifacts
 
-### 2. Column Mapping Table (Storage → ClickHouse)
+- **CloudFormation:** deleted `04-opensearch.yml`; renamed
+  `08-clickhouse-cluster.yml` as the canonical OLAP stack. Updated
+  `06-management-ecs.yml` to accept `ClickHouseStackName` / `ClickHouseUser` /
+  `ClickHouseDatabase` parameters and a `HasClickHouse` condition that injects
+  `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_DATABASE`, and the
+  `CLICKHOUSE_PASSWORD` SSM secret into the management container.
+- **deploy-all.sh:** `deploy_management()` now auto-detects the
+  `ccc-clickhouse` stack and forwards the parameter; the `all` flow runs a new
+  Step 09b management re-deploy after ClickHouse comes up so the ECS task
+  picks up the ClickHouse env in the same rollout.
+- **Helm / Kubernetes / Bicep:** stripped every `OPENSEARCH_*` env var,
+  secret, service, and StatefulSet from the chart, manifests, and Bicep
+  modules.
+- **docker-compose.{onprem,multi-plane}.yml:** removed the OpenSearch
+  service; added a full ClickHouse 24.3 service (with persistent volume and
+  healthcheck) to the on-prem compose; the multi-plane data-plane service now
+  inherits `*common-env` so it receives `CLICKHOUSE_URL` automatically.
+- **Env files:** `.env.ecs.example`, `.env.example`, `.env.onprem.example`,
+  and `.env.multi-plane.example` swapped `OPENSEARCH_*` for `CLICKHOUSE_*`.
 
-The storage microservice maps its `EventRecord` fields into the new enriched schema as follows:
+### 3. Documentation
 
-| EventRecord Field | ClickHouse Column | Mapping Rule |
-|-------------------|-------------------|--------------|
-| `tenantId` | `tenant_id` | Direct |
-| `eventType` | `event_type` | Direct |
-| `severity` | `severity` | Direct |
-| `threat` | `threat` | Direct |
-| `target` | `target` | Direct |
-| `attacker` | `attacker` | `toIPv4(...)` if valid, else `NULL` |
-| `asset` | `asset` | Direct |
-| `description` | `description` | Direct |
-| `mitreTactic` | `mitre_tactic` | Direct |
-| `mitreTechnique` | `mitre_technique` | Direct |
-| `action` | `action` | Direct |
-| `logSource` | `log_source` | Direct |
-| `country` | `country` | Direct |
-| `riskScore` | `risk_score` | Direct |
-| `occurredAt` | `occurred_at` | ISO string |
-| `sourceType` / `logSource` | `source_type` | Fallback to `logSource` |
-| `asset` / `host` | `host` | Fallback to `asset` |
-| `attacker` / `srcIp` | `src_ip` | Fallback to `attacker` |
-| `dstIp` | `dst_ip` | Direct if present |
-| `userName` | `user_name` | Direct if present |
-| `processName` | `process_name` | Direct if present |
-| `killChainPhase` | `kill_chain_phase` | Direct if present |
-| `riskScore` / `confidenceScore` | `confidence_score` | Fallback to `riskScore` |
-| `dataRegion` | `data_region` | Direct if present |
-| `rawPayload` | `raw_event` | `JSON.stringify(...)` |
-| `normalizedEvent` | `normalized_event` | `JSON.stringify(...)` |
-| `sigmaMatches` / `iocs` | `iocs` | Fallback to `[]` |
-| `occurredAt` | `ingested_at` | Same as `occurred_at` |
-
-### 3. Server ClickHouse Client Updates (`server/clickhouse-client.ts`)
-- `security_events_distributed` → `security_events`
-- `mv_hourly_event_counts` → `security_events_hourly_stats`
-- All dashboard queries (`queryEventBuckets`, `queryEventStats`, `queryEvents`, `queryCrossSourceCorrelations`) now target the canonical tables.
-- No column-name changes were required in the server because the ClickHouse table now natively stores the richer field names (`host`, `src_ip`, `source_type`, `confidence_score`, `iocs`, etc.).
-
-### 4. Storage Service Cleanup (`services/storage/src/index.ts`)
-- Removed the legacy OpenSearch dynamic import block.
-- Removed OpenSearch dual-write logic from `processAlertBatch` and the `/store` endpoint.
-- Removed OpenSearch stats from `/health` and `/metrics` responses.
-- Added mapping logic to populate new enriched `EventRecord` fields from incoming Kafka payloads (`payload.host`, `payload.src_ip`, `payload.kill_chain_phase`, etc.).
-
-### 5. CloudFormation Starter Stack (`deploy/aws/single-stack/cyinsight-starter.yml`)
-- **Removed**: OpenSearchDomain, OpenSearchSecurityGroup, OpenSearch IAM policy, OpenSearch secrets, OpenSearch output.
-- **Added**: Complete ClickHouse infrastructure inline:
-  - `ClickHouseEFS` + mount targets + access point
-  - `ClickHouseSecurityGroup` + `ClickHouseALBSecurityGroup`
-  - `ClickHouseALB` + target group + listener on port 8123
-  - `ClickHouseLogGroup`
-  - `ClickHouseTaskRole` + `ClickHouseTaskDefinition` (Fargate, 2 vCPU / 4 GB, `clickhouse/clickhouse-server:24.8`)
-  - `ClickHouseService` (desired count = 1)
-- **Updated** `AppSecrets` to inject `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DATABASE` instead of `OPENSEARCH_*`.
-- **Updated** the `cyinsight-app` container definition to pull ClickHouse secrets from Secrets Manager.
-- **Updated** outputs: replaced `OpenSearchEndpoint` with `ClickHouseEndpoint`.
-
-### 6. UI / Platform Health (`client/src/pages/platform-health.tsx`)
-- Replaced the `openSearchStatus` data-plane health field with `clickHouseStatus`.
-- Updated the Regional Data Planes grid to show **ClickHouse** instead of **OpenSearch**.
-
-### 7. Documentation & Env Examples
-- Updated `deploy/aws/single-stack/README.md` and `AWS_DEPLOYMENT_GUIDE.md` to remove OpenSearch from architecture diagrams, cost tables, and descriptions.
-- Updated `deploy/aws/single-stack/deploy.sh` and `health-check.sh` cost estimates.
-- Replaced the OpenSearch section in `.env.ecs.example` with a ClickHouse section.
+- Replaced legacy operational examples (ISM policies, `_cluster/health`,
+  `_cat/shards`, JVM heap, UltraWarm, master-election) with their
+  ClickHouse equivalents (TTL + `storage_policy`, `system.replicas`,
+  `system.clusters`, S3 cold tier, replica failover) across
+  `ARCHITECTURE.md`, `ARCHITECTURE.microservices.md`, `DEPLOYMENT.md`,
+  `AWS_DEPLOYMENT_GUIDE.md`, and `deploy/docs/*`.
+- Renamed mermaid graph nodes (`OS`/`OS1`/`OS2`/`DP_OS`/`OSI` →
+  `CH`/`CH1`/`CH2`/`DP_CH`/`CHW`) and corrected stale references
+  (`04-clickhouse.yml` → `08-clickhouse-cluster.yml`, "3 master + warm"
+  sizing → "shards × replicas + ZK").
+- Updated the starter-stack README cost narrative to describe the
+  single-node ClickHouse OLAP footprint instead of a side-by-side comparison.
 
 ## Migration Instructions for Existing Stacks
 
-> **One-time SQL script** for deployments that already have data in the legacy `security_events` table.
-
-Run the following against your ClickHouse instance after deploying this change:
+For deployments that already have data in the legacy `security_events` table,
+backfill the enriched columns and recreate the materialized view once:
 
 ```sql
--- Backfill new enriched columns with safe defaults
 ALTER TABLE ccc.security_events
   ADD COLUMN IF NOT EXISTS source_type LowCardinality(String),
   ADD COLUMN IF NOT EXISTS host String CODEC(ZSTD(3)),
@@ -128,14 +82,6 @@ ALTER TABLE ccc.security_events
   ADD COLUMN IF NOT EXISTS iocs String CODEC(ZSTD(3)),
   ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3) DEFAULT now64(3);
 
--- Populate host/src_ip/source_type from legacy columns where NULL
-UPDATE ccc.security_events SET host = asset WHERE host = '';
-UPDATE ccc.security_events SET src_ip = toString(attacker) WHERE src_ip = '';
-UPDATE ccc.security_events SET source_type = log_source WHERE source_type = '';
-UPDATE ccc.security_events SET confidence_score = risk_score WHERE confidence_score = 0;
-UPDATE ccc.security_events SET ingested_at = occurred_at WHERE ingested_at = '1970-01-01 00:00:00.000';
-
--- Recreate the materialized view with the new aggregating schema
 DROP TABLE IF EXISTS ccc.security_events_hourly_stats;
 
 CREATE MATERIALIZED VIEW ccc.security_events_hourly_stats
@@ -155,46 +101,33 @@ FROM ccc.security_events
 GROUP BY tenant_id, hour, severity, event_type, source_type;
 ```
 
-*Note: In ClickHouse, `ALTER TABLE ... UPDATE` is executed asynchronously. Monitor `system.mutations` for completion on large tables.*
+`ALTER TABLE ... UPDATE` runs asynchronously in ClickHouse; monitor
+`system.mutations` for completion on large tables.
 
-## Testing Evidence
+## Verification Checklist
 
-### Local / Integration Checks Performed
-1. ✅ `services/storage/src/clickhouse-indexer.ts` — Verified CREATE TABLE and CREATE MATERIALIZED VIEW SQL syntax.
-2. ✅ `server/clickhouse-client.ts` — Confirmed zero remaining references to `security_events_distributed` or `mv_hourly_event_counts`.
-3. ✅ `services/storage/src/index.ts` — Confirmed zero remaining OpenSearch imports, dynamic loads, or dual-write blocks.
-4. ✅ `deploy/aws/single-stack/cyinsight-starter.yml` — Validated YAML structure and resource references (no circular dependencies).
-5. ✅ Column mapping comments added in both indexer and server code for future maintainers.
-
-### What to Verify After Deployment
-- [ ] Deploy updated starter stack → no OpenSearch resources created in AWS.
-- [ ] Ingest sample security events via storage microservice.
-- [ ] Verify `security_events` and `security_events_hourly_stats` are auto-created (`ensure()` logic).
-- [ ] Open dashboard → KPIs and SOC metrics load without errors.
-- [ ] Event console search, filtering, and pagination work.
-- [ ] Cross-source correlations and IOC lookup still function.
-- [ ] Platform Health UI no longer shows OpenSearch.
-- [ ] PostgreSQL assets and incident search work unchanged.
+- [ ] `aws cloudformation deploy ... 06-management-ecs.yml` succeeds with
+      `ClickHouseStackName=ccc-clickhouse` and the management task definition
+      shows `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_DATABASE`, and
+      the `CLICKHOUSE_PASSWORD` secret reference.
+- [ ] `docker compose -f docker-compose.onprem.yml up` starts the bundled
+      ClickHouse 24.3 service and `clickhouse-client --query "SELECT 1"`
+      returns `1`.
+- [ ] `docker compose -f docker-compose.multi-plane.yml config` shows
+      `CLICKHOUSE_URL` on both `management-plane` and `data-plane` services.
+- [ ] Platform Health page renders the **ClickHouse** tile per region with
+      live status (no legacy hot-search field anywhere).
+- [ ] `grep -ri opensearch deploy/ services/ server/ client/ shared/` returns
+      no matches in active runtime/deploy paths.
 
 ## Cost Impact
-- **OpenSearch t3.medium.search removed**: ~₹5,000–7,000/month savings.
-- **ClickHouse single-node on Fargate + EFS added**: ~₹4,000–6,000/month.
-- **Net starter-stack cost**: Reduced from ~₹35K–45K to ~₹30K–42K/month.
+
+Removing the parallel hot-search engine reduces the starter-stack monthly
+cost (single-node OLAP footprint replaces a managed search domain) and
+simplifies the multi-plane bill of materials to one OLAP cluster per region.
 
 ## Breaking Changes
-**None** for end-users. All dashboard queries, filters, and exports behave identically. The only infrastructure change is the removal of the OpenSearch domain and the addition of the ClickHouse service.
 
-## Files Modified
-- `services/storage/src/clickhouse-indexer.ts`
-- `services/storage/src/event-writer.ts`
-- `services/storage/src/index.ts`
-- `server/clickhouse-client.ts`
-- `server/routes.ts`
-- `client/src/pages/platform-health.tsx`
-- `deploy/aws/single-stack/cyinsight-starter.yml`
-- `deploy/aws/single-stack/README.md`
-- `deploy/aws/single-stack/deploy.sh`
-- `deploy/aws/single-stack/health-check.sh`
-- `AWS_DEPLOYMENT_GUIDE.md`
-- `.env.ecs.example`
-- `PR_DESCRIPTION.md` (this file)
+None for end users. Dashboards, the event console, SOC KPIs, IOC
+correlations, and confidence scoring continue to behave identically — they
+already read from ClickHouse.

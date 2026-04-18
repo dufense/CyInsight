@@ -16,7 +16,7 @@
 #  │  ALB (internet-facing) ──► ECS Fargate (this template)                      │
 #  │         │                  ├─ Aurora Serverless v2  (02-aurora-management)  │
 #  │         │                  ├─ MSK Kafka             (03-msk-kafka)           │
-#  │         │                  ├─ OpenSearch            (04-opensearch)          │
+#  │         │                  ├─ ClickHouse OLAP       (08-clickhouse-cluster)  │
 #  │         │                  └─ S3 + Iceberg          (05-data-lake)           │
 #  │         │                                                                    │
 #  │  NAT GW EIP-1 ─────────────────────────────────────────────────────────┐    │
@@ -47,7 +47,7 @@
 #   NAT EIPs registered in SSM by 11-cross-region-security.yml
 #
 # CloudFormation deploy order:
-#   01-vpc → 02-aurora → 03-msk → 04-opensearch → 05-data-lake → 06-management-ecs (this)
+#   01-vpc → 02-aurora → 03-msk → 05-data-lake → 06-management-ecs (this) → 08-clickhouse-cluster
 #   → 10-data-plane-ha-vpc (x3) → 11-cross-region-security
 #   → 07-data-plane-ecs (x3) → 08-clickhouse → 09-platform-updates
 #
@@ -64,14 +64,14 @@
 #   - Optional Bedrock IAM policy (set EnableBedrock=true)
 #
 # Environment variables pulled from Secrets Manager at runtime:
-#   DATABASE_URL, SESSION_SECRET, KAFKA_BROKERS, OPENSEARCH_URL,
+#   DATABASE_URL, SESSION_SECRET, KAFKA_BROKERS, CLICKHOUSE_URL,
 #   AI_PROVIDER, AI_API_KEY
 #
 # Depends on:
 #   - 01-vpc.yml               (VPC, subnets, security groups)
 #   - 02-aurora-management.yml (DB secret ARN)
 #   - 03-msk-kafka.yml         (Kafka brokers secret)
-#   - 04-opensearch.yml        (OpenSearch secret)
+#   - 08-clickhouse-cluster.yml (ClickHouse OLAP cluster + secrets)
 #   - 05-data-lake.yml         (S3 buckets)
 #
 # Deploy:
@@ -84,7 +84,6 @@
 #       VpcStackName=ccc-vpc \
 #       AuroraStackName=ccc-aurora-management \
 #       MSKStackName=ccc-msk-kafka \
-#       OpenSearchStackName=ccc-opensearch \
 #       DataLakeStackName=ccc-data-lake \
 #       CertificateArn=arn:aws:acm:... \
 #       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ccc-management-plane:latest
@@ -112,13 +111,30 @@ Parameters:
     Type: String
     Default: ccc-msk-kafka
 
-  OpenSearchStackName:
-    Type: String
-    Default: ccc-opensearch
-
   DataLakeStackName:
     Type: String
     Default: ccc-data-lake
+
+  ClickHouseStackName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional: CloudFormation stack name of the ccc-clickhouse cluster
+      (08-clickhouse-cluster.yml). When set, CLICKHOUSE_URL/USER/DATABASE/PASSWORD
+      are injected into the management ECS task so the Read Replica router and
+      analytics endpoints query ClickHouse (the single source of truth for
+      security events). Leave empty for environments where the management plane
+      operates without the ClickHouse cluster (PostgreSQL-only mode).
+
+  ClickHouseUser:
+    Type: String
+    Default: default
+    Description: ClickHouse username (must match the cluster admin user config)
+
+  ClickHouseDatabase:
+    Type: String
+    Default: ccc
+    Description: ClickHouse database used by the management plane for analytics
 
   ImageUri:
     Type: String
@@ -217,6 +233,7 @@ Parameters:
 
 Conditions:
   HasBedrock: !Equals [!Ref EnableBedrock, "true"]
+  HasClickHouse: !Not [!Equals [!Ref ClickHouseStackName, ""]]
 
 Resources:
 
@@ -350,7 +367,6 @@ Resources:
                 Resource:
                   - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
                   - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
-                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
                   # SessionSecretArn is now a parameter — reference it directly
                   - !Ref SessionSecretArn
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
@@ -528,7 +544,6 @@ Resources:
                 Resource:
                   - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
                   - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
-                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
                   # Use the parameterised ARN — no hardcoded ARN construction
                   - !Ref SessionSecretArn
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
@@ -678,6 +693,27 @@ Resources:
             - Name: FORENSICS_ATHENA_WORKGROUP
               Value:
                 Fn::ImportValue: !Sub "${DataLakeStackName}-AthenaForensicsWorkgroupName"
+            # ── ClickHouse OLAP cluster (single source of truth for security events) ──
+            # Injected when ClickHouseStackName is set so the management plane's
+            # Read Replica router and analytics endpoints query ClickHouse directly.
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_URL
+                Value: !Sub
+                  - "http://${ALBDns}:8123"
+                  - ALBDns:
+                      Fn::ImportValue: !Sub "${ClickHouseStackName}-ALBDNSName"
+              - !Ref AWS::NoValue
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_USER
+                Value: !Ref ClickHouseUser
+              - !Ref AWS::NoValue
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_DATABASE
+                Value: !Ref ClickHouseDatabase
+              - !Ref AWS::NoValue
           Secrets:
             - Name: DATABASE_URL
               ValueFrom: !Sub
@@ -689,17 +725,18 @@ Resources:
                 - "${SecretArn}:KAFKA_BROKERS::"
                 - SecretArn:
                     Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
-            - Name: OPENSEARCH_URL
-              ValueFrom: !Sub
-                - "${SecretArn}:OPENSEARCH_URL::"
-                - SecretArn:
-                    Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
             - Name: SESSION_SECRET
               ValueFrom: !Ref SessionSecretArn
             - Name: AI_PROVIDER
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/provider-${EnvironmentName}"
             - Name: AI_API_KEY
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/api-key-${EnvironmentName}"
+            # ClickHouse admin password (stored in SSM SecureString; injected when HasClickHouse)
+            - !If
+              - HasClickHouse
+              - Name: CLICKHOUSE_PASSWORD
+                ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ccc/clickhouse/admin-password"
+              - !Ref AWS::NoValue
           MountPoints:
             # EFS is mounted at /app/data so APP_REPORTS_DIR (/app/data/reports),
             # APP_UPLOADS_DIR (/app/data/uploads), and PARQUET_DATA_DIR (/app/data/events)
@@ -979,15 +1016,6 @@ Outputs:
       Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
     Export:
       Name: !Sub "${AWS::StackName}-KafkaBrokersSecretArn"
-
-  OpenSearchSecretArn:
-    Description: >-
-      ARN of the Secrets Manager secret holding OPENSEARCH_URL.
-      Re-exported from the OpenSearch stack for downstream consumption.
-    Value:
-      Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
-    Export:
-      Name: !Sub "${AWS::StackName}-OpenSearchSecretArn"
 
   ALBTargetGroupArn:
     Description: ARN of the ALB target group routing traffic to ECS tasks.

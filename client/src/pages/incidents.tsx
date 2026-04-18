@@ -347,6 +347,19 @@ export default function IncidentsPage() {
     },
   });
 
+  const connectedIntegrationsQuery = useQuery<any[]>({
+    queryKey: ["/api/tenants", currentTenant?.id, "security-integrations", "connected"],
+    queryFn: async () => {
+      if (!currentTenant?.id) return [];
+      const res = await fetch(`/api/tenants/${currentTenant.id}/security-integrations`, { credentials: "include" });
+      if (!res.ok) return [];
+      const all = await res.json();
+      return (all || []).filter((i: any) => i.status === "connected");
+    },
+    enabled: !!currentTenant?.id,
+  });
+  const hasConnectedIntegrations = (connectedIntegrationsQuery.data?.length ?? 1) > 0;
+
   const updateMutation = useMutation({
     mutationFn: async (update: Partial<Incident> & { id: number }) => {
       const res = await apiRequest("PATCH", `/api/incidents/${update.id}`, update);
@@ -1317,12 +1330,27 @@ export default function IncidentsPage() {
           </CardContent>
         ) : incidentsList.length === 0 ? (
           <CardContent className="p-10 text-center">
-            <AlertTriangle className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
-            <p className="text-sm font-medium">No incidents found</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              {hasActiveFilters ? "Try adjusting your filters." : "No incidents match the current criteria."}
-            </p>
-            {hasActiveFilters && <Button size="sm" variant="outline" className="mt-3" onClick={clearFilters}>Clear filters</Button>}
+            {!hasConnectedIntegrations && !connectedIntegrationsQuery.isLoading && !hasActiveFilters ? (
+              <>
+                <Shield className="w-10 h-10 text-muted-foreground mx-auto mb-3 opacity-40" />
+                <p className="text-sm font-medium">No connected integrations</p>
+                <p className="text-xs text-muted-foreground mt-1 max-w-xs mx-auto">
+                  Incidents will appear here once you connect at least one security integration. Only data from active, connected sources is shown.
+                </p>
+                <Link href="/integrations">
+                  <a className="inline-block mt-3 text-xs underline text-primary" data-testid="link-integrations-from-incidents">Go to Integrations Settings</a>
+                </Link>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+                <p className="text-sm font-medium">No incidents found</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {hasActiveFilters ? "Try adjusting your filters." : "No incidents match the current criteria."}
+                </p>
+                {hasActiveFilters && <Button size="sm" variant="outline" className="mt-3" onClick={clearFilters}>Clear filters</Button>}
+              </>
+            )}
           </CardContent>
         ) : (
           <div className="overflow-x-auto">

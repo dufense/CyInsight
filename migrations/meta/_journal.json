@@ -134,6 +134,27 @@
       "when": 1774900000000,
       "tag": "0018_add_db_connectors",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1775000000000,
+      "tag": "0019_add_taxii_opencti",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1775100000000,
+      "tag": "0020_add_threat_intel_iocs_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1775200000000,
+      "tag": "0021_add_platform_settings",
+      "breakpoints": true
     }
   ]
 }

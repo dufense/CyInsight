@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,11 +8,16 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 import {
   Users, Search, Filter, RefreshCw, Globe, Calendar, Shield, AlertTriangle,
-  ChevronDown, ChevronUp, Flag, Target, Cpu, Activity,
+  ChevronDown, ChevronUp, Flag, Target, Cpu, Activity, Brain, Sparkles, Plus,
+  Trash2, Edit,
 } from "lucide-react";
 import type { CtiThreatActor } from "@shared/schema";
 
@@ -39,7 +44,30 @@ function formatDate(d: string | Date | null | undefined) {
   return new Date(d).toLocaleDateString("en-US", { year: "numeric", month: "short" });
 }
 
-function ActorDetail({ actor }: { actor: CtiThreatActor }) {
+function ActorDetail({ actor, tenantId }: { actor: CtiThreatActor; tenantId: number }) {
+  const [briefContent, setBriefContent] = useState<string | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const { toast } = useToast();
+
+  async function generateBrief() {
+    setBriefLoading(true);
+    setBriefContent(null);
+    try {
+      const res = await fetch(`/api/cti/${tenantId}/threat-actors/${actor.id}/ai-brief`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setBriefContent(data.brief || data.content || JSON.stringify(data, null, 2));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to generate AI brief";
+      toast({ title: "AI Brief Error", description: msg, variant: "destructive" });
+    } finally {
+      setBriefLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -152,17 +180,68 @@ function ActorDetail({ actor }: { actor: CtiThreatActor }) {
           <div className="text-[10px] text-muted-foreground">Campaigns</div>
         </div>
       </div>
+
+      {/* AI Brief Section */}
+      <div className="pt-3 border-t border-border/40 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium flex items-center gap-1.5">
+            <Brain className="w-3.5 h-3.5 text-violet-400" />
+            AI Intelligence Brief
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={generateBrief}
+            disabled={briefLoading}
+            className="h-7 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10"
+            data-testid="button-generate-ai-brief"
+          >
+            <Sparkles className="w-3 h-3 mr-1" />
+            {briefLoading ? "Generating…" : briefContent ? "Regenerate" : "Generate Brief"}
+          </Button>
+        </div>
+        {briefLoading && (
+          <div className="space-y-2 animate-pulse">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+            <Skeleton className="h-3 w-4/6" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-3/4" />
+          </div>
+        )}
+        {briefContent && !briefLoading && (
+          <div className="bg-violet-500/5 border border-violet-500/20 rounded-md p-3 text-xs text-foreground/80 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+            {briefContent}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
+interface NewActorForm {
+  name: string;
+  country: string;
+  sophistication: string;
+  primaryMotivation: string;
+  description: string;
+  active: boolean;
+}
+
 export default function ThreatActorsPage() {
   const { currentTenant } = useTenant();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [sortField, setSortField] = useState<"name" | "confidence" | "lastSeen">("confidence");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [selected, setSelected] = useState<CtiThreatActor | null>(null);
+  const [showCompose, setShowCompose] = useState(false);
+  const [form, setForm] = useState<NewActorForm>({
+    name: "", country: "", sophistication: "intermediate",
+    primaryMotivation: "espionage", description: "", active: true,
+  });
 
   const { data: actors = [], isLoading, refetch } = useQuery<CtiThreatActor[]>({
     queryKey: ["/api/cti", currentTenant?.id, "threat-actors"],
@@ -173,6 +252,30 @@ export default function ThreatActorsPage() {
     },
     enabled: !!currentTenant?.id,
     staleTime: 60_000,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (data: Partial<NewActorForm>) =>
+      apiRequest("POST", `/api/cti/${currentTenant!.id}/threat-actors`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cti", currentTenant?.id, "threat-actors"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cti", currentTenant?.id, "stats"] });
+      toast({ title: "Threat actor created" });
+      setShowCompose(false);
+      setForm({ name: "", country: "", sophistication: "intermediate", primaryMotivation: "espionage", description: "", active: true });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/cti/${currentTenant!.id}/threat-actors/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cti", currentTenant?.id, "threat-actors"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cti", currentTenant?.id, "stats"] });
+      setSelected(null);
+      toast({ title: "Threat actor deleted" });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
 
   const filtered = actors
@@ -211,10 +314,14 @@ export default function ThreatActorsPage() {
           </div>
           <p className="text-sm text-muted-foreground">Nation-state APTs, criminal organisations, and hacktivists tracked per tenant</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh">
-          <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setShowCompose(true)} data-testid="button-new-actor">
+            <Plus className="w-3.5 h-3.5 mr-1.5" />New Actor
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh">
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Stats row */}
@@ -355,6 +462,7 @@ export default function ThreatActorsPage() {
 
       <div className="text-xs text-muted-foreground text-right">{filtered.length} of {actors.length} actors • Click row for full profile</div>
 
+      {/* Actor detail dialog */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
         <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
@@ -363,7 +471,80 @@ export default function ThreatActorsPage() {
               Threat Actor Profile
             </DialogTitle>
           </DialogHeader>
-          {selected && <ActorDetail actor={selected} />}
+          {selected && <ActorDetail actor={selected} tenantId={currentTenant?.id ?? 0} />}
+          <DialogFooter className="pt-3 border-t border-border/40">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-red-400 border-red-500/30 hover:bg-red-500/10"
+              onClick={() => selected && deleteMutation.mutate(selected.id)}
+              disabled={deleteMutation.isPending}
+              data-testid="button-delete-actor"
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+              {deleteMutation.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* New actor compose dialog */}
+      <Dialog open={showCompose} onOpenChange={setShowCompose}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Plus className="w-4 h-4 text-primary" />New Threat Actor
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div>
+              <Label className="text-xs">Name *</Label>
+              <Input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. APT29 (Cozy Bear)" className="mt-1 h-8 text-sm" data-testid="input-actor-name" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="text-xs">Country</Label>
+                <Input value={form.country} onChange={e => setForm(f => ({ ...f, country: e.target.value }))} placeholder="e.g. Russia" className="mt-1 h-8 text-sm" />
+              </div>
+              <div>
+                <Label className="text-xs">Sophistication</Label>
+                <Select value={form.sophistication} onValueChange={v => setForm(f => ({ ...f, sophistication: v }))}>
+                  <SelectTrigger className="mt-1 h-8 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {["minimal", "intermediate", "advanced", "expert", "innovator"].map(s => (
+                      <SelectItem key={s} value={s} className="capitalize">{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">Primary Motivation</Label>
+              <Select value={form.primaryMotivation} onValueChange={v => setForm(f => ({ ...f, primaryMotivation: v }))}>
+                <SelectTrigger className="mt-1 h-8 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {["espionage", "financial", "disruption", "ideology", "notoriety"].map(m => (
+                    <SelectItem key={m} value={m} className="capitalize">{m}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-xs">Description</Label>
+              <Textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="Actor profile summary…" className="mt-1 text-sm min-h-[80px]" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setShowCompose(false)}>Cancel</Button>
+            <Button
+              size="sm"
+              onClick={() => createMutation.mutate(form)}
+              disabled={createMutation.isPending || !form.name}
+              data-testid="button-submit-actor"
+            >
+              {createMutation.isPending ? "Creating…" : "Create Actor"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -80,6 +80,12 @@ const MalwareAnalysisPage = lazy(() => import("@/pages/malware-analysis"));
 const AttackPathsPage = lazy(() => import("@/pages/attack-paths"));
 const CyberLLMPage = lazy(() => import("@/pages/cyber-llm"));
 
+const LogExplorerPage = lazy(() => import("@/pages/log-explorer"));
+const LogInvestigationPage = lazy(() => import("@/pages/log-investigation"));
+const LogSourceManagementPage = lazy(() => import("@/pages/log-source-management"));
+const DetectionFeedPage = lazy(() => import("@/pages/detection-feed"));
+const AITrainingFeedbackPage = lazy(() => import("@/pages/ai-training-feedback"));
+
 const CyberIntelPage = lazy(() => import("@/pages/cyber-intel"));
 const ThreatActorsPage = lazy(() => import("@/pages/threat-actors"));
 const IntrusionSetsPage = lazy(() => import("@/pages/intrusion-sets"));
@@ -87,6 +93,7 @@ const CtiCampaignsPage = lazy(() => import("@/pages/cti-campaigns"));
 const MalwareFamiliesPage = lazy(() => import("@/pages/malware-families"));
 const StixObservablesPage = lazy(() => import("@/pages/stix-observables"));
 const IntelReportsPage = lazy(() => import("@/pages/intel-reports"));
+const TaxiiFeedsPage = lazy(() => import("@/pages/taxii-feeds"));
 
 function PageLoader() {
   return (
@@ -326,6 +333,7 @@ function AuthenticatedRouter() {
       <Route path="/zero-trust">{() => <RouteErrorBoundary moduleName="Zero Trust"><ZeroTrustPage /></RouteErrorBoundary>}</Route>
       <Route path="/attack-paths">{() => <RouteErrorBoundary moduleName="Attack Paths"><AttackPathsPage /></RouteErrorBoundary>}</Route>
       <Route path="/cyber-llm">{() => <RouteErrorBoundary moduleName="Cyber Predictive Engine"><CyberLLMPage /></RouteErrorBoundary>}</Route>
+      <Route path="/predictive-attack">{() => <RouteErrorBoundary moduleName="Predictive Attack Engine"><CyberLLMPage /></RouteErrorBoundary>}</Route>
       <Route path="/malware-analysis">{() => <RouteErrorBoundary moduleName="Malware Analysis"><MalwareAnalysisPage /></RouteErrorBoundary>}</Route>
       <Route path="/cyber-intel">{() => <RouteErrorBoundary moduleName="Cyber Intelligence Hub"><CyberIntelPage /></RouteErrorBoundary>}</Route>
       <Route path="/threat-actors">{() => <RouteErrorBoundary moduleName="Threat Actors"><ThreatActorsPage /></RouteErrorBoundary>}</Route>
@@ -333,7 +341,13 @@ function AuthenticatedRouter() {
       <Route path="/cti-campaigns">{() => <RouteErrorBoundary moduleName="CTI Campaigns"><CtiCampaignsPage /></RouteErrorBoundary>}</Route>
       <Route path="/malware-families">{() => <RouteErrorBoundary moduleName="Malware Families"><MalwareFamiliesPage /></RouteErrorBoundary>}</Route>
       <Route path="/stix-observables">{() => <RouteErrorBoundary moduleName="STIX Observables"><StixObservablesPage /></RouteErrorBoundary>}</Route>
+      <Route path="/taxii-feeds">{() => <RouteErrorBoundary moduleName="TAXII Feeds"><TaxiiFeedsPage /></RouteErrorBoundary>}</Route>
       <Route path="/intel-reports">{() => <RouteErrorBoundary moduleName="Intel Reports"><IntelReportsPage /></RouteErrorBoundary>}</Route>
+      <Route path="/log-intelligence/explorer">{() => <RouteErrorBoundary moduleName="Log Explorer"><LogExplorerPage /></RouteErrorBoundary>}</Route>
+      <Route path="/log-investigation">{() => <RouteErrorBoundary moduleName="Log Investigation"><LogInvestigationPage /></RouteErrorBoundary>}</Route>
+      <Route path="/log-intelligence/sources">{() => <RouteErrorBoundary moduleName="Source Management"><LogSourceManagementPage /></RouteErrorBoundary>}</Route>
+      <Route path="/log-intelligence/detections">{() => <RouteErrorBoundary moduleName="Detection Feed"><DetectionFeedPage /></RouteErrorBoundary>}</Route>
+      <Route path="/log-intelligence/training">{() => <RouteErrorBoundary moduleName="AI Training"><AITrainingFeedbackPage /></RouteErrorBoundary>}</Route>
       <Route path="/incident-war-room/:id">{() => <RouteErrorBoundary moduleName="Incident War Room"><IncidentWarRoomPage /></RouteErrorBoundary>}</Route>
       <Route path="/incidents/:id/canvas">{() => <RouteErrorBoundary moduleName="Incident Canvas"><IncidentCanvasPage /></RouteErrorBoundary>}</Route>
       <Route path="/admin/my-org">{() => <RouteErrorBoundary moduleName="My Organization"><MyOrganizationPage /></RouteErrorBoundary>}</Route>

@@ -20,7 +20,7 @@ The CCC data lake replaces direct PostgreSQL storage for security event data wit
                         │                             v                               │
                         │  ┌──────────────────────────────────────────────────────┐  │
                         │  │            HOT TIER (0-30 days)                      │  │
-                        │  │          OpenSearch / Azure Search / GCS             │  │
+                        │  │         ClickHouse / Azure Data Explorer / BigQuery             │  │
                         │  │    Real-time queries, SOC analyst investigation      │  │
                         │  └──────────────────────────────────────────────────────┘  │
                         │                             │ age >30d                      │
@@ -83,7 +83,7 @@ The CCC data lake replaces direct PostgreSQL storage for security event data wit
     |
     +-- 03-msk-kafka.yml          (private subnets)
     |
-    +-- 04-opensearch.yml         (private subnets)
+    +-- 08-clickhouse-cluster.yml         (private subnets)
     |
     +-- 05-data-lake.yml          (S3 + Glue + Athena, no VPC dependency)
     |
@@ -140,20 +140,20 @@ MSK Kafka (ccc-raw-events topic)
     |
     +-- AI Normalization ---------> MSK Kafka (ccc-enriched-events)
     |                                 |
-    |                             OpenSearch (30-day hot tier)
+    |                            ClickHouse (30-day hot tier)
     |
     v
 Management Plane API
     |  Query enriched events
     v
-OpenSearch (hot) or Athena (warm/cold)
+ClickHouse (hot) or Athena (warm/cold)
 ```
 
 ### Data Tiering (AWS)
 
 | Tier | Storage Class | Days | Query Method | Monthly Cost/TB |
 |------|--------------|------|--------------|-----------------|
-| Hot | S3 Standard + OpenSearch | 0-30 | OpenSearch API | ~$45 + $25 |
+| Hot | S3 Standard + ClickHouse | 0-30 | ClickHouse SQL | ~$45 + $25 |
 | Warm | S3 Intelligent-Tiering | 31-90 | Athena $5/TB scanned | ~$18 |
 | Cold | S3 Glacier Instant | 91-365 | Athena $5/TB scanned | ~$4 |
 | Frozen | S3 Glacier Deep Archive | 365+ | Athena (rehydrate 12h) | ~$0.99 |
@@ -298,7 +298,7 @@ BigQuery (hot 0-30d, external table)
 | **Object Store** | S3 | ADLS Gen2 | GCS |
 | **Table Format** | Apache Iceberg | Delta Lake | Parquet + BigLake |
 | **Query Engine** | Athena (Trino) | Synapse Serverless SQL | BigQuery |
-| **Hot Search** | OpenSearch | Azure Search | Cloud Search |
+| **Hot OLAP** | ClickHouse | Azure Search | Cloud Search |
 | **Secrets** | Secrets Manager | Key Vault | Secret Manager |
 | **IAM** | IAM Roles | Managed Identity | Service Accounts |
 | **VNet** | VPC + Security Groups | VNet + NSGs | VPC + Firewall Rules |
@@ -358,12 +358,12 @@ Partitioning strategy:
 - **Peak headroom**: 3x with FARGATE_SPOT data plane auto-scaling
 - **Consumer lag threshold**: 100 messages before scale-out (KEDA for Azure)
 
-### OpenSearch Sizing
+### ClickHouse Sizing
 
 | Tier | Instance | Storage | AZ | Purpose |
 |------|---------|---------|-----|---------|
 | Data | r6g.large x3 | 512 GB each | 2 AZ | 30-day hot queries |
-| UltraWarm | ultrawarm1.medium x2 | 3 TB each | N/A | 31-90 day warm |
+| S3-backed cold tier | S3 cold storage | 3 TB each | N/A | 31-90 day warm |
 | Master | r6g.large x3 | Ephemeral | 3 AZ | Cluster state |
 
 ---
@@ -376,7 +376,7 @@ Partitioning strategy:
 |-----------|-----|-----|
 | Aurora (management) | 30s (failover) | 0 (synchronous) |
 | MSK Kafka | 60s (broker failover) | 0 (min.insync=2) |
-| OpenSearch | 60s (master election) | 0 (replication=2) |
+| ClickHouse | 60s (replica failover) | 0 (replication=2) |
 | S3 Iceberg | N/A (durable) | ~5 min (last Glue crawl) |
 | Athena | N/A (serverless) | N/A |
 
@@ -387,7 +387,7 @@ Partitioning strategy:
 | Aurora | Automated + manual snapshots | 14 days |
 | S3 Raw Events | Versioning enabled | 90 days |
 | S3 Iceberg | Versioning + Iceberg snapshot | 30 days (snapshots) |
-| OpenSearch | Automated snapshots to S3 | 7 days |
+| ClickHouse | Automated snapshots to S3 | 7 days |
 
 ---
 
@@ -427,7 +427,7 @@ LIMIT 1000;
 | Metric | Alert Threshold | Action |
 |--------|----------------|--------|
 | MSK UnderReplicatedPartitions | > 0 | Immediate - data loss risk |
-| OpenSearch ClusterStatus.red | > 0 | Immediate - service degraded |
+| ClickHouse cluster_state.unhealthy | > 0 | Immediate - service degraded |
 | Aurora ServerlessDatabaseCapacity | >= MaxACU | Scale up MaxACU |
 | S3 Crawler errors | > 0 | Check Lambda trigger logs |
 | ECS task CPU | > 70% avg | Auto-scales via target tracking |

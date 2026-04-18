@@ -20,7 +20,6 @@
 #   01. ccc-vpc               -- Management VPC (3-tier, 2-AZ + 3rd MSK subnet)
 #   02. ccc-aurora-management -- Aurora Serverless v2 (management OLTP, MaxACU=128, RDS Proxy)
 #   03. ccc-msk-kafka         -- MSK Kafka (m5.xlarge/1TB/500 MB/s -- 100-500 GB/day)
-#   04. ccc-opensearch         -- OpenSearch (r6g.xlarge/500 GB/3 UltraWarm -- hot tier)
 #   05. ccc-data-lake         -- S3 + Iceberg + Glue + Athena
 #   06. ccc-management-ecs    -- Management plane ECS Fargate + ALB
 #   07. ccc-dp-vpc-*          -- Data plane HA VPCs (one per region)
@@ -45,7 +44,6 @@
 #   ./deploy/aws/scripts/deploy-all.sh --stack vpc
 #   ./deploy/aws/scripts/deploy-all.sh --stack aurora
 #   ./deploy/aws/scripts/deploy-all.sh --stack kafka
-#   ./deploy/aws/scripts/deploy-all.sh --stack opensearch
 #   ./deploy/aws/scripts/deploy-all.sh --stack datalake
 #   ./deploy/aws/scripts/deploy-all.sh --stack management
 #   ./deploy/aws/scripts/deploy-all.sh --stack dp-vpc           # all 3 data plane VPCs
@@ -230,17 +228,6 @@ deploy_kafka() {
   log "MSK brokers (TLS): $(cfn_output ccc-msk-kafka BootstrapBrokersTLS)"
 }
 
-deploy_opensearch() {
-  require_vars OS_PASSWORD
-  cfn_deploy "ccc-opensearch" \
-    "${TEMPLATE_DIR}/04-opensearch.yml" \
-    "${AWS_REGION}" \
-    "EnvironmentName=${ENVIRONMENT}" \
-    "VpcStackName=ccc-vpc" \
-    "MasterUserPassword=${OS_PASSWORD}"
-  log "OpenSearch endpoint: $(cfn_output ccc-opensearch DomainEndpoint)"
-}
-
 deploy_datalake() {
   cfn_deploy "ccc-data-lake" \
     "${TEMPLATE_DIR}/05-data-lake.yml" \
@@ -261,6 +248,16 @@ deploy_management() {
     log "AI_PROVIDER=bedrock detected — attaching BedrockPolicy to ECS Task Role"
   fi
 
+  # ClickHouse wiring: empty on first pass (before ClickHouse stack exists),
+  # set to ccc-clickhouse on the post-ClickHouse re-deploy so the management
+  # plane container gets CLICKHOUSE_URL/USER/DATABASE/PASSWORD injected.
+  local ch_stack_param="ClickHouseStackName="
+  if aws cloudformation describe-stacks --stack-name ccc-clickhouse \
+      --region "${AWS_REGION}" >/dev/null 2>&1; then
+    ch_stack_param="ClickHouseStackName=ccc-clickhouse"
+    log "ClickHouse stack detected — wiring CLICKHOUSE_* env into management plane"
+  fi
+
   cfn_deploy "ccc-management-ecs" \
     "${TEMPLATE_DIR}/06-management-ecs.yml" \
     "${AWS_REGION}" \
@@ -268,11 +265,11 @@ deploy_management() {
     "VpcStackName=ccc-vpc" \
     "AuroraStackName=ccc-aurora-management" \
     "MSKStackName=ccc-msk-kafka" \
-    "OpenSearchStackName=ccc-opensearch" \
     "DataLakeStackName=ccc-data-lake" \
     "CertificateArn=${CERTIFICATE_ARN}" \
     "ImageUri=${management_image}" \
-    "EnableBedrock=${enable_bedrock}"
+    "EnableBedrock=${enable_bedrock}" \
+    "${ch_stack_param}"
 
   log "Management Plane URL: https://$(cfn_output ccc-management-ecs ALBDNSName)"
 }
@@ -420,7 +417,6 @@ deploy_data_plane() {
     "VpcPrivateSubnet3Id=${private_subnet3}" \
     "VpcStackName=${vpc_stack_name}" \
     "MSKStackName=ccc-msk-kafka" \
-    "OpenSearchStackName=ccc-opensearch" \
     "DataLakeStackName=ccc-data-lake" \
     "AuroraStackName=ccc-aurora-management" \
     "ImageUri=${data_image}" \
@@ -555,9 +551,6 @@ case "${DEPLOY_STACK}" in
   kafka)
     deploy_kafka
     ;;
-  opensearch)
-    deploy_opensearch
-    ;;
   datalake|data-lake)
     deploy_datalake
     ;;
@@ -621,11 +614,7 @@ case "${DEPLOY_STACK}" in
     deploy_kafka
 
     log ""
-    log "=== Step 04/12: OpenSearch (r6g.xlarge/500 GB/3 UltraWarm -- hot tier) ==="
-    deploy_opensearch
-
-    log ""
-    log "=== Step 05/12: S3 + Iceberg Data Lake ==="
+    log "=== Step 04/12: S3 + Iceberg Data Lake ==="
     deploy_datalake
 
     log ""
@@ -645,6 +634,10 @@ case "${DEPLOY_STACK}" in
     log ""
     log "=== Step 09/12: ClickHouse OLAP Cluster (r6i.2xlarge, 500 GiB, 12000 IOPS) ==="
     deploy_clickhouse
+
+    log ""
+    log "=== Step 09b/12: Re-deploy Management Plane to inject CLICKHOUSE_* env ==="
+    deploy_management
 
     log ""
     log "=== Step 10/12: Data Plane Aurora + RDS Proxy (per region -- Mumbai/Bahrain/Kenya) ==="
@@ -670,7 +663,6 @@ case "${DEPLOY_STACK}" in
     log "Management Plane:          https://$(cfn_output ccc-management-ecs ALBDNSName)"
     log "Aurora Endpoint:           $(cfn_output ccc-aurora-management ClusterEndpoint)"
     log "Aurora RDS Proxy:          $(cfn_output ccc-aurora-management RDSProxyEndpoint)"
-    log "OpenSearch:                $(cfn_output ccc-opensearch DomainEndpoint)"
     log "Raw Events S3:             s3://$(cfn_output ccc-data-lake RawEventsBucketName)"
     log "Iceberg S3:                s3://$(cfn_output ccc-data-lake ProcessedBucketName)"
     log "ClickHouse NLB (native):   $(cfn_output ccc-clickhouse ClickHouseNLBDNS)"
@@ -690,7 +682,7 @@ case "${DEPLOY_STACK}" in
     ;;
   *)
     echo "Unknown stack: ${DEPLOY_STACK}"
-    echo "Valid values: vpc | aurora | kafka | opensearch | datalake | management | dp-vpc | cross-region-security | clickhouse | dp-rds | data-plane | platform-updates | all"
+    echo "Valid values: vpc | aurora | kafka | datalake | management | dp-vpc | cross-region-security | clickhouse | dp-rds | data-plane | platform-updates | all"
     exit 1
     ;;
 esac

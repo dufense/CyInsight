@@ -388,37 +388,33 @@ kafka-topics.sh --bootstrap-server ${KAFKA_BROKERS} \
   --create --topic ccc-dead-letter --partitions 4 --replication-factor 3
 ```
 
-### 4. Configure OpenSearch Index Lifecycle Policy (AWS)
+### 4. Configure ClickHouse Tiered Storage Policy (AWS)
 
-```bash
-# Apply ISM (Index State Management) policy for 30-day -> warm -> cold
-curl -X PUT "https://${OPENSEARCH_URL}/_plugins/_ism/policies/ccc-event-lifecycle" \
-  -H "Content-Type: application/json" \
-  -u "${OPENSEARCH_USERNAME}:${OPENSEARCH_PASSWORD}" \
-  --data '{
-    "policy": {
-      "description": "CCC security events 30d hot, 90d warm, cold after",
-      "default_state": "hot",
-      "states": [
-        {
-          "name": "hot",
-          "actions": [],
-          "transitions": [{"state_name": "warm", "conditions": {"min_index_age": "30d"}}]
-        },
-        {
-          "name": "warm",
-          "actions": [{"warm_migration": {}}],
-          "transitions": [{"state_name": "cold", "conditions": {"min_index_age": "90d"}}]
-        },
-        {
-          "name": "cold",
-          "actions": [{"cold_migration": {"timestamp_field": "ingested_at"}}],
-          "transitions": []
-        }
-      ]
-    }
-  }'
+ClickHouse uses a `MergeTree` storage policy with multiple disk tiers and TTL
+expressions to move parts between hot (EBS), warm (gp3 / general-purpose), and
+cold (S3) storage.
+
+```sql
+-- Connect to the ClickHouse cluster (HTTP 8123 / native 9000):
+--   clickhouse-client --host "${CLICKHOUSE_HOST}" --user "${CLICKHOUSE_USER}" --password "${CLICKHOUSE_PASSWORD}"
+
+-- Apply TTL on the events table: 30 days hot, 90 days warm, then move to S3 cold tier
+ALTER TABLE ccc.events
+  MODIFY TTL
+    ingested_at + INTERVAL 30 DAY  TO VOLUME 'warm',
+    ingested_at + INTERVAL 90 DAY  TO VOLUME 'cold',
+    ingested_at + INTERVAL 365 DAY DELETE;
+
+-- Verify the policy is applied
+SELECT name, storage_policy, engine_full
+FROM system.tables
+WHERE database = 'ccc' AND name = 'events';
 ```
+
+The matching `storage_policy` (with `hot`, `warm`, and `cold` volumes pointing
+at EBS, gp3, and S3-backed disks respectively) is defined in
+`deploy/aws/cloudformation/08-clickhouse-cluster.yml` via the cluster
+configuration ConfigMap.
 
 ---
 
@@ -456,16 +452,27 @@ aws cloudformation describe-stack-events \
   --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId,Reason:ResourceStatusReason}"
 ```
 
-### OpenSearch Cluster Red (AWS)
+### ClickHouse Cluster Unhealthy (AWS)
 
 ```bash
-# Check cluster health
-curl -u "${OPENSEARCH_USERNAME}:${OPENSEARCH_PASSWORD}" \
-  "https://${OPENSEARCH_URL}/_cluster/health?pretty"
+# Quick liveness probe via the HTTP interface (default port 8123)
+curl -u "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" \
+  "${CLICKHOUSE_URL}/ping"
 
-# Check shard allocation
-curl -u "${OPENSEARCH_USERNAME}:${OPENSEARCH_PASSWORD}" \
-  "https://${OPENSEARCH_URL}/_cat/shards?h=index,shard,prirep,state,unassigned.reason&v"
+# Per-shard replication health
+clickhouse-client --host "${CLICKHOUSE_HOST}" \
+  --user "${CLICKHOUSE_USER}" --password "${CLICKHOUSE_PASSWORD}" \
+  --query "SELECT database, table, is_leader, is_readonly, absolute_delay, queue_size
+           FROM system.replicas
+           WHERE absolute_delay > 60 OR is_readonly = 1
+           FORMAT PrettyCompact"
+
+# Cluster topology and per-replica liveness
+clickhouse-client --host "${CLICKHOUSE_HOST}" \
+  --user "${CLICKHOUSE_USER}" --password "${CLICKHOUSE_PASSWORD}" \
+  --query "SELECT cluster, shard_num, replica_num, host_name, errors_count
+           FROM system.clusters
+           FORMAT PrettyCompact"
 ```
 
 ### MSK Consumer Lag (AWS)
@@ -492,7 +499,7 @@ Before going live:
 
 - [ ] All S3 buckets have `BlockPublicAcls: true` and deny non-TLS requests
 - [ ] Aurora/Cloud SQL has no public IP
-- [ ] OpenSearch/Azure Search has no public endpoint (VPC-only)
+- [ ] ClickHouse/Azure Search has no public endpoint (VPC-only)
 - [ ] MSK/Event Hubs TLS-only (no plaintext)
 - [ ] All secrets in Secrets Manager/Key Vault (no env vars with plain passwords)
 - [ ] ECS task roles have minimum required IAM permissions
@@ -510,7 +517,7 @@ Before going live:
 - Use FARGATE_SPOT 4:1 ratio for data plane tasks (80% cheaper for batch workloads)
 - Enable S3 Intelligent-Tiering for raw events after 30 days
 - Aurora Serverless v2 scales to 0.5 ACU during low traffic
-- OpenSearch UltraWarm is 90% cheaper than hot storage for 31-90 day data
+- ClickHouse cold-storage tier is 90% cheaper than hot storage for 31-90 day data
 - Athena charges $5/TB scanned - always use partition filters (event_date, tenant_id)
 
 ### Azure

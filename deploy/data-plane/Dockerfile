@@ -16,7 +16,7 @@
 #   DATA_PLANE_REGION   — Logical region ID: india | bahrain | kenya
 #   AWS_REGION          — AWS region code: ap-south-1 | me-south-1 | af-south-1
 #   KAFKA_BROKERS       — MSK bootstrap brokers (comma-separated host:port)
-#   OPENSEARCH_URL      — OpenSearch endpoint URL for this region
+#   CLICKHOUSE_URL      — ClickHouse OLAP endpoint (single source of truth for security events)
 #   S3_RAW_BUCKET       — S3 bucket for raw security events
 #   MANAGEMENT_PLANE_URL — Internal URL of the management plane
 #   AI_PROVIDER         — AI provider (for normalisation pipeline)

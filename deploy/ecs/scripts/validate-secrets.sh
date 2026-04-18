@@ -159,6 +159,9 @@ validate_management() {
     check_secret_path "${PREFIX}/shared/clickhouse-user"
     check_secret_path "${PREFIX}/shared/clickhouse-password"
     check_secret_path "${PREFIX}/shared/clickhouse-database"
+    # Required for zero-downtime password rotation
+    # (deploy/ecs/scripts/rotate-clickhouse-password.sh).
+    check_secret_path "${PREFIX}/shared/clickhouse-rotation-token"
   fi
 }
 

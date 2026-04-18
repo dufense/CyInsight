@@ -482,6 +482,76 @@ export async function runMigrations() {
     console.error("[Migration] Autoheal pool connection error:", e.message);
   }
 
+  // ── platform_integrations.extra_config column (Task #168) ────────────────────
+  // Required by TAXII client and OpenCTI connector to store URL, pollInterval,
+  // lastSyncedAt and other per-integration configuration that doesn't belong in
+  // api_key. Column is idempotent (IF NOT EXISTS).
+  try {
+    const clientPi = await pool.connect();
+    try {
+      await clientPi.query(`
+        ALTER TABLE platform_integrations
+          ADD COLUMN IF NOT EXISTS extra_config jsonb;
+      `);
+      console.log("[Migration] platform_integrations.extra_config column ensured (Task #168)");
+    } catch (e: any) {
+      console.error("[Migration] extra_config column error (non-fatal):", e.message);
+    } finally {
+      clientPi.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] extra_config pool connection error:", e.message);
+  }
+
+  // ── Performance indexes on assets table (Task #169) ─────────────────────────
+  try {
+    const clientIdx = await pool.connect();
+    try {
+      await clientIdx.query(`
+        CREATE INDEX IF NOT EXISTS idx_assets_tenant_source
+          ON assets(tenant_id, source);
+        CREATE INDEX IF NOT EXISTS idx_assets_tenant_status
+          ON assets(tenant_id, status);
+        CREATE INDEX IF NOT EXISTS idx_assets_tenant_endpoint_type
+          ON assets(tenant_id, endpoint_type);
+      `);
+      console.log("[Migration] assets performance indexes ensured (Task #169)");
+      try {
+        // Canonical schema for migration_markers (key, completed_at, metadata)
+        await clientIdx.query(`
+          CREATE TABLE IF NOT EXISTS migration_markers (
+            key VARCHAR(120) PRIMARY KEY,
+            completed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            metadata JSONB
+          )
+        `).catch(() => {});
+        // Heal any table created with the old wrong schema (missing columns)
+        await clientIdx.query(`ALTER TABLE migration_markers ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NOT NULL DEFAULT NOW()`).catch(() => {});
+        await clientIdx.query(`ALTER TABLE migration_markers ADD COLUMN IF NOT EXISTS metadata JSONB`).catch(() => {});
+        const vacuumMarker = await clientIdx.query(
+          `SELECT 1 FROM migration_markers WHERE key = 'assets_vacuum_analyze_task169' LIMIT 1`
+        );
+        if (vacuumMarker.rows.length === 0) {
+          await clientIdx.query(`VACUUM ANALYZE assets`);
+          await clientIdx.query(
+            `INSERT INTO migration_markers (key, completed_at, metadata) VALUES ('assets_vacuum_analyze_task169', NOW(), NULL) ON CONFLICT DO NOTHING`
+          );
+          console.log("[Migration] VACUUM ANALYZE assets complete (Task #169)");
+        } else {
+          console.log("[Migration] VACUUM ANALYZE assets already ran — skipping.");
+        }
+      } catch (ve: any) {
+        console.warn("[Migration] VACUUM ANALYZE non-fatal:", ve.message);
+      }
+    } catch (e: any) {
+      console.error("[Migration] assets index error (non-fatal):", e.message);
+    } finally {
+      clientIdx.release();
+    }
+  } catch (e: any) {
+    console.error("[Migration] assets index pool connection error:", e.message);
+  }
+
   // ── Log Investigation Console tables (Task #162) ─────────────────────────────
   try {
     const clientInv = await pool.connect();
@@ -528,6 +598,164 @@ export async function runMigrations() {
     }
   } catch (e: any) {
     console.error("[Migration] Investigation pool connection error:", e.message);
+  }
+
+  // ── One-time backfill v2: re-derive action for legacy "EPS Code N" records ──
+  // Uses a CTE that exactly mirrors deriveDeviceControlAction() in cynet.ts:
+  //   - Priority 1: device context (deviceType OR deviceName) → specific label
+  //     with full Blocked/Allowed/Detected state + all device-type branches
+  //   - Priority 2: epsRemediationCode 0–40 map
+  // Also corrects any generic labels left by v1 (e.g. 'Device Blocked' that
+  // could be more specific when deviceName context is available).
+  {
+    const clientBf = await pool.connect();
+    try {
+      await clientBf.query(`
+        CREATE TABLE IF NOT EXISTS migration_markers (
+          key VARCHAR(120) PRIMARY KEY,
+          completed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+          metadata JSONB
+        );
+      `).catch(() => {});
+
+      const markerV2 = await clientBf.query(
+        `SELECT 1 FROM migration_markers WHERE key = 'eps_action_backfill_v2' LIMIT 1`
+      ).catch(() => ({ rows: [] }));
+
+      if (markerV2.rows.length === 0) {
+        // CTE computes the replacement action for each candidate event, mirroring
+        // the normaliser logic exactly (state = Blocked/Allowed/Detected,
+        // prefix = device-type classification from deviceType then deviceName).
+        const updated = await clientBf.query(`
+          WITH meta AS (
+            SELECT
+              id,
+              raw_payload->'rawPayload'->'_cynetMeta' AS m,
+              action
+            FROM security_events
+            WHERE source_type = 'Cynet 360'
+              AND (
+                action ~* '^EPS Code \\d+$'
+                OR action IN (
+                  'Device Blocked','Device Allowed','Device Detected',
+                  'MTP USB Device Blocked','MTP USB Device Allowed','MTP USB Device Detected',
+                  'USB Device Blocked','USB Device Allowed','USB Device Detected',
+                  'Bluetooth Device Blocked','Bluetooth Device Allowed',
+                  'CD/DVD Device Blocked','CD/DVD Device Allowed',
+                  'Printer Blocked','Printer Allowed',
+                  'WiFi Adapter Blocked','WiFi Adapter Allowed',
+                  'Storage Device Blocked','Storage Device Allowed'
+                )
+              )
+          ),
+          classified AS (
+            SELECT
+              id,
+              action,
+              -- State: Blocked > Allowed > Detected
+              CASE
+                WHEN lower(coalesce(m->>'deviceStatus','')) LIKE '%block%'
+                  OR lower(coalesce(m->>'epsPrevention','')) LIKE '%block%'
+                  THEN 'Blocked'
+                WHEN lower(coalesce(m->>'deviceStatus','')) LIKE '%allow%'
+                  OR lower(coalesce(m->>'epsPrevention','')) LIKE '%allow%'
+                  THEN 'Allowed'
+                ELSE 'Detected'
+              END AS state,
+              -- Device prefix from deviceType then deviceName keywords
+              CASE
+                WHEN lower(coalesce(m->>'deviceType','')) = 'mtp'
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%mtp%'
+                  THEN 'MTP USB Device'
+                WHEN lower(coalesce(m->>'deviceType','')) IN ('usb','removable')
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%usb%'
+                  THEN 'USB Device'
+                WHEN lower(coalesce(m->>'deviceType','')) = 'bluetooth'
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%bluetooth%'
+                  THEN 'Bluetooth Device'
+                WHEN lower(coalesce(m->>'deviceType','')) IN ('cdrom','cd','dvd')
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%cd%'
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%dvd%'
+                  THEN 'CD/DVD Device'
+                WHEN lower(coalesce(m->>'deviceType','')) = 'printer'
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%printer%'
+                  THEN 'Printer'
+                WHEN lower(coalesce(m->>'deviceType','')) IN ('wifi','wireless')
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%wifi%'
+                  THEN 'WiFi Adapter'
+                WHEN lower(coalesce(m->>'deviceType','')) = 'storage'
+                  OR lower(coalesce(m->>'deviceName','')) LIKE '%storage%'
+                  THEN 'Storage Device'
+                WHEN m->>'deviceName' IS NOT NULL AND m->>'deviceName' != ''
+                  THEN m->>'deviceName'
+                ELSE NULL
+              END AS device_prefix,
+              -- Fallback: EPS remediation code lookup
+              CASE m->>'epsRemediationCode'
+                WHEN '0'  THEN 'No Action'        WHEN '1'  THEN 'Detected Only'
+                WHEN '2'  THEN 'Process Killed'    WHEN '3'  THEN 'File Quarantined'
+                WHEN '4'  THEN 'File Deleted'      WHEN '5'  THEN 'Network Connection Blocked'
+                WHEN '6'  THEN 'Registry Key Removed' WHEN '7' THEN 'Scheduled Task Removed'
+                WHEN '8'  THEN 'Service Stopped'   WHEN '9'  THEN 'File Restored'
+                WHEN '10' THEN 'Endpoint Isolated' WHEN '11' THEN 'Memory Scan Completed'
+                WHEN '12' THEN 'Script Blocked'    WHEN '13' THEN 'Exploit Prevented'
+                WHEN '14' THEN 'Ransomware Rolled Back' WHEN '15' THEN 'Credential Theft Prevented'
+                WHEN '16' THEN 'Lateral Movement Blocked' WHEN '17' THEN 'USB Device Blocked'
+                WHEN '18' THEN 'USB Device Allowed' WHEN '19' THEN 'MTP Device Blocked'
+                WHEN '20' THEN 'MTP Device Allowed' WHEN '21' THEN 'CD/DVD Device Blocked'
+                WHEN '22' THEN 'CD/DVD Device Allowed' WHEN '23' THEN 'Bluetooth Device Blocked'
+                WHEN '24' THEN 'Bluetooth Device Allowed' WHEN '25' THEN 'WiFi Adapter Blocked'
+                WHEN '26' THEN 'WiFi Adapter Allowed' WHEN '27' THEN 'Printer Blocked'
+                WHEN '28' THEN 'Printer Allowed'   WHEN '29' THEN 'Storage Device Detected (Blocked)'
+                WHEN '30' THEN 'Storage Device Detected (Allowed)' WHEN '31' THEN 'Device Control Policy Applied'
+                WHEN '32' THEN 'Device Blocked'    WHEN '33' THEN 'Device Allowed'
+                WHEN '34' THEN 'File Transfer Blocked' WHEN '35' THEN 'File Transfer Allowed'
+                WHEN '36' THEN 'Shadow Copy Deleted' WHEN '37' THEN 'Boot Sector Protected'
+                WHEN '38' THEN 'MBR Protected'     WHEN '39' THEN 'Honeypot File Triggered'
+                WHEN '40' THEN 'Decoy Document Accessed'
+                ELSE NULL
+              END AS eps_label,
+              (m->>'isDeviceControl')::boolean AS is_device_control,
+              m->>'deviceType' AS device_type,
+              m->>'deviceName' AS device_name
+            FROM meta
+          ),
+          resolved AS (
+            SELECT
+              id,
+              action,
+              CASE
+                -- Priority 1: device context with state
+                WHEN is_device_control = true
+                  AND (device_type IS NOT NULL OR device_name IS NOT NULL)
+                  AND device_prefix IS NOT NULL
+                  THEN device_prefix || ' ' || state
+                -- Priority 2: EPS code map
+                WHEN eps_label IS NOT NULL THEN eps_label
+                -- No context: keep existing
+                ELSE action
+              END AS new_action
+            FROM classified
+          )
+          UPDATE security_events se
+          SET action = r.new_action
+          FROM resolved r
+          WHERE se.id = r.id
+            AND r.new_action IS DISTINCT FROM r.action
+        `);
+
+        await clientBf.query(
+          `INSERT INTO migration_markers (key) VALUES ('eps_action_backfill_v2') ON CONFLICT DO NOTHING`
+        );
+        console.log(`[Migration] EPS action backfill v2 complete — ${updated.rowCount} events updated (Task #165)`);
+      } else {
+        console.log("[Migration] EPS action backfill v2 already ran — skipping.");
+      }
+    } catch (e: any) {
+      console.error("[Migration] EPS action backfill error (non-fatal):", e.message);
+    } finally {
+      clientBf.release();
+    }
   }
 
   try {

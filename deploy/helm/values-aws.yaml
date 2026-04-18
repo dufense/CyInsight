@@ -87,11 +87,6 @@ kafkaExternal:
 redis:
   enabled: false
 
-# ── OpenSearch — Amazon OpenSearch Service ─────────────────────────────────
-# Disable in-cluster OpenSearch and use managed service via env var.
-opensearch:
-  enabled: false
-
 # ── Network Policies ───────────────────────────────────────────────────────
 networkPolicies:
   enabled: true

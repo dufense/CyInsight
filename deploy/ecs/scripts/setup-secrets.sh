@@ -74,6 +74,12 @@ if confirm "Configure ClickHouse secrets? (skip if not using ClickHouse)"; then
   put_secret "shared/clickhouse-user"     "ClickHouse username (default: default)" "default"
   put_secret "shared/clickhouse-database" "ClickHouse database name (default: ccc)" "ccc"
   put_secret "shared/clickhouse-password" "ClickHouse password (strong random string)"
+  # Shared rotation token consumed by every plane's
+  # POST /api/admin/clickhouse/rotate-password endpoint. Required to enable
+  # zero-downtime password rotation via rotate-clickhouse-password.sh.
+  # Auto-generate with `openssl rand -base64 48` if you don't have one yet.
+  put_secret "shared/clickhouse-rotation-token" \
+    "Shared bearer token used by rotate-clickhouse-password.sh to fan out to every plane (32+ char random)"
   # Shared ClickHouse URL — used by the management plane. Set to the internal
   # NLB DNS produced by clickhouse.yml (e.g. http://ccc-clickhouse-nlb-production.internal:8123).
   put_secret "shared/clickhouse-url" \
@@ -120,9 +126,6 @@ DATA_PLANE_REGIONS=(in-west-1 us-east-1 ke-east-1 sa-central-1 bh-east-1)
 for region in "${DATA_PLANE_REGIONS[@]}"; do
   log "[DATA PLANE: ${region}]"
   put_secret "data-plane/${region}/database-url"        "PostgreSQL/TimescaleDB URL for ${region}"
-  put_secret "data-plane/${region}/opensearch-url"      "OpenSearch endpoint URL for ${region}"
-  put_secret "data-plane/${region}/opensearch-username" "OpenSearch username for ${region}"
-  put_secret "data-plane/${region}/opensearch-password" "OpenSearch password for ${region}"
   put_secret "data-plane/${region}/plane-region"        "Data plane region identifier" "${region}"
   put_secret "data-plane/${region}/s3-bucket"           "S3 events bucket for ${region}"
 done

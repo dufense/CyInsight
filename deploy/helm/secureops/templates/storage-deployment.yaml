@@ -50,8 +50,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "secureops.secretName" . }}
                   key: timescaledb-url
-            - name: OPENSEARCH_URL
-              value: http://{{ include "secureops.fullname" . }}-opensearch:9200
             {{- include "secureops.objectStorageEnv" . | nindent 12 }}
           envFrom:
             - configMapRef:

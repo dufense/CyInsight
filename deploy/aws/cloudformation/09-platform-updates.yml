@@ -618,9 +618,6 @@ Resources:
             - Name: KAFKA_BROKERS
               ValueFrom:
                 Fn::ImportValue: !Sub "${ManagementECSStackName}-KafkaBrokersSecretArn"
-            - Name: OPENSEARCH_URL
-              ValueFrom:
-                Fn::ImportValue: !Sub "${ManagementECSStackName}-OpenSearchSecretArn"
             - Name: AI_PROVIDER
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/provider-${EnvironmentName}"
             - Name: AI_API_KEY

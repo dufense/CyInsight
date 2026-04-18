@@ -23,7 +23,7 @@ import {
   Brain, Send, Loader2, Bot, Zap, FileText, HelpCircle, Lightbulb,
   Play, Download, PenLine, ChevronDown, ChevronUp, WifiOff, Eye, CheckCircle2, Code,
   RotateCcw, AlertCircle, Cpu, RefreshCw, Lock, Wifi, BellRing, Camera, Ticket, Settings, ShieldCheck,
-  Globe, Bug, Server, Copy, Upload, ExternalLink, Layers, PlusCircle,
+  Globe, Bug, Server, Copy, Upload, ExternalLink, Layers, PlusCircle, Radio, Flag,
 } from "lucide-react";
 import { Tooltip as ShadTooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ScatterChart, Scatter, ZAxis } from "recharts";
@@ -179,6 +179,10 @@ export default function IncidentWarRoom() {
                         <Bug className="h-3.5 w-3.5" />
                         Malware Analysis
                       </TabsTrigger>
+                      <TabsTrigger value="historical-context" data-testid="tab-war-room-historical" className="flex items-center gap-1">
+                        <FileSearch className="h-3.5 w-3.5" />
+                        Historical Context
+                      </TabsTrigger>
                     </TabsList>
                   </div>
                   <div className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-muted to-transparent rounded-l-md" />
@@ -217,6 +221,11 @@ export default function IncidentWarRoom() {
                 <TabsContent value="malware" className="mt-4">
                   <TabErrorBoundary moduleName="Malware Analysis">
                     <MalwareTab incidentId={incidentId} incident={incident} isMSS={isMSS} />
+                  </TabErrorBoundary>
+                </TabsContent>
+                <TabsContent value="historical-context" className="mt-4">
+                  <TabErrorBoundary moduleName="Historical Context">
+                    <HistoricalContextTab incident={incident} incidentId={incidentId} />
                   </TabErrorBoundary>
                 </TabsContent>
               </Tabs>
@@ -1561,7 +1570,70 @@ function IntelTab({ incident, events }: { incident: any; events: any[] }) {
           </CardContent>
         </Card>
       )}
+
+      <OpenCTIAttributionPanel incidentId={incident?.id} />
     </div>
+  );
+}
+
+function OpenCTIAttributionPanel({ incidentId }: { incidentId?: number }) {
+  const { data: contexts, isLoading } = useQuery<Array<{
+    id: number;
+    ioc_value: string;
+    ioc_type: string;
+    stix_id?: string;
+    actor_name?: string;
+    campaign_name?: string;
+    malware_family?: string;
+    confidence: number;
+    score: number;
+  }>>({
+    queryKey: [`/api/integrations/opencti/ioc-context?incidentId=${incidentId}`],
+    enabled: !!incidentId,
+  });
+
+  if (!incidentId) return null;
+  if (!isLoading && (!contexts || contexts.length === 0)) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-1 px-4 pt-3">
+        <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <Radio className="w-3.5 h-3.5 text-blue-400" />
+          OpenCTI Attribution
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="px-4 pb-3 pt-0">
+        {isLoading ? (
+          <div className="space-y-2">{[1, 2].map(i => <Skeleton key={i} className="h-8 w-full" />)}</div>
+        ) : (
+          <div className="space-y-2">
+            {contexts!.map((ctx, i) => (
+              <div key={i} className="flex flex-wrap gap-2 items-center p-2 rounded-md border bg-muted/20 text-[11px]" data-testid={`opencti-context-${ctx.id}`}>
+                <span className="font-mono text-muted-foreground truncate max-w-[140px]">{ctx.ioc_value}</span>
+                <Badge variant="outline" className="text-[9px] px-1 py-0">{ctx.ioc_type}</Badge>
+                {ctx.actor_name && (
+                  <span className="flex items-center gap-1 text-red-400">
+                    <Flag className="w-3 h-3" />{ctx.actor_name}
+                  </span>
+                )}
+                {ctx.campaign_name && (
+                  <span className="flex items-center gap-1 text-orange-400">
+                    <Zap className="w-3 h-3" />{ctx.campaign_name}
+                  </span>
+                )}
+                {ctx.malware_family && (
+                  <span className="flex items-center gap-1 text-purple-400">
+                    <Bug className="w-3 h-3" />{ctx.malware_family}
+                  </span>
+                )}
+                <span className="ml-auto text-muted-foreground">score:{ctx.score}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -3759,6 +3831,236 @@ function MalwareTab({ incidentId, incident, isMSS }: { incidentId: number; incid
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Historical Context Tab (Task #162) ───────────────────────────────────────
+function HistoricalContextTab({ incident, incidentId }: { incident: any; incidentId: number }) {
+  const [, navigate] = useLocation();
+  const [results, setResults] = useState<any[]>([]);
+  const [hotRows, setHotRows] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasQueried, setHasQueried] = useState(false);
+  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [pollingQueryId, setPollingQueryId] = useState<string | null>(null);
+  const [coldStatus, setColdStatus] = useState<string>("RUNNING");
+  const { currentTenant } = useTenant();
+  const { toast } = useToast();
+
+  const iocList: string[] = [];
+  if (incident?.source_ip) iocList.push(incident.source_ip);
+  if (incident?.destination_ip) iocList.push(incident.destination_ip);
+  if (incident?.ioc_data && Array.isArray(incident.ioc_data)) {
+    incident.ioc_data.slice(0, 5).forEach((ioc: any) => {
+      if (ioc?.value) iocList.push(ioc.value);
+    });
+  }
+
+  const searchQuery = iocList.slice(0, 3).join(" OR ") || incident?.title || "";
+  // Full-archive query params — no date restriction so cold-tier scans the entire archive
+  const incidentQueryParams = {
+    search: searchQuery,
+    entityFilter: incident?.source_ip || incident?.destination_ip || "",
+    severity: incident?.severity ? [incident.severity] : [],
+    sourceMode: "both",
+    // Intentionally omit startDate/endDate to query full archive
+  };
+
+  // Poll cold-tier when queryId is returned from the initial query
+  useEffect(() => {
+    if (!pollingQueryId || !currentTenant?.id) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const statusRes = await fetch(`/api/log-investigation/query/status/${pollingQueryId}`, { credentials: "include" });
+        if (!statusRes.ok) return;
+        const status = await statusRes.json();
+        if (cancelled) return;
+        setColdStatus(status.status);
+        if (status.status === "SUCCEEDED" && status.result) {
+          // Merge cold-tier rows with hot-tier rows captured from initial response
+          const coldRows: any[] = status.result.rows ?? [];
+          const seenIds = new Set<number>();
+          const merged: any[] = [];
+          for (const row of [...hotRows, ...coldRows]) {
+            if (!seenIds.has(row.id)) {
+              seenIds.add(row.id);
+              merged.push(row);
+            }
+          }
+          merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          setResults(merged.slice(0, 20));
+          setPollingQueryId(null);
+          setIsLoading(false);
+        } else if (status.status === "FAILED") {
+          setPollingQueryId(null);
+          setIsLoading(false);
+          toast({ title: "Cold-tier query failed", description: "Historical archive query returned no data", variant: "destructive" });
+        } else {
+          timeoutId = setTimeout(poll, 5000);
+        }
+      } catch {
+        if (!cancelled) timeoutId = setTimeout(poll, 5000);
+      }
+    };
+
+    poll();
+    return () => { cancelled = true; clearTimeout(timeoutId); };
+  }, [pollingQueryId, currentTenant?.id]);
+
+  const runHistoricalQuery = async () => {
+    if (!currentTenant?.id) return;
+    setIsLoading(true);
+    setHasQueried(true);
+    setPollingQueryId(null);
+    setHotRows([]);
+    setResults([]);
+    setColdStatus("RUNNING");
+    try {
+      const sessionRes = await fetch("/api/log-investigation/sessions", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenantId: currentTenant.id,
+          name: `Historical Context: ${incident?.title || `INC-${incidentId}`}`,
+          description: `Auto-generated from War Room for incident ${incidentId}. IOCs: ${iocList.slice(0, 5).join(", ")}`,
+          sourceMode: "both",
+          queryParams: incidentQueryParams,
+        }),
+      });
+      if (sessionRes.ok) {
+        const session = await sessionRes.json();
+        setSessionId(session.id);
+      }
+      const queryRes = await fetch("/api/log-investigation/query", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenantId: currentTenant.id,
+          ...incidentQueryParams,
+          pageSize: 20,
+          page: 1,
+        }),
+      });
+      if (queryRes.ok) {
+        const data = await queryRes.json();
+        const initialRows: any[] = (data.rows ?? []).slice(0, 20);
+        if (data.queryId) {
+          // Cold-tier async: save hot rows and start polling
+          setHotRows(initialRows);
+          setResults(initialRows); // show hot rows immediately while cold runs
+          setPollingQueryId(data.queryId);
+          // isLoading stays true until polling completes
+        } else {
+          setResults(initialRows.slice(0, 20));
+          setIsLoading(false);
+        }
+      } else {
+        setIsLoading(false);
+      }
+    } catch (err: any) {
+      toast({ title: "Query failed", description: err.message, variant: "destructive" });
+      setIsLoading(false);
+    }
+  };
+
+  const openInConsole = () => navigate(sessionId ? `/log-investigation?session=${sessionId}` : `/log-investigation`);
+
+  return (
+    <div className="space-y-4">
+      <Card className="border-border/50">
+        <CardContent className="p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Historical Archive Context</p>
+              <p className="text-xs text-muted-foreground">Query both hot and cold log tiers for IOCs and entities extracted from this incident</p>
+              {iocList.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {iocList.map((ioc, i) => (
+                    <Badge key={i} variant="outline" className="text-[10px] font-mono">{ioc}</Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={runHistoricalQuery} disabled={isLoading} data-testid="button-historical-query">
+                {isLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                Search Archives
+              </Button>
+              {hasQueried && (
+                <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5" onClick={openInConsole} data-testid="button-open-in-console">
+                  <ExternalLink className="w-3.5 h-3.5" />Open in Console
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      {isLoading && results.length === 0 && <div className="space-y-2">{[1,2,3].map(i => <Skeleton key={i} className="h-10 w-full" />)}</div>}
+      {pollingQueryId && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground px-1" data-testid="status-cold-polling">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-500" />
+          <span>Fetching cold archive… status: <span className="font-mono">{coldStatus}</span> — hot-tier results shown below, updating when archive returns</span>
+        </div>
+      )}
+      {hasQueried && !isLoading && !pollingQueryId && results.length === 0 && (
+        <Card className="border-border/50">
+          <CardContent className="py-10 text-center text-muted-foreground">
+            <FileSearch className="w-8 h-8 mx-auto mb-2 opacity-30" />
+            <p className="text-sm">No historical log events found matching incident IOCs</p>
+          </CardContent>
+        </Card>
+      )}
+      {results.length > 0 && (
+        <Card className="border-border/50">
+          <CardHeader className="px-4 py-2.5 border-b border-border/50">
+            <CardTitle className="text-sm">
+              {pollingQueryId ? `${results.length} hot-tier events (cold archive loading…)` : `Top ${results.length} Correlated Historical Events`}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="text-[11px]">Timestamp</TableHead>
+                  <TableHead className="text-[11px]">Source</TableHead>
+                  <TableHead className="text-[11px]">Event Type</TableHead>
+                  <TableHead className="text-[11px]">Severity</TableHead>
+                  <TableHead className="text-[11px]">MITRE Tactic</TableHead>
+                  <TableHead className="text-[11px]">Description</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {results.map((row: any, i: number) => (
+                  <TableRow key={row.id ?? i} data-testid={`row-historical-${row.id ?? i}`}>
+                    <TableCell className="text-[11px] font-mono whitespace-nowrap">{new Date(row.timestamp).toLocaleString()}</TableCell>
+                    <TableCell><Badge variant="outline" className="text-[10px]">{row.source || "—"}</Badge></TableCell>
+                    <TableCell><Badge variant="secondary" className="text-[10px] capitalize">{row.event_type?.replace(/_/g, " ") || "—"}</Badge></TableCell>
+                    <TableCell><Badge variant="outline" className="text-[10px] capitalize">{row.severity || "—"}</Badge></TableCell>
+                    <TableCell className="text-[11px]">{row.mitre_tactic || "—"}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground max-w-[200px] truncate">{row.description || row.raw_log?.substring(0, 60) || "—"}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+      {hasQueried && !isLoading && (
+        <div className="flex justify-center">
+          <Button variant="outline" size="sm" className="text-xs gap-1.5" onClick={openInConsole} data-testid="button-view-full-investigation">
+            <ExternalLink className="w-3.5 h-3.5" />
+            View Full Investigation in Log Console
+            {sessionId && <Badge variant="outline" className="text-[9px] ml-1">Session pre-loaded</Badge>}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

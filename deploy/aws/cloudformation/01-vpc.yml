@@ -3,15 +3,15 @@
 #
 # Creates a 3-tier VPC:
 #   - Public subnets   (ALB / NLB, 2 AZs)
-#   - Private subnets  (ECS tasks / MSK / OpenSearch, 2 AZs)
+#   - Private subnets  (ECS tasks / MSK / ClickHouse, 2 AZs)
 #   - Isolated subnets (Aurora, no internet route, 2 AZs)
 #
 # Also creates:
 #   - Internet Gateway
 #   - NAT Gateways (one per AZ for HA)
-#   - VPC Endpoints (S3 Gateway, Glue, OpenSearch, Secrets Manager)
+#   - VPC Endpoints (S3 Gateway, Glue, Secrets Manager)
 #   - VPC Flow Logs to CloudWatch
-#   - Security Groups (ALB, ECS, Aurora, MSK, OpenSearch)
+#   - Security Groups (ALB, ECS, Aurora, MSK, ClickHouse)
 #
 # GRC Shield lessons applied:
 #   - No Unicode em-dashes in any GroupDescription
@@ -135,7 +135,7 @@ Resources:
         - Key: Tier
           Value: public
 
-  # ── Private Subnets (ECS / MSK / OpenSearch) ────────────────────────────────
+  # ── Private Subnets (ECS / MSK / ClickHouse) ────────────────────────────────
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -387,19 +387,6 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
       PrivateDnsEnabled: true
 
-  OpenSearchInterfaceEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VPC
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.es"
-      VpcEndpointType: Interface
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
-      PrivateDnsEnabled: true
-
   AthenaInterfaceEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -585,27 +572,6 @@ Resources:
         - Key: Name
           Value: !Sub "ccc-msk-sg-${EnvironmentName}"
 
-  OpenSearchSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "ccc-opensearch-sg-${EnvironmentName}"
-      GroupDescription: OpenSearch - allow HTTPS from ECS tasks
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref ECSSecurityGroup
-          Description: OpenSearch HTTPS from ECS
-        - IpProtocol: tcp
-          FromPort: 9200
-          ToPort: 9200
-          SourceSecurityGroupId: !Ref ECSSecurityGroup
-          Description: OpenSearch REST from ECS
-      Tags:
-        - Key: Name
-          Value: !Sub "ccc-opensearch-sg-${EnvironmentName}"
-
 Outputs:
 
   VpcId:
@@ -690,11 +656,6 @@ Outputs:
     Value: !Ref MSKSecurityGroup
     Export:
       Name: !Sub "${AWS::StackName}-MSKSecurityGroupId"
-
-  OpenSearchSecurityGroupId:
-    Value: !Ref OpenSearchSecurityGroup
-    Export:
-      Name: !Sub "${AWS::StackName}-OpenSearchSecurityGroupId"
 
   # ── NAT Gateway Public EIPs (used by remote data planes for ALB allowlisting) ─
   NatEip1:

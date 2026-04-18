@@ -20,6 +20,88 @@ import {
 
 import { pool } from "./db";
 import { ensureQuotaTable } from "./quota-engine";
+import { initClickHouseSchema } from "./clickhouse-client";
+
+// ── TAXII Poll Scheduler ───────────────────────────────────────────────────────
+async function startTaxiiPollScheduler(): Promise<void> {
+  const { ensureTaxiiTables, loadTaxiiServerConfigs, pollTaxiiServer } = await import("./taxii-client");
+  await ensureTaxiiTables();
+
+  // Initial poll on startup (staggered)
+  setTimeout(async () => {
+    try {
+      const configs = await loadTaxiiServerConfigs();
+      for (const cfg of configs) {
+        if (!cfg.enabled) continue;
+        pollTaxiiServer(cfg).catch(e => console.error(`[TAXII] Poll error for ${cfg.displayName}: ${e.message}`));
+        await new Promise(r => setTimeout(r, 2000)); // stagger 2s between servers
+      }
+    } catch (e: any) {
+      console.error("[TAXII] Startup poll error:", e.message);
+    }
+  }, 30000); // 30s after startup
+
+  // Periodic poll every 30 minutes — respects each server's pollIntervalHours
+  setInterval(async () => {
+    try {
+      const configs = await loadTaxiiServerConfigs();
+      const now = Date.now();
+      for (const cfg of configs) {
+        if (!cfg.enabled) continue;
+        const lastSync = cfg.lastSyncedAt ? new Date(cfg.lastSyncedAt).getTime() : 0;
+        const intervalMs = (cfg.pollIntervalHours || 6) * 60 * 60 * 1000;
+        if (now - lastSync >= intervalMs) {
+          pollTaxiiServer(cfg).catch(e => console.error(`[TAXII] Poll error for ${cfg.displayName}: ${e.message}`));
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    } catch (e: any) {
+      console.error("[TAXII] Scheduled poll error:", e.message);
+    }
+  }, 30 * 60 * 1000);
+}
+
+// ── OpenCTI Sync Scheduler ────────────────────────────────────────────────────
+async function startOpenCTISyncScheduler(): Promise<void> {
+  const { ensureOpenCTITables, loadOpenCTIConfig, runOpenCTISync, startLiveStream } = await import("./opencti-connector");
+  await ensureOpenCTITables();
+
+  const runSync = async () => {
+    try {
+      const config = await loadOpenCTIConfig();
+      if (!config) return;
+      // Respect the operator sync toggle
+      if (!config.syncEnabled) {
+        console.log("[OpenCTI] Sync skipped — syncEnabled is false in config");
+      } else {
+        await runOpenCTISync(config);
+      }
+    } catch (e: unknown) {
+      console.error("[OpenCTI] Sync error:", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // On startup: auto-start live stream independently of sync toggle
+  const autoStartStream = async () => {
+    try {
+      const config = await loadOpenCTIConfig();
+      if (config && config.liveStreamEnabled) {
+        startLiveStream(config).catch((e: Error) => console.error("[OpenCTI] Stream error:", e.message));
+      }
+    } catch (e: unknown) {
+      console.error("[OpenCTI] Stream auto-start error:", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Initial stream + sync 60s after startup
+  setTimeout(async () => {
+    await autoStartStream();
+    await runSync();
+  }, 60000);
+
+  // Re-sync every 6 hours (stream lifecycle is managed by opencti-connector reconnect)
+  setInterval(runSync, 6 * 60 * 60 * 1000);
+}
 
 function isKafkaPrimaryWorker(): boolean {
   // start-prod.js cluster primary (master) requires dist/index.cjs only in workers
@@ -119,19 +201,8 @@ async function runStartupAssetCleanup() {
     if (riskFixed > 0) console.log(`[Cleanup] Normalized ${riskFixed} risk scores from >100 to 0-100 range`);
 
     const STATUS_VALUES = ['active', 'inactive', 'online', 'offline', 'paused', 'enabled', 'disabled', 'running', 'stopped', 'unknown'];
-    const versionFixResult = await pool.query(`
-      UPDATE assets SET software_inventory = (
-        SELECT jsonb_agg(
-          CASE 
-            WHEN (elem->>'name') IN ('CynetEPS', 'Cynet EPS') AND agent_version IS NOT NULL AND agent_version != '' 
-              AND agent_version ~ '[0-9]'
-            THEN jsonb_set(elem, '{version}', to_jsonb(agent_version))
-            WHEN LOWER(elem->>'version') = ANY($1::text[])
-            THEN elem - 'version' || jsonb_build_object('version', null)
-            ELSE elem
-          END
-        ) FROM jsonb_array_elements(software_inventory) elem
-      )
+    const versionCandidates = await pool.query<{ id: number }>(`
+      SELECT id FROM assets
       WHERE software_inventory IS NOT NULL 
         AND jsonb_typeof(software_inventory) = 'array'
         AND (
@@ -147,7 +218,31 @@ async function runStartupAssetCleanup() {
           )
         )
     `, [STATUS_VALUES]);
-    const versionFixed = versionFixResult.rowCount || 0;
+    const candidateIds = versionCandidates.rows.map(r => r.id);
+    let versionFixed = 0;
+    const BATCH_SIZE_CLEANUP = 100;
+    for (let bi = 0; bi < candidateIds.length; bi += BATCH_SIZE_CLEANUP) {
+      const batchIds = candidateIds.slice(bi, bi + BATCH_SIZE_CLEANUP);
+      const batchResult = await pool.query(`
+        UPDATE assets SET software_inventory = (
+          SELECT jsonb_agg(
+            CASE 
+              WHEN (elem->>'name') IN ('CynetEPS', 'Cynet EPS') AND agent_version IS NOT NULL AND agent_version != '' 
+                AND agent_version ~ '[0-9]'
+              THEN jsonb_set(elem, '{version}', to_jsonb(agent_version))
+              WHEN LOWER(elem->>'version') = ANY($1::text[])
+              THEN elem - 'version' || jsonb_build_object('version', null)
+              ELSE elem
+            END
+          ) FROM jsonb_array_elements(software_inventory) elem
+        )
+        WHERE id = ANY($2::int[])
+      `, [STATUS_VALUES, batchIds]);
+      versionFixed += batchResult.rowCount || 0;
+      if (bi + BATCH_SIZE_CLEANUP < candidateIds.length) {
+        await new Promise(r => setTimeout(r, 50));
+      }
+    }
     if (versionFixed > 0) console.log(`[Cleanup] Fixed software versions for ${versionFixed} assets (removed status values, synced CynetEPS versions)`);
 
     const OS_STATUS_VALUES = ['decommissioned', 'running', 'operational', 'powered off', 'powered on', 'inactive', 'retired', 'unknown', 'n/a', 'none', 'not available', 'shutoff', 'suspended', 'pending', 'maintenance', 'active', 'online', 'offline', 'down', 'up', 'stopped'];
@@ -371,6 +466,11 @@ let serverReady = false;
   await runMigrations();
   // Ensure tenant_quotas table exists (idempotent — safe to run every startup)
   await ensureQuotaTable();
+
+  // Initialize ClickHouse schema (no-op if CLICKHOUSE_URL not configured)
+  initClickHouseSchema().catch(err =>
+    console.warn("[ClickHouse] Schema init warning:", err instanceof Error ? err.message : err)
+  );
   const { createPerformanceIndexes, warmUpPool } = await import("./db");
   warmUpPool(3).catch(err => console.warn("[DB Pool] Warm-up error:", err.message));
   createPerformanceIndexes().catch(err => console.warn("[DB] Index creation deferred:", err.message));
@@ -406,6 +506,16 @@ let serverReady = false;
         startAIAgentScheduler();
         const { startEdrScheduler } = await import("./edr-scheduler");
         startEdrScheduler();
+        if (isKafkaPrimaryWorker()) {
+          const { startClickHouseIngestMonitor } = await import("./clickhouse-ingest-monitor");
+          startClickHouseIngestMonitor();
+        }
+        // TAXII poll scheduler — only run in primary worker to avoid duplicate polling
+        if (!cluster.isWorker || cluster.worker?.id === 1) {
+          startTaxiiPollScheduler().catch((e: any) => console.error("[TAXII] Scheduler error:", e));
+          // OpenCTI 6h sync + optional live stream
+          startOpenCTISyncScheduler().catch((e: any) => console.error("[OpenCTI] Scheduler error:", e));
+        }
         await startKafkaConsumerIfPrimary(log);
         log("Background initialization complete");
       } catch (err) {
@@ -428,6 +538,12 @@ let serverReady = false;
 
     serverReady = true;
     markSchedulerReady();
+    // Start TAXII/OpenCTI schedulers in dev mode too
+    startTaxiiPollScheduler().catch((e: any) => console.error("[TAXII] Scheduler error:", e));
+    startOpenCTISyncScheduler().catch((e: any) => console.error("[OpenCTI] Scheduler error:", e));
+    import("./clickhouse-ingest-monitor").then(({ startClickHouseIngestMonitor }) => {
+      startClickHouseIngestMonitor();
+    }).catch((e: any) => console.error("[ClickHouseIngestMonitor] Import error:", e));
     await startKafkaConsumerIfPrimary(log);
     log("Server fully initialized");
   }
@@ -437,4 +553,20 @@ let serverReady = false;
     startBaselineRefreshJob(pool).catch((e: any) => console.error("[ML Baseline] Startup error:", e));
     startEntityScoringJob(pool).catch((e: any) => console.error("[ML Scoring] Startup error:", e));
   }).catch((e: any) => console.error("[ML Baseline] Import error:", e));
+
+  // Attack Detection Pipeline — multi-vector classification + chain correlation + training loop
+  setTimeout(() => {
+    import("./attack-detection-pipeline.js").then(({ startDetectionPipelineJob }) => {
+      startDetectionPipelineJob().catch((e: any) => console.error("[DetectionPipeline] Startup error:", e));
+    }).catch((e: any) => console.error("[DetectionPipeline] Import error:", e));
+
+    import("./ai-training-manager.js").then(({ startTrainingReviewJob }) => {
+      startTrainingReviewJob();
+    }).catch((e: any) => console.error("[TrainingManager] Import error:", e));
+  }, 60_000);
+
+  // Integration Autoheal Monitor — watches for failed integrations and heals them automatically
+  import("./integration-autoheal.js").then(({ startAutoHealMonitor }) => {
+    startAutoHealMonitor();
+  }).catch((e: any) => console.error("[Autoheal] Import error:", e));
 })();

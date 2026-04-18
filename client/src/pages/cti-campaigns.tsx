@@ -10,9 +10,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { useToast } from "@/hooks/use-toast";
 import {
   Crosshair, Search, RefreshCw, Activity, Globe, Target, Shield,
   ChevronDown, ChevronUp, Filter, AlertTriangle, Calendar, Users,
+  Brain, Sparkles,
 } from "lucide-react";
 import type { CtiCampaign } from "@shared/schema";
 
@@ -27,7 +29,27 @@ const statusColors: Record<string, string> = {
   suspected: "text-yellow-400 bg-yellow-500/10 border-yellow-500/20",
 };
 
-function CampaignDetail({ item }: { item: CtiCampaign }) {
+function CampaignDetail({ item, tenantId }: { item: CtiCampaign; tenantId: number }) {
+  const [briefContent, setBriefContent] = useState<string | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const { toast } = useToast();
+
+  async function generateBrief() {
+    setBriefLoading(true);
+    setBriefContent(null);
+    try {
+      const res = await fetch(`/api/cti/${tenantId}/campaigns/${item.id}/ai-brief`, { method: "POST", credentials: "include" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setBriefContent(data.brief || data.content || JSON.stringify(data, null, 2));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to generate AI brief";
+      toast({ title: "AI Brief Error", description: msg, variant: "destructive" });
+    } finally {
+      setBriefLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -77,6 +99,40 @@ function CampaignDetail({ item }: { item: CtiCampaign }) {
           <div className="flex flex-wrap gap-1.5">{item.tags.map(tag => <Badge key={tag} variant="outline" className="text-[10px] text-muted-foreground">{tag}</Badge>)}</div>
         </div>
       )}
+
+      {/* AI Brief Section */}
+      <div className="pt-3 border-t border-border/40 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium flex items-center gap-1.5">
+            <Brain className="w-3.5 h-3.5 text-violet-400" />
+            AI Intelligence Brief
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={generateBrief}
+            disabled={briefLoading}
+            className="h-7 text-xs border-violet-500/30 text-violet-400 hover:bg-violet-500/10"
+            data-testid="button-generate-campaign-brief"
+          >
+            <Sparkles className="w-3 h-3 mr-1" />
+            {briefLoading ? "Generating…" : briefContent ? "Regenerate" : "Generate Brief"}
+          </Button>
+        </div>
+        {briefLoading && (
+          <div className="space-y-2 animate-pulse">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+            <Skeleton className="h-3 w-4/6" />
+            <Skeleton className="h-3 w-full" />
+          </div>
+        )}
+        {briefContent && !briefLoading && (
+          <div className="bg-violet-500/5 border border-violet-500/20 rounded-md p-3 text-xs text-foreground/80 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+            {briefContent}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -240,7 +296,7 @@ export default function CtiCampaignsPage() {
               <Crosshair className="w-4 h-4 text-yellow-400" />Campaign Detail
             </DialogTitle>
           </DialogHeader>
-          {selected && <CampaignDetail item={selected} />}
+          {selected && <CampaignDetail item={selected} tenantId={currentTenant?.id ?? 0} />}
         </DialogContent>
       </Dialog>
     </div>

@@ -3,7 +3,7 @@
 #
 # Per-region data-plane service that handles:
 #   - Security event ingestion from MSK Kafka
-#   - Real-time OpenSearch indexing (30-day hot tier)
+#   - Real-time ClickHouse OLAP indexing (30-day hot tier)
 #   - S3 Iceberg write (raw events + processed Parquet)
 #   - Sigma rule evaluation engine
 #   - AI normalization pipeline
@@ -51,7 +51,6 @@
 #     --parameter-overrides \
 #       VpcStackName=ccc-dp-vpc-mumbai \
 #       MSKStackName=ccc-msk-kafka \
-#       OpenSearchStackName=ccc-opensearch \
 #       DataLakeStackName=ccc-data-lake \
 #       DataPlaneRegion=mumbai \
 #       RegionCode=ap-south-1 \
@@ -68,7 +67,6 @@
 #     --parameter-overrides \
 #       VpcStackName=ccc-dp-vpc-bahrain \
 #       MSKStackName=ccc-msk-kafka \
-#       OpenSearchStackName=ccc-opensearch \
 #       DataLakeStackName=ccc-data-lake \
 #       DataPlaneRegion=bahrain \
 #       RegionCode=me-south-1 \
@@ -182,10 +180,6 @@ Parameters:
     Type: String
     Default: ccc-msk-kafka
 
-  OpenSearchStackName:
-    Type: String
-    Default: ccc-opensearch
-
   DataLakeStackName:
     Type: String
     Default: ccc-data-lake
@@ -232,7 +226,7 @@ Parameters:
       Optional: CloudFormation stack name of the ccc-clickhouse cluster
       (08-clickhouse-cluster.yml). When set, CLICKHOUSE_URL is injected into
       the task definition using the stack's ALBDNSName export.
-      Leave empty to operate without ClickHouse (OpenSearch-only mode).
+      Leave empty to operate without ClickHouse OLAP (PostgreSQL-only mode).
 
   ClickHouseUser:
     Type: String
@@ -396,7 +390,6 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource:
                   - Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
-                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
                   - Fn::ImportValue: !Sub "${AuroraStackName}-DBSecretArn"
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ccc/ai/*"
                   # Data plane per-region Aurora secret (conditional -- only when DataPlaneRDSStackName is set)
@@ -542,25 +535,6 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/ccc-msk-${EnvironmentName}/*/*"
                   - !Sub "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/ccc-msk-${EnvironmentName}/*/*"
-        - PolicyName: OpenSearchReadWrite
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - es:ESHttpGet
-                  - es:ESHttpPost
-                  - es:ESHttpPut
-                  - es:ESHttpDelete
-                  - es:ESHttpHead
-                  - es:DescribeDomain
-                Resource:
-                  - Fn::ImportValue: !Sub "${OpenSearchStackName}-DomainArn"
-                  - !Sub
-                    - "${DomainArn}/*"
-                    - DomainArn:
-                        Fn::ImportValue: !Sub "${OpenSearchStackName}-DomainArn"
-
   # ── Task Definition ──────────────────────────────────────────────────────────
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -673,11 +647,6 @@ Resources:
                 - "${SecretArn}:KAFKA_BROKERS::"
                 - SecretArn:
                     Fn::ImportValue: !Sub "${MSKStackName}-MSKBrokersSecretArn"
-            - Name: OPENSEARCH_URL
-              ValueFrom: !Sub
-                - "${SecretArn}:OPENSEARCH_URL::"
-                - SecretArn:
-                    Fn::ImportValue: !Sub "${OpenSearchStackName}-OpenSearchSecretArn"
             - Name: DATABASE_URL
               ValueFrom: !Sub
                 - "${SecretArn}:DATABASE_URL::"

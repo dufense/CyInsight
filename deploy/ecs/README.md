@@ -40,7 +40,7 @@ Internet
 │    2048 CPU / 4096 MB (auto-scales 1→6)         │
 │         │             │                         │
 │         ▼             ▼                         │
-│  [RDS+TimescaleDB] [OpenSearch]                 │
+│  [RDS+TimescaleDB] [ClickHouse]                 │
 │                                                 │
 │  [EFS] — reports/uploads (management)           │
 │  [S3]  — event lake (per data-plane region)     │
@@ -65,6 +65,7 @@ deploy/ecs/
 │   ├── deploy-stacks.sh       # Deploy all CloudFormation stacks in order
 │   ├── setup-secrets.sh       # Populate AWS Secrets Manager interactively
 │   ├── validate-secrets.sh    # Pre-flight: confirm all Secrets Manager paths exist
+│   ├── activate-clickhouse.sh # Turn-key ClickHouse activation (post clickhouse stack)
 │   ├── migrate.sh             # Run Drizzle schema migrations (direct/ecs/github-actions)
 │   └── smoke-test.sh          # Post-deploy health checks
 └── .env.ecs.example           # Documents all required secret paths + AWS infra
@@ -86,7 +87,7 @@ Dockerfile.migrate             # Migration-only image (retains devDeps for drizz
   - RDS PostgreSQL 16 (management) + TimescaleDB instance (data planes)
   - ElastiCache Redis 7
   - Amazon MSK (Kafka 3.x KRaft)
-  - Amazon OpenSearch Service (one domain per data-plane region)
+  - ClickHouse OLAP cluster (single shared NLB-fronted instance — see "ClickHouse Activation" below)
 
 ## Deployment Steps
 
@@ -154,6 +155,44 @@ Or deploy individual planes:
 # Receiver plane
 ./deploy/ecs/scripts/deploy-stacks.sh --stack receiver
 ```
+
+## ClickHouse Activation (optional hot-tier OLAP)
+
+By default the platform runs PostgreSQL-only. To activate the ClickHouse hot
+tier (used by the events console fast path, dashboard event-volume trend, and
+cross-source IOC correlation), follow these one-time steps **after** the
+management plane is healthy:
+
+```bash
+# 1. Populate the ClickHouse identity secrets (answer "y" at the prompt).
+./deploy/ecs/scripts/setup-secrets.sh
+
+# 2. Deploy the ClickHouse EC2 + NLB stack. Requires MGMT_SG_ID (or have
+#    management-plane already deployed so it is auto-discovered) and an
+#    EC2 key pair name for break-glass SSH:
+export CH_KEY_PAIR=my-keypair
+./deploy/ecs/scripts/deploy-stacks.sh --stack clickhouse
+
+# 3. Turn-key activation: reads the NLB DNS from the stack, writes it into
+#    ccc/shared/clickhouse-url + per-region ccc/data-plane/<r>/clickhouse-url,
+#    re-validates secrets, and (with --redeploy) re-rolls mgmt + data planes
+#    with EnableClickHouse=true.
+./deploy/ecs/scripts/activate-clickhouse.sh --redeploy
+```
+
+After redeploy, verify in production:
+
+- Management ECS task logs print `[ClickHouse] Schema initialization complete.`
+- `GET /api/admin/platform-health` shows ClickHouse OLAP as `connected`.
+- `POST /api/events/ingest` mirrors writes to PG + ClickHouse without
+  `[Storage] ClickHouse write error` warnings.
+- `GET /api/events/:tenantId` returns rows tagged `source: "clickhouse_olap"`
+  when the hot-tier path is hit.
+
+To deactivate, simply re-run the management/data deploys with
+`ENABLE_CLICKHOUSE=false` (the default) — the dual-write helper is a no-op
+when `CLICKHOUSE_URL` is unset, so the fallback path keeps serving from
+PostgreSQL.
 
 ## Updating / Rolling Deployments
 

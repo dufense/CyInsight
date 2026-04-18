@@ -50,6 +50,8 @@ import {
   AlertTriangle,
   ChevronDown,
   Building2,
+  Rss,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,6 +75,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -132,6 +135,157 @@ function CategoryIcon({ category, className }: { category: string; className?: s
 function getCategoryName(key: string): string {
   const cat = INTEGRATION_CATEGORIES.find(c => c.key === key);
   return cat?.name || key;
+}
+
+interface TaxiiServer {
+  id: number;
+  name: string;
+  displayName: string;
+  url: string;
+  authType: "basic" | "bearer" | "none";
+  username?: string;
+  collectionIds: string[];
+  pollIntervalHours: number;
+  lastSyncedAt: string | null;
+  enabled: boolean;
+  status: string;
+  objectCount: number;
+}
+
+function TaxiiFeedsSection() {
+  const { toast } = useToast();
+  const { data: servers = [], isLoading, refetch } = useQuery<TaxiiServer[]>({
+    queryKey: ["/api/integrations/taxii/servers"],
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      apiRequest("PATCH", `/api/integrations/taxii/servers/${id}`, { enabled }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/taxii/servers"] });
+    },
+    onError: () => toast({ title: "Failed to update server", variant: "destructive" }),
+  });
+
+  const pollMutation = useMutation({
+    mutationFn: (id: number) => apiRequest("POST", `/api/integrations/taxii/servers/${id}/poll`),
+    onSuccess: () => {
+      toast({ title: "Poll triggered" });
+      refetch();
+    },
+    onError: () => toast({ title: "Poll failed", variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/integrations/taxii/servers/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/taxii/servers"] });
+      toast({ title: "Server removed" });
+    },
+    onError: () => toast({ title: "Failed to remove server", variant: "destructive" }),
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <Rss className="w-5 h-5 text-primary" /> TAXII 2.1 Feed Servers
+          </h3>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Manage external TAXII servers to automatically ingest STIX threat indicators.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" asChild data-testid="button-open-taxii-management">
+          <a href="/taxii-feeds">
+            <ExternalLink className="w-3.5 h-3.5 mr-1.5" /> Full Management
+          </a>
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2">{Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+      ) : servers.length === 0 ? (
+        <Card className="border-dashed">
+          <CardContent className="py-10 text-center text-muted-foreground text-sm">
+            No TAXII servers configured. Click <strong>Full Management</strong> to add one.
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="rounded-md border overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Server</TableHead>
+                <TableHead>URL</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Objects</TableHead>
+                <TableHead>Last Sync</TableHead>
+                <TableHead>Enabled</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {servers.map((server) => (
+                <TableRow key={server.id} data-testid={`row-taxii-server-${server.id}`}>
+                  <TableCell className="font-medium">{server.displayName || server.name}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground max-w-[180px] truncate">{server.url}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={server.status === "ok" ? "outline" : server.status === "error" ? "destructive" : "secondary"}
+                      className="text-[10px]"
+                      data-testid={`status-taxii-server-${server.id}`}
+                    >
+                      {server.status || "pending"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums" data-testid={`text-object-count-${server.id}`}>
+                    {server.objectCount ?? 0}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {server.lastSyncedAt ? new Date(server.lastSyncedAt).toLocaleString() : "Never"}
+                  </TableCell>
+                  <TableCell>
+                    <Switch
+                      checked={server.enabled}
+                      onCheckedChange={(enabled) => toggleMutation.mutate({ id: server.id, enabled })}
+                      data-testid={`switch-taxii-server-${server.id}`}
+                    />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0"
+                        onClick={() => pollMutation.mutate(server.id)}
+                        disabled={pollMutation.isPending}
+                        data-testid={`button-poll-taxii-${server.id}`}
+                        title="Poll now"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                        onClick={() => deleteMutation.mutate(server.id)}
+                        disabled={deleteMutation.isPending}
+                        data-testid={`button-delete-taxii-${server.id}`}
+                        title="Remove"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SecurityIntegrationsPage() {
@@ -855,6 +1009,10 @@ export default function SecurityIntegrationsPage() {
           <TabsTrigger value="catalog" data-testid="tab-catalog">
             Platform Catalog ({availablePlatforms.length})
           </TabsTrigger>
+          <TabsTrigger value="taxii-feeds" data-testid="tab-taxii-feeds">
+            <Rss className="w-4 h-4 mr-1" />
+            TAXII Feeds
+          </TabsTrigger>
           <TabsTrigger value="notifications" data-testid="tab-notifications">
             <Mail className="w-4 h-4 mr-1" />
             Email Notifications
@@ -1077,6 +1235,10 @@ export default function SecurityIntegrationsPage() {
               </div>
             );
           })()}
+        </TabsContent>
+
+        <TabsContent value="taxii-feeds" className="mt-4">
+          <TaxiiFeedsSection />
         </TabsContent>
 
         <TabsContent value="notifications" className="mt-4 space-y-6">

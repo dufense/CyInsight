@@ -188,12 +188,6 @@ spec:
               component: redis
       ports:
         - port: 6379
-    - to:
-        - podSelector:
-            matchLabels:
-              app: opensearch
-      ports:
-        - port: 9200
     - to: []
       ports:
         - port: 5432

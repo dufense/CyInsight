@@ -31,7 +31,7 @@ function estimateCveCount(avgRisk: number, isEOL: boolean): number {
   return isEOL ? base + Math.round(avgRisk * 0.8) : base;
 }
 
-function getMockEolDate(name: string): Date | null {
+function getKnownEolDate(name: string): Date | null {
   const lower = name.toLowerCase();
   if (lower.includes("windows 7") || lower.includes("win 7")) return new Date("2020-01-14");
   if (lower.includes("windows 8") || lower.includes("win 8")) return new Date("2023-01-10");
@@ -40,6 +40,7 @@ function getMockEolDate(name: string): Date | null {
   if (lower.includes("windows server 2012")) return new Date("2023-10-10");
   if (lower.includes("windows server 2016")) return new Date("2027-01-12");
   if (lower.includes("windows server 2019")) return new Date("2029-01-09");
+  if (lower.includes("windows server 2022")) return new Date("2031-10-14");
   if (lower.includes("ubuntu 18") || lower.includes("bionic")) return new Date("2023-05-31");
   if (lower.includes("ubuntu 20") || lower.includes("focal")) return new Date("2025-04-02");
   if (lower.includes("ubuntu 22") || lower.includes("jammy")) return new Date("2027-04-01");
@@ -56,6 +57,11 @@ function getMockEolDate(name: string): Date | null {
   if (lower.includes("macos 13") || lower.includes("ventura")) return new Date("2025-09-15");
   if (lower.includes("macos 14") || lower.includes("sonoma")) return new Date("2026-09-15");
   if (lower.includes("macos 15") || lower.includes("sequoia")) return new Date("2027-09-15");
+  if (lower.includes("amazon linux 2023")) return new Date("2028-03-15");
+  if (lower.includes("amazon linux 2")) return new Date("2025-06-30");
+  if (lower.includes("sles 15") || lower.includes("suse linux enterprise 15")) return new Date("2031-07-31");
+  if (lower.includes("oracle linux 9") || lower.includes("ol9")) return new Date("2032-07-01");
+  if (lower.includes("oracle linux 8") || lower.includes("ol8")) return new Date("2029-07-01");
   return null;
 }
 
@@ -760,7 +766,7 @@ export default function OSLandscapeTab({ tenantId }: { tenantId: number }) {
   const patchCompliance = totalDevices > 0 ? Math.round((supportedDevices / totalDevices) * 100) : 0;
 
   const migrationItems = versions
-    .map(v => ({ ...v, eolDate: getMockEolDate(v.name), daysLeft: getMockEolDate(v.name) ? getDaysUntilEol(getMockEolDate(v.name)!) : null }))
+    .map(v => ({ ...v, eolDate: getKnownEolDate(v.name), daysLeft: getKnownEolDate(v.name) ? getDaysUntilEol(getKnownEolDate(v.name)!) : null }))
     .filter(v => v.eolDate && v.daysLeft !== null && v.daysLeft > -365 * 3)
     .sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0));
 
@@ -801,7 +807,7 @@ export default function OSLandscapeTab({ tenantId }: { tenantId: number }) {
   const top10Versions = [...versions].sort((a, b) => b.count - a.count).slice(0, 10);
 
   const timelineItems = versions
-    .map(v => ({ name: v.name, eolDate: getMockEolDate(v.name), isEOL: v.isEOL }))
+    .map(v => ({ name: v.name, eolDate: getKnownEolDate(v.name), isEOL: v.isEOL }))
     .filter(v => v.eolDate !== null)
     .sort((a, b) => a.eolDate!.getTime() - b.eolDate!.getTime());
 

@@ -23,24 +23,31 @@ async function schedulerQuery(sql: string, params?: any[]): Promise<any> {
   }
 }
 
+function scheduleInterval(fn: () => Promise<void>, interval: number, firstDelay: number): void {
+  setTimeout(() => {
+    fn().catch(() => {});
+    setInterval(() => fn().catch(() => {}), interval);
+  }, firstDelay);
+}
+
 export function startAIAgentScheduler(): void {
   if (schedulerRunning) return;
   schedulerRunning = true;
   console.log("[AIWorkforce] Starting AI Agent autonomous scheduler");
 
-  setInterval(processUnrespondedTickets, 90_000);
-  setInterval(processInProgressTickets, 120_000);
-  setInterval(runThreatHunts, 10 * 60_000);
-  setInterval(runIncidentInvestigations, 3 * 60_000);
-  setInterval(runIncidentResponses, 5 * 60_000);
-  setInterval(runClientNotifications, 10 * 60_000);
-  setInterval(runProactiveInsights, 20 * 60_000);
-  setInterval(runDailySummaries, 60 * 60_000);
+  setTimeout(autoProvisionAllTenants, 60_000);
 
-  setTimeout(autoProvisionAllTenants, 10_000);
+  scheduleInterval(processUnrespondedTickets, 90_000,      6 * 60_000);
+  scheduleInterval(processInProgressTickets, 120_000,      7 * 60_000);
+  scheduleInterval(runIncidentInvestigations, 3 * 60_000,  8 * 60_000);
+  scheduleInterval(runIncidentResponses, 5 * 60_000,       9 * 60_000);
+  scheduleInterval(runThreatHunts, 10 * 60_000,           10 * 60_000);
+  scheduleInterval(runClientNotifications, 10 * 60_000,   11 * 60_000);
+  scheduleInterval(runProactiveInsights, 20 * 60_000,     12 * 60_000);
+  scheduleInterval(runDailySummaries, 60 * 60_000,        13 * 60_000);
 
   setTimeout(async () => {
-    console.log("[AIWorkforce] Running startup sweep (staggered)...");
+    console.log("[AIWorkforce] Running startup sweep (delayed 4 min)...");
     try {
       await processUnrespondedTickets();
       await new Promise(r => setTimeout(r, 5_000));
@@ -57,7 +64,7 @@ export function startAIAgentScheduler(): void {
       console.error("[AIWorkforce] Startup sweep error:", e.message);
     }
     console.log("[AIWorkforce] Startup sweep complete");
-  }, 30_000);
+  }, 240_000);
 }
 
 export async function triggerAction(tenantId: number, action: string): Promise<{ success: boolean; message: string; results?: any[] }> {

@@ -163,7 +163,7 @@
 | `DATA_PLANE_REGION_NAME` | `India (Mumbai)` | Data plane | Region display name |
 | `MANAGEMENT_PLANE_URL` | `http://host.docker.internal:80` | Data plane | Management API URL |
 | `DP_DB_PORT` | `5433` | Data plane | TimescaleDB host port |
-| `DP_OPENSEARCH_PORT` | `9200` | Data plane | OpenSearch host port |
+| `DP_CLICKHOUSE_PORT` | `8123` | Data plane | ClickHouse HTTP port |
 | `DP_MINIO_PORT` | `9000` | Data plane | MinIO host port |
 | `DP_COLLECTOR_PORT` | `5001` | Data plane | Collector host port |
 
@@ -635,7 +635,7 @@ curl -s https://app.yourdomain.com/healthz
 
 ## On-Premises Deployment (Docker Compose)
 
-This is the simplest production deployment. All infrastructure (PostgreSQL, TimescaleDB, Kafka, Redis, OpenSearch, MinIO) runs self-hosted via Docker Compose.
+This is the simplest production deployment. All infrastructure (PostgreSQL, TimescaleDB, Kafka, Redis, ClickHouse, MinIO) runs self-hosted via Docker Compose.
 
 ### Step 1: Clone and Configure
 
@@ -688,7 +688,7 @@ This starts all services:
 | `redis` | 6379 | Redis 7 cache |
 | `redis-sentinel` | 26379 | Redis Sentinel for HA |
 | `kafka-1/2/3` | - | Kafka KRaft 3-node HA cluster |
-| `opensearch-1/2` | 9200 | OpenSearch 2-node cluster |
+| `clickhouse` | 8123/9000 | ClickHouse OLAP cluster (single source of truth for security events) |
 | `minio` | 9000/9001 | MinIO object storage |
 | `nginx` | 80/443 | Nginx reverse proxy |
 | `management-1/2` | - | Management plane (2 instances) |
@@ -733,7 +733,7 @@ curl -X PUT http://localhost/api/tenants/1/retention-policy \
 | Symptom | Possible Cause | Resolution |
 |---------|---------------|------------|
 | Kafka brokers fail health check | Insufficient memory | Ensure at least 16 GB RAM; reduce `KAFKA_LOG_RETENTION_BYTES` |
-| OpenSearch fails to start | `vm.max_map_count` too low | Run `sysctl -w vm.max_map_count=262144` on the host |
+| ClickHouse fails to start | disk space exhausted | Run `df -h` and free space on the data volume |
 | Management can't reach DB | DB not healthy yet | Wait for `management-db` health check; check `docker logs management-db` |
 | Nginx 502 Bad Gateway | Management instances not ready | Wait for management containers to pass health checks |
 | MinIO health check fails | Port conflict | Ensure ports 9000/9001 are not in use by another service |
@@ -818,7 +818,7 @@ The on-prem values file configures:
 - `local-path` StorageClass (compatible with k3s and Rancher)
 - Built-in Kafka KRaft 3-node cluster (self-hosted)
 - Self-hosted Redis with Sentinel
-- Self-hosted OpenSearch 2-node cluster
+- Self-hosted ClickHouse cluster (2-shard, 2-replica)
 - MinIO for object storage
 - Nginx Ingress Controller
 - No cloud IAM annotations
@@ -1342,7 +1342,7 @@ DATA_PLANE_REGION=us-east-1 \
 DATA_PLANE_REGION_NAME="US (Virginia)" \
 MANAGEMENT_PLANE_URL=http://management-host:80 \
 DP_DB_PORT=5434 \
-DP_OPENSEARCH_PORT=9201 \
+DP_CLICKHOUSE_PORT=8124 \
 DP_MINIO_PORT=9002 \
 DP_COLLECTOR_PORT=5011 \
 DP_NORMALIZER_PORT=5012 \
@@ -1644,7 +1644,7 @@ Data Plane (Per Region, HA):
 1. **Stateless Application**: Sessions stored in PostgreSQL, any instance can serve any request
 2. **Database**: PostgreSQL streaming replication with automatic failover
 3. **Kafka**: 3-node KRaft cluster with `min.insync.replicas=2` for zero message loss
-4. **OpenSearch**: 2-node cluster with shard replication
+4. **ClickHouse**: 2-node cluster with shard replication
 5. **Redis**: Sentinel mode for automatic failover
 6. **Object Storage**: MinIO or cloud-managed (S3/Blob/GCS) with built-in redundancy
 7. **Pod Anti-Affinity**: Kubernetes spreads pods across availability zones
@@ -1666,7 +1666,7 @@ Data Plane (Per Region, HA):
 
 The Admin Portal > Platform Health tab provides:
 - System health cards (uptime, DB latency, memory, cache)
-- Data plane region health cards (DB, Kafka, OpenSearch, storage status per region)
+- Data plane region health cards (DB, Kafka, ClickHouse, storage status per region)
 - Data plane connectivity matrix
 - Object storage usage per tenant per region
 - Data archival pipeline status
@@ -1713,8 +1713,8 @@ docker-compose -f docker-compose.onprem.yml logs --tail=50 kafka-1
 |-------|-----------|------------|
 | Database connection refused | Check DB pod/container health | Verify `DATABASE_URL`, check firewall rules, ensure DB is healthy |
 | Kafka consumer lag growing | Check consumer group offsets | Scale consumers, increase `CONSUMER_CONCURRENCY`, check for slow downstream |
-| OpenSearch cluster red | Check cluster health API | Verify `vm.max_map_count >= 262144`, check disk space, review shard allocation |
-| High memory usage | Check resource limits | Increase memory limits, tune JVM heap for Kafka/OpenSearch |
+| ClickHouse cluster unhealthy | Check cluster health API | Verify disk space, check `system.replicas` for `is_readonly` and `absolute_delay` |
+| High memory usage | Check resource limits | Increase memory limits, tune memory limits for Kafka and ClickHouse |
 | SSL/TLS errors | Check certificate validity | Renew certificates, verify cert-manager issuer, check secret references |
 | Slow API responses | Check DB query performance | Add indexes, check connection pool size, review slow query logs |
 | Event ingestion stopped | Check receiver and Kafka health | Verify Kafka broker connectivity, check receiver logs for errors |

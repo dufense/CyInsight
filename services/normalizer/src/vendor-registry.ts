@@ -1,4 +1,4 @@
-export type EventType = "email" | "endpoint" | "vulnerability" | "casb" | "waf" | "dlp" | "sse" | "network" | "identity" | "cloud";
+export type EventType = "email" | "endpoint" | "vulnerability" | "casb" | "waf" | "dlp" | "sse" | "network" | "identity" | "cloud" | "web" | "database" | "ot_iot";
 
 export interface VendorSignature {
   id: string;

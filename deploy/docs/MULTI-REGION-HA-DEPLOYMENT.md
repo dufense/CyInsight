@@ -9,7 +9,7 @@
 | Data Plane — Bahrain | Bahrain | `me-south-1` | Event storage/search for GCC/Bahrain tenants |
 | Data Plane — Kenya | Kenya (Cape Town) | `af-south-1` | Event storage/search for East Africa tenants |
 
-**Architecture:** The Management Plane controls all three Data Planes via internal REST federation (`DATA_PLANE_ENDPOINTS`). Each Data Plane is fully independent (own Kafka cluster, OpenSearch, S3, PostgreSQL replica) and handles events for tenant-designated data residency regions.
+**Architecture:** The Management Plane controls all three Data Planes via internal REST federation (`DATA_PLANE_ENDPOINTS`). Each Data Plane is fully independent (own Kafka cluster, ClickHouse, S3, PostgreSQL replica) and handles events for tenant-designated data residency regions.
 
 ---
 
@@ -29,7 +29,7 @@
    - `iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PassRole`
    - `logs:CreateLogGroup`, `logs:PutRetentionPolicy`
    - `secretsmanager:*`, `ssm:*`
-   - `ecr:*`, `s3:*`, `msk:*`, `es:*` (OpenSearch), `efs:*`
+   - `ecr:*`, `s3:*`, `msk:*`, `efs:*` (ClickHouse runs on ECS Fargate, no managed-search IAM actions required)
 
 3. **AWS CLI v2 installed and configured**:
    ```bash
@@ -281,10 +281,10 @@ aws cloudformation deploy \
   --region $AWS_REGION \
   --parameter-overrides EnvironmentName=$ENVIRONMENT VpcStackName=ccc-vpc
 
-# 4. OpenSearch (management plane search)
+# 4. ClickHouse (OLAP cluster)
 aws cloudformation deploy \
-  --template-file deploy/aws/cloudformation/04-opensearch.yml \
-  --stack-name ccc-opensearch \
+  --template-file deploy/aws/cloudformation/08-clickhouse-cluster.yml \
+  --stack-name ccc-clickhouse \
   --capabilities CAPABILITY_NAMED_IAM \
   --region $AWS_REGION \
   --parameter-overrides EnvironmentName=$ENVIRONMENT VpcStackName=ccc-vpc
@@ -331,7 +331,7 @@ aws cloudformation deploy \
     VpcStackName=ccc-vpc \
     AuroraStackName=ccc-aurora-management \
     MSKStackName=ccc-msk-kafka \
-    OpenSearchStackName=ccc-opensearch \
+   ClickHouseStackName=ccc-clickhouse \
     DataLakeStackName=ccc-data-lake \
     CertificateArn=$CERTIFICATE_ARN \
     SessionSecretArn=$SESSION_SECRET_ARN \
@@ -391,7 +391,7 @@ aws cloudformation deploy \
     DataPlaneId=india \
     VpcStackName=ccc-vpc \
     MSKStackName=ccc-msk-kafka \
-    OpenSearchStackName=ccc-opensearch \
+   ClickHouseStackName=ccc-clickhouse \
     DataLakeStackName=ccc-data-lake \
     AuroraStackName=ccc-aurora-management \
     ImageUri=$DP_IMAGE_INDIA &
@@ -413,7 +413,7 @@ aws cloudformation deploy \
     DataPlaneId=bahrain \
     VpcStackName=ccc-vpc \
     MSKStackName=ccc-msk-kafka \
-    OpenSearchStackName=ccc-opensearch \
+   ClickHouseStackName=ccc-clickhouse \
     DataLakeStackName=ccc-data-lake \
     AuroraStackName=ccc-aurora-management \
     ImageUri=$DP_IMAGE_BAHRAIN &
@@ -431,7 +431,7 @@ aws cloudformation deploy \
     DataPlaneId=kenya \
     VpcStackName=ccc-vpc \
     MSKStackName=ccc-msk-kafka \
-    OpenSearchStackName=ccc-opensearch \
+   ClickHouseStackName=ccc-clickhouse \
     DataLakeStackName=ccc-data-lake \
     AuroraStackName=ccc-aurora-management \
     ImageUri=$DP_IMAGE_KENYA &

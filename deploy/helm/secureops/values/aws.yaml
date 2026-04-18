@@ -118,10 +118,6 @@ redis:
   auth:
     enabled: true
 
-opensearch:
-  enabled: true
-  replicas: 2
-
 secrets:
   create: true
   databaseUrl: ""

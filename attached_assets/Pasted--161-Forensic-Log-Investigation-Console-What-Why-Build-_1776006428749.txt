@@ -1,0 +1,48 @@
+#161 - Forensic Log Investigation Console
+What & Why
+Build a dedicated UI that analysts use to query and investigate logs across both the ClickHouse hot tier (last 90 days) and the S3/Athena cold tier (90+ days). Enables forensic investigations without leaving the platform, with chain-of-custody evidence export and deep-links from incidents to historical log context.
+
+Done looks like
+New page /forensics in sidebar (Log Intelligence group), visible to mss_analyst, mss_admin, platform_admin roles
+Left panel: saved investigation sessions list with Resume and Delete buttons. Sessions named by analyst, stored in forensic_sessions DB table
+Query builder: date range picker (can span years), severity multi-select, source type, event type, free-text search, entity filter (IP, user, host, hash). Tier indicator badge: Hot (green, <90 days), Cold (amber, >90 days), Hot+Cold (mixed range)
+Results table: paginated 50 rows/page. Columns: timestamp, source, event type, severity, MITRE tactic, threat/target, raw log toggle. Row click opens detail drawer with full event JSON and View Incident link when incidentId is set
+Cold-tier async: querying Athena shows animated progress bar (Searching archived logs...), polls status every 5s, renders results on complete. Timeout banner after 5 minutes
+Investigation Sessions: save named sessions, resumable by URL /forensics?session=ID. Save/load from forensic_sessions table
+Chain-of-Custody Export: Export Evidence button generates JSON with query params, result rows, SHA-256 hash of export, analyst username, timestamp, tenant info. Uploaded to S3 at s3://BUCKET/forensics/exports/ID.json.gz for tamper-evident audit trail. Evidence Locker panel lists previous exports
+Incident War Room: new Historical Context tab pre-filled with incident IOCs (attacker IP, hashes, domain) queried against full archive. Shows top correlated historical events with link to full forensics console
+All data from real query results only (no fabricated or mocked rows)
+Out of scope
+Backend ClickHouse write pipeline and Athena query engine (previous task)
+Changes to existing SIEM or Log Intelligence views (additive only)
+Tasks
+Schema & migration — Add forensic_sessions table (id, tenantId, analystId, name, queryParams JSONB, createdAt, updatedAt, lastRunAt, resultCount) and forensic_exports table (id, sessionId, analystId, exportedAt, rowCount, fileHash, s3Key) to shared/schema.ts and server/migrate.ts.
+
+Backend API routes in server/routes.ts:
+
+POST /api/forensics/sessions
+GET /api/forensics/sessions/:tenantId
+GET /api/forensics/sessions/:id
+DELETE /api/forensics/sessions/:id
+POST /api/forensics/export/:sessionId — run query, hash result, upload to S3, persist to forensic_exports
+GET /api/forensics/exports/:tenantId — audit trail of exports
+ForensicsPage (client/src/pages/forensics.tsx): Left session sidebar + QueryBuilder sub-component + Results panel. QueryBuilder has date range picker, tier badge, filter selects, search input, Run Query button. All interactive elements have data-testid attributes.
+
+Cold-tier async polling — When /api/forensics/query returns queryId (Athena), poll /api/forensics/query/status/:queryId every 5s using useQuery refetchInterval. Animated progress bar. Timeout banner at 5 minutes.
+
+Investigation Sessions UI — Session list in left panel. Save Session modal (name + description). URL sync: /forensics?session=ID auto-loads that session's queryParams on mount.
+
+Chain-of-Custody Export dialog — Modal with export name input. POST /api/forensics/export/:sessionId. Shows download link when complete. Evidence Locker section lists previous exports (file hash, date, analyst, row count).
+
+Incident War Room tab — Add Historical Context tab to client/src/pages/incident-war-room.tsx. Pre-fills forensic query with incident IOCs. Shows top 20 correlated historical events. Link opens /forensics with session pre-loaded.
+
+Sidebar navigation — Add Forensic Console link (Microscope icon) to app-sidebar.tsx under Log Intelligence group. Route /forensics. Register in client/src/App.tsx.
+
+data-testid attributes — All interactive elements: query form fields, run button, result rows, export button, session controls, pagination.
+
+Relevant files
+client/src/pages/incident-war-room.tsx client/src/components/app-sidebar.tsx client/src/App.tsx server/routes.ts shared/schema.ts server/migrate.ts server/clickhouse-client.ts server/cloud-storage.ts
+
+Dependencies
+
+ClickHouse Hot-Tier & S3 Cold-Tier Storage Pipeline

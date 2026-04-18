@@ -133,24 +133,6 @@ redis:
       enabled: true
       minAvailable: 1
 
-opensearch:
-  enabled: true
-  singleNode: false
-  replicas: 2
-  resources:
-    requests:
-      memory: 1Gi
-      cpu: 500m
-    limits:
-      memory: 4Gi
-      cpu: 2000m
-  pdb:
-    enabled: true
-    minAvailable: 1
-  persistence:
-    size: 50Gi
-    storageClass: local-path
-
 secrets:
   create: true
   databaseUrl: ""

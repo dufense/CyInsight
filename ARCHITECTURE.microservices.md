@@ -64,7 +64,7 @@ graph TB
     subgraph "Storage Service"
         EW[Event Writer<br/>Batch Insert]
         IG[Incident Generator]
-        OSI[OpenSearch Indexer]
+        CHW[ClickHouse Writer]
         RET[Retention Manager]
     end
 
@@ -78,7 +78,7 @@ graph TB
     subgraph "Data Stores"
         PG_M[(PostgreSQL<br/>Management DB)]
         PG_D[(TimescaleDB<br/>Events DB)]
-        OS[(OpenSearch)]
+        CH[(ClickHouse)]
         REDIS[(Redis)]
     end
 
@@ -101,15 +101,15 @@ graph TB
     CORR --> T_ALERT
     IOC -.->|cache| REDIS
 
-    T_ALERT --> EW & IG & OSI
+    T_ALERT --> EW & IG & CHW
     EW --> PG_D
     IG --> PG_M
-    OSI --> OS
+    CHW --> CH
     RET --> PG_D
 
     API --> PG_M
     API --> PG_D
-    API --> OS
+    API --> CH
     PIPE --> T_MET
 
     T_CMD --> POLL
@@ -163,7 +163,7 @@ Log Sources
                                                       [Enrichment] ---> secureops.events.alerts
                                                                               |
                                                                               v
-                                                                        [Storage] ---> PostgreSQL / OpenSearch
+                                                                        [Storage] ---> PostgreSQL / ClickHouse
 ```
 
 ---
@@ -176,7 +176,7 @@ Log Sources
 | **Normalizer** | `events.raw` | `events.normalized`, `events.dlq` | None (stateless) | Event volume (CPU-bound) | 5002 |
 | **Detection Engine** | `events.normalized` | `events.enriched` | In-memory rule index | Event volume (memory-bound) | 5003 |
 | **Enrichment** | `events.enriched` | `events.alerts` | Redis (IOC cache) | Event volume, API calls | 5004 |
-| **Storage** | `events.alerts` | None | PostgreSQL, OpenSearch | Write throughput | 5005 |
+| **Storage** | `events.alerts` | None | PostgreSQL, ClickHouse | Write throughput | 5005 |
 | **Management** | `metrics.pipeline` | `commands.polling` | PostgreSQL | User concurrency | 5000 |
 | **Kafka** | N/A | N/A | Disk (log segments) | Topic throughput | 9092 |
 
@@ -258,7 +258,7 @@ Log Sources
 - **Event Writer**: Batch insert to `security_events` table (500 events/batch)
 - **SHA-256 Dedup**: Hash-based deduplication via `event_hash` column
 - **Incident Generator**: Auto-create incidents with dedup, severity classification, tenant grouping
-- **OpenSearch Indexer**: Parallel full-text indexing
+- **ClickHouse Writer**: Parallel full-text indexing
 - **Retention Manager**: Hot/warm/cold storage lifecycle management
 - **Backpressure**: Pauses Kafka consumer when DB write latency exceeds 5 seconds
 
@@ -267,7 +267,7 @@ Log Sources
 |----------|---------|-------------|
 | `BATCH_SIZE` | 500 | Events per DB batch insert |
 | `BACKPRESSURE_LATENCY_MS` | 5000 | Write latency threshold for pause |
-| `HOT_RETENTION_DAYS` | 90 | Hot tier retention |
+| `HOT_RETENTION_DAYS` | 90 | Hot tier (ClickHouse) retention |
 | `WARM_RETENTION_DAYS` | 365 | Warm tier retention |
 | `COLD_RETENTION_DAYS` | 1095 | Cold tier retention (3 years) |
 
@@ -344,7 +344,7 @@ Helm value files in `deploy/helm/secureops/values/` provide per-region configura
 | **Storage** | Events queue in `events.alerts` topic | 30-day topic retention provides buffer; batch catchup on recovery |
 | **Management** | UI/API unavailable | Pipeline continues processing; incidents queued for display |
 | **Redis** | IOC cache misses | Enrichment falls back to direct lookups (slower but functional) |
-| **OpenSearch** | Full-text search unavailable | PostgreSQL queries still work; events still persisted |
+| **ClickHouse** | Full-text search unavailable | PostgreSQL queries still work; events still persisted |
 
 ### Database Failures
 
@@ -382,7 +382,7 @@ docker-compose -f docker-compose.microservices.yml up
 # Kafka:              localhost:9092
 # PostgreSQL (mgmt):  localhost:5432
 # PostgreSQL (events):localhost:5433
-# OpenSearch:         http://localhost:9200
+# ClickHouse:         http://localhost:8123
 # Redis:              localhost:6379
 ```
 
@@ -402,7 +402,7 @@ For pipeline development, run infrastructure + specific services:
 
 ```bash
 # Start only infrastructure
-docker-compose -f docker-compose.microservices.yml up kafka redis management-db data-plane-db opensearch
+docker-compose -f docker-compose.microservices.yml up kafka redis management-db data-plane-db clickhouse
 
 # Run individual services locally
 cd services/normalizer && npm run dev
@@ -466,7 +466,7 @@ curl http://localhost:5000/api/pipeline/metrics | jq '.consumerLag'
 1. Deploy `services/enrichment/` consuming from `events.enriched`
 2. Deploy `services/storage/` consuming from `events.alerts`
 3. Storage service takes over DB writes; disable in-process storage in monolith
-4. Verify incident generation and OpenSearch indexing
+4. Verify incident generation and ClickHouse OLAP indexing
 
 ### Phase 5: Management Service Only
 
@@ -513,7 +513,7 @@ At any phase, the monolith can resume full processing by:
 | Kafka | 1 broker, 50Gi | 3 brokers, 150Gi | 5+ brokers, 500Gi |
 | PostgreSQL (Mgmt) | 2 vCPU, 4Gi, 50Gi disk | 4 vCPU, 8Gi, 200Gi disk | 8 vCPU, 16Gi, 500Gi disk |
 | TimescaleDB (Events) | 2 vCPU, 4Gi, 100Gi disk | 8 vCPU, 16Gi, 500Gi disk | 16 vCPU, 32Gi, 2Ti disk |
-| OpenSearch | 1 node, 1Gi heap | 3 nodes, 4Gi heap | 5+ nodes, 8Gi heap |
+| ClickHouse | 1 node, 1Gi memory | 3 nodes, 4Gi memory | 5+ nodes, 8Gi memory |
 | Redis | 512Mi | 1Gi | 2Gi |
 
 ### Kafka Topic Sizing
@@ -540,7 +540,7 @@ docker-compose -f docker-compose.microservices.yml up
 ### Infrastructure Only
 
 ```bash
-docker-compose -f docker-compose.microservices.yml up kafka management-db data-plane-db opensearch redis
+docker-compose -f docker-compose.microservices.yml up kafka management-db data-plane-db clickhouse redis
 ```
 
 ### Environment Variables

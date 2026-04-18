@@ -14,6 +14,7 @@ import {
   ServerCog, PlayCircle, CheckCircle2, XCircle, Layers, Pencil, Cpu, Zap,
   RefreshCw, CheckCheck, AlertCircle, CloudCog, LogIn, Fingerprint, MessageSquare,
   Settings2, Plug, ToggleLeft, ToggleRight, FlaskConical, Bell, Bug,
+  Radio, Rss, Settings,
 } from "lucide-react";
 
 const PlatformHealthTab = lazy(() => import("./platform-health"));
@@ -31,6 +32,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader,
@@ -3622,6 +3624,256 @@ const SANDBOX_CAPABILITIES: Record<string, string[]> = {
   vmray:           ["Agentless Sandbox", "VTI Scoring", "Evasion-Resistant"],
 };
 
+function TaxiiServerSummary() {
+  const { data } = useQuery<{ id: number; name: string; displayName: string; enabled: boolean; objectCount: number | null }[]>({
+    queryKey: ["/api/integrations/taxii/servers"],
+  });
+  const servers = Array.isArray(data) ? data : [];
+  if (servers.length === 0) {
+    return <p className="text-xs text-muted-foreground">No TAXII feed servers configured yet.</p>;
+  }
+  return (
+    <div className="space-y-1.5">
+      {servers.slice(0, 5).map((s) => (
+        <div key={s.id} className="flex items-center justify-between gap-2 text-xs" data-testid={`taxii-server-summary-${s.id}`}>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.enabled ? "bg-green-500" : "bg-muted-foreground"}`} />
+            <span className="truncate text-foreground font-medium">{s.displayName || s.name}</span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {s.objectCount != null && (
+              <Badge variant="outline" className="text-[9px] px-1 py-0 h-4">{s.objectCount.toLocaleString()} objs</Badge>
+            )}
+            <span className={`text-[9px] ${s.enabled ? "text-green-500" : "text-muted-foreground"}`}>{s.enabled ? "active" : "disabled"}</span>
+          </div>
+        </div>
+      ))}
+      {servers.length > 5 && (
+        <p className="text-[9px] text-muted-foreground">+{servers.length - 5} more servers</p>
+      )}
+    </div>
+  );
+}
+
+function OpenCTISection() {
+  const { toast } = useToast();
+  const [formUrl, setFormUrl] = useState("");
+  const [formToken, setFormToken] = useState("");
+  const [formSync, setFormSync] = useState(true);
+  const [formStream, setFormStream] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const { data: config, isLoading, refetch } = useQuery<{
+    configured: boolean; id?: number; enabled?: boolean; testStatus?: string; url?: string;
+    lastSyncedAt?: string; syncEnabled?: boolean; liveStreamEnabled?: boolean; iocCount?: number;
+    streamStatus?: { active: boolean; lastEventId: string | null; lastEventTime: string | null; eventsPerMinute: number };
+  }>({
+    queryKey: ["/api/integrations/opencti/config"],
+    staleTime: 30_000,
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("PUT", "/api/integrations/opencti/config", {
+        url: formUrl, apiToken: formToken, syncEnabled: formSync, liveStreamEnabled: formStream,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/opencti/config"] });
+      toast({ title: "OpenCTI Configured", description: "Settings saved. Use Test to verify the connection." });
+      setEditing(false);
+      setFormToken("");
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/opencti/test", {});
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetch();
+      toast({
+        title: data.success ? "Connected to OpenCTI" : "Connection Failed",
+        description: data.message,
+        variant: data.success ? "default" : "destructive",
+      });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/opencti/sync", {});
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetch();
+      toast({ title: "Sync Complete", description: data.message });
+    },
+    onError: (e: any) => toast({ title: "Sync Error", description: e.message, variant: "destructive" }),
+  });
+
+  const streamMutation = useMutation({
+    mutationFn: async (action: "start" | "stop") => {
+      const res = await apiRequest("POST", "/api/integrations/opencti/stream", { action });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetch();
+      toast({ title: data.active ? "Stream Started" : "Stream Stopped", description: data.message });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  function startEdit() {
+    setFormUrl(config?.url || "");
+    setFormToken("");
+    setFormSync(config?.syncEnabled !== false);
+    setFormStream(!!config?.liveStreamEnabled);
+    setEditing(true);
+  }
+
+  if (isLoading) return null;
+
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3 flex items-center gap-2">
+        <Shield className="w-4 h-4" />Live Threat Intelligence Platforms
+      </h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* OpenCTI card */}
+        <Card className="border border-border" data-testid="card-integration-opencti">
+          <CardHeader className="pb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center justify-center flex-shrink-0">
+                  <Radio className="w-5 h-5 text-violet-400" />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold leading-tight">OpenCTI</CardTitle>
+                  <CardDescription className="text-[10px] leading-tight mt-0.5">Threat Intelligence Platform — GraphQL API + SSE Live Stream</CardDescription>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {config?.streamStatus?.active && (
+                  <Badge className="text-[9px] bg-emerald-500/15 text-emerald-400 border-emerald-500/30 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />Live
+                  </Badge>
+                )}
+                {!config?.configured ? (
+                  <Badge variant="outline" className="text-[9px] text-amber-400">Not configured</Badge>
+                ) : config.testStatus === "ok" ? (
+                  <Badge variant="outline" className="text-[9px] text-emerald-400 border-emerald-500/30 bg-emerald-500/10">Connected</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-[9px] text-muted-foreground">Untested</Badge>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {config?.configured && !editing && (
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center gap-1.5 text-muted-foreground">
+                  <Globe className="w-3 h-3" /><span className="truncate">{config.url}</span>
+                </div>
+                {config.iocCount ? (
+                  <div className="flex items-center gap-1.5 text-muted-foreground">
+                    <Database className="w-3 h-3" /><span>{config.iocCount?.toLocaleString()} IOCs synced</span>
+                  </div>
+                ) : null}
+                {config.lastSyncedAt && (
+                  <div className="flex items-center gap-1.5 text-muted-foreground">
+                    <Clock className="w-3 h-3" /><span>Last sync: {new Date(config.lastSyncedAt).toLocaleString()}</span>
+                  </div>
+                )}
+                {config.streamStatus?.eventsPerMinute ? (
+                  <div className="flex items-center gap-1.5 text-emerald-400">
+                    <Activity className="w-3 h-3" /><span>{config.streamStatus.eventsPerMinute} events/min</span>
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {editing ? (
+              <div className="space-y-2">
+                <div className="space-y-1">
+                  <label className="text-[10px] text-muted-foreground">OpenCTI URL *</label>
+                  <Input value={formUrl} onChange={e => setFormUrl(e.target.value)} placeholder="https://your-opencti.example.com" className="h-7 text-xs font-mono" data-testid="input-opencti-url" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] text-muted-foreground">API Token *</label>
+                  <Input type="password" value={formToken} onChange={e => setFormToken(e.target.value)} placeholder="New token (leave empty to keep existing)" className="h-7 text-xs" data-testid="input-opencti-token" />
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <label className="flex items-center gap-1.5">
+                    <Switch checked={formSync} onCheckedChange={setFormSync} data-testid="switch-opencti-sync" />
+                    <span>6h sync</span>
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <Switch checked={formStream} onCheckedChange={setFormStream} data-testid="switch-opencti-stream" />
+                    <span>Live stream</span>
+                  </label>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" className="h-6 text-xs" onClick={() => saveMutation.mutate()} disabled={!formUrl || saveMutation.isPending} data-testid="button-save-opencti">Save</Button>
+                  <Button size="sm" variant="outline" className="h-6 text-xs" onClick={() => setEditing(false)}>Cancel</Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-border/50">
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={startEdit} data-testid="button-configure-opencti">
+                  <Settings className="w-2.5 h-2.5 mr-1" />{config?.configured ? "Edit" : "Configure"}
+                </Button>
+                {config?.configured && (
+                  <>
+                    <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => testMutation.mutate()} disabled={testMutation.isPending} data-testid="button-test-opencti">
+                      {testMutation.isPending ? <RefreshCw className="w-2.5 h-2.5 animate-spin" /> : <FlaskConical className="w-2.5 h-2.5 mr-1" />}Test
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending} data-testid="button-sync-opencti">
+                      {syncMutation.isPending ? <RefreshCw className="w-2.5 h-2.5 animate-spin" /> : <RefreshCw className="w-2.5 h-2.5 mr-1" />}Sync Now
+                    </Button>
+                    {config.liveStreamEnabled && (
+                      <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => streamMutation.mutate(config.streamStatus?.active ? "stop" : "start")} disabled={streamMutation.isPending} data-testid="button-stream-opencti">
+                        {config.streamStatus?.active ? "Stop Stream" : "Start Stream"}
+                      </Button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* TAXII Feeds card */}
+        <Card className="border border-border" data-testid="card-integration-taxii">
+          <CardHeader className="pb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-teal-500/10 border border-teal-500/20 flex items-center justify-center flex-shrink-0">
+                  <Rss className="w-5 h-5 text-teal-400" />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold leading-tight">TAXII 2.1 Feeds</CardTitle>
+                  <CardDescription className="text-[10px] leading-tight mt-0.5">STIX 2.1 feed servers — CISA AIS, Anomali LIMO, MISP, custom</CardDescription>
+                </div>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <TaxiiServerSummary />
+            <Button size="sm" variant="outline" className="h-7 text-xs mt-3" onClick={() => window.location.href = "/taxii-feeds"} data-testid="button-manage-taxii">
+              <Rss className="w-3 h-3 mr-1.5" />Manage TAXII Feeds
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function PlatformIntegrationsTab() {
   const { toast } = useToast();
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
@@ -3881,6 +4133,9 @@ function PlatformIntegrationsTab() {
           </div>
         </div>
       ))}
+
+      {/* OpenCTI + TAXII section */}
+      <OpenCTISection />
 
       {/* Placeholder: Notifications section */}
       {!grouped["notification"] && (

@@ -17,7 +17,7 @@
 #   - CloudWatch alarms (S3 5xx errors, Lambda failures)
 #
 # Storage tiers (matched to 90-day alert retention in UI):
-#   Day 0-30:   S3 Standard              (hot, OpenSearch also queries)
+#   Day 0-30:   S3 Standard              (hot, ClickHouse OLAP also queries)
 #   Day 31-90:  S3 Intelligent-Tiering   (warm, Athena queries only)
 #   Day 91-365: S3 Glacier Instant       (cold, Athena queries)
 #   Day 365+:   S3 Glacier Deep Archive  (frozen, compliance only)

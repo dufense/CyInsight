@@ -57,6 +57,10 @@ import {
   AlertTriangle,
   Wand2,
   BookMarked,
+  Rss,
+  Layers,
+  Server,
+  FlaskConical,
 } from "lucide-react";
 import {
   Sidebar,
@@ -132,7 +136,7 @@ function getNavGroups(role: string): NavGroup[] {
   const socRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];
   const socItems: NavItem[] = [];
   if (socRoles.includes(role)) {
-    socItems.push({ title: "Security Events", url: "/events", icon: Database });
+    socItems.push({ title: "SOC Alert Console", url: "/events", icon: Database });
     socItems.push({ title: "Incidents", url: "/incidents", icon: AlertTriangle, badge: "New" });
     socItems.push({ title: "Alert Triage", url: "/alert-triage", icon: Sparkles, badge: "AI" });
     socItems.push({ title: "Zero Trust Posture", url: "/zero-trust", icon: ShieldCheck });
@@ -153,21 +157,39 @@ function getNavGroups(role: string): NavGroup[] {
   const ctiRoles = ["platform_admin", "mss_admin", "soc_manager", "mss_analyst", "security_engineer", "security_analyst"];
   const ctiItems: NavItem[] = [];
   if (ctiRoles.includes(role)) {
-    ctiItems.push({ title: "CTI Hub", url: "/cyber-intel", icon: Shield, badge: "New" });
-    ctiItems.push({ title: "IOC Indicators", url: "/threat-intel", icon: Radar });
+    ctiItems.push({ title: "Intel Overview", url: "/cyber-intel", icon: Shield, badge: "New" });
     ctiItems.push({ title: "Threat Actors", url: "/threat-actors", icon: Users });
     ctiItems.push({ title: "Intrusion Sets", url: "/intrusion-sets", icon: Network });
-    ctiItems.push({ title: "CTI Campaigns", url: "/cti-campaigns", icon: Crosshair });
+    ctiItems.push({ title: "Campaigns", url: "/cti-campaigns", icon: Crosshair });
     ctiItems.push({ title: "Malware Families", url: "/malware-families", icon: Bug });
+    ctiItems.push({ title: "IOC Indicators", url: "/threat-intel", icon: Radar, badge: "IOC" });
     ctiItems.push({ title: "STIX Observables", url: "/stix-observables", icon: BarChart3, badge: "STIX" });
-    ctiItems.push({ title: "Intel Reports", url: "/intel-reports", icon: FileText });
+    ctiItems.push({ title: "TAXII Feeds", url: "/taxii-feeds", icon: Rss, badge: "Live" });
     ctiItems.push({ title: "Attack Patterns", url: "/mitre-coverage", icon: Target });
     ctiItems.push({ title: "Global Threat Map", url: "/threat-map", icon: Globe });
-    ctiItems.push({ title: "Predictive Engine", url: "/cyber-llm", icon: Brain, badge: "AI" });
-    ctiItems.push({ title: "Federation", url: "/federated-intel", icon: Share2 });
+    ctiItems.push({ title: "Predictive Engine", url: "/cyber-llm", icon: Brain, badge: "LLM" });
+    ctiItems.push({ title: "Federated Intel", url: "/federated-intel", icon: Share2 });
+    ctiItems.push({ title: "Intel Reports", url: "/intel-reports", icon: FileText });
   }
   if (ctiItems.length > 0) {
     groups.push({ label: "Cyber Intelligence", icon: BookMarked, items: ctiItems });
+  }
+
+  // ── Log Intelligence ──
+  const logIntelRoles = ["platform_admin", "mss_admin", "mss_analyst", "soc_manager", "security_analyst", "security_engineer"];
+  const logIntelItems: NavItem[] = [];
+  const logInvestigationRoles = ["platform_admin", "mss_admin", "mss_analyst"];
+  if (logIntelRoles.includes(role)) {
+    logIntelItems.push({ title: "Log Explorer", url: "/log-intelligence/explorer", icon: Search });
+    if (logInvestigationRoles.includes(role)) {
+      logIntelItems.push({ title: "Log Investigation", url: "/log-investigation", icon: FlaskConical, badge: "New" });
+    }
+    logIntelItems.push({ title: "Source Management", url: "/log-intelligence/sources", icon: Server });
+    logIntelItems.push({ title: "Detection Feed", url: "/log-intelligence/detections", icon: Layers, badge: "Live" });
+    logIntelItems.push({ title: "AI Training & Feedback", url: "/log-intelligence/training", icon: Brain, badge: "AI" });
+  }
+  if (logIntelItems.length > 0) {
+    groups.push({ label: "Log Intelligence", icon: Database, items: logIntelItems });
   }
 
   // ── AI & Intelligence ── (Behavior Analytics only — threat intel moved to CTI group)

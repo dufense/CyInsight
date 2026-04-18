@@ -43,11 +43,6 @@ spec:
                 secretKeyRef:
                   name: secureops-secrets
                   key: timescaledb-url
-            - name: OPENSEARCH_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: secureops-data-plane-config
-                  key: opensearch-url
             - name: OBJECT_STORAGE_BUCKET
               valueFrom:
                 configMapKeyRef:

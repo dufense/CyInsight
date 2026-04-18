@@ -40,18 +40,6 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/shared/kafka-brokers"
         },
         {
-          "name": "OPENSEARCH_URL",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-url"
-        },
-        {
-          "name": "OPENSEARCH_USERNAME",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-username"
-        },
-        {
-          "name": "OPENSEARCH_PASSWORD",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/opensearch-password"
-        },
-        {
           "name": "REGION",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ccc/data-plane/REGION_SLUG/plane-region"
         },

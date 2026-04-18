@@ -438,12 +438,6 @@ Resources:
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/database-url"
             - Name: KAFKA_BROKERS
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/kafka-brokers"
-            - Name: OPENSEARCH_URL
-              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-url"
-            - Name: OPENSEARCH_USERNAME
-              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-username"
-            - Name: OPENSEARCH_PASSWORD
-              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/data-plane/${DataPlaneRegion}/opensearch-password"
             - Name: MANAGEMENT_PLANE_URL
               ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/management-plane-url"
             - Name: CLOUD_STORAGE_PROVIDER
@@ -479,6 +473,15 @@ Resources:
               - ClickHouseEnabled
               - Name: CLICKHOUSE_USER
                 ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-user"
+              - !Ref AWS::NoValue
+            # Bearer token consumed by /api/admin/clickhouse/rotate-password.
+            # Same shared value across every plane so the rotation script can
+            # fan out with one token. The rotate endpoint fails closed (HTTP
+            # 503) if this env var is missing.
+            - !If
+              - ClickHouseEnabled
+              - Name: CLICKHOUSE_ROTATION_TOKEN
+                ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/shared/clickhouse-rotation-token"
               - !Ref AWS::NoValue
           HealthCheck:
             Command:

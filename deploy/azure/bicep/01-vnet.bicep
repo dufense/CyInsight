@@ -3,7 +3,7 @@
 //
 // Creates a 3-tier VNet mirroring the AWS VPC design:
 //   - Public subnet    (Application Gateway / Azure Front Door origin)
-//   - Private subnet   (Container Apps, Event Hubs, OpenSearch equivalent)
+//   - Private subnet   (Container Apps, Event Hubs, ClickHouse OLAP)
 //   - Isolated subnet  (Azure Database for PostgreSQL Flexible Server)
 //
 // Also creates:

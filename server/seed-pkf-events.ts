@@ -1,3 +1,18 @@
+// ============================================================
+// PERMANENTLY DISABLED LEGACY SEED SCRIPT — DO NOT RUN OR IMPORT
+// ============================================================
+// This file seeded synthetic FortiGate and FortiNAC security events
+// into the PKF Africa tenant (tenant_id=37) during early development.
+// Those records have been purged by the one-time migration
+// ".purge_fortigate_fortinac_seeded_events" in server/routes.ts.
+//
+// This script must NEVER be imported or executed again:
+//   - The SEED_ALLOWED guard (assertSeedAllowed) will block it at runtime,
+//     but the primary protection is that nothing imports or calls this file.
+//   - Grep confirms no import/require of "seed-pkf-events" exists anywhere.
+//   - If you need to add real integrations, use the live connectors in the UI.
+// ============================================================
+
 import { Pool } from "pg";
 import crypto from "crypto";
 

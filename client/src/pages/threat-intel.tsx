@@ -45,6 +45,10 @@ import {
   Layers,
   BarChart2,
   ExternalLink,
+  Radio,
+  Users,
+  Flag,
+  Bug,
 } from "lucide-react";
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend, ReferenceLine } from "recharts";
 import type { ThreatIntelFeed, ThreatIntelIoc } from "@shared/schema";
@@ -400,12 +404,238 @@ const iocTypeIcons: Record<string, typeof Globe> = {
 type BadgeVariantKey = "default" | "secondary" | "destructive" | "outline";
 type LucideIconComponent = typeof XCircle;
 
+interface OpenCTIActor {
+  id: number;
+  stix_id: string;
+  name: string;
+  aliases: string[] | null;
+  description: string | null;
+  sophistication: string | null;
+  primary_motivation: string | null;
+  country: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  confidence: number;
+  score: number;
+  linked_ioc_count: number;
+}
+
+interface OpenCTICampaign {
+  id: number;
+  stix_id: string;
+  name: string;
+  description: string | null;
+  aliases: string[] | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  objective: string | null;
+  confidence: number;
+}
+
+interface OpenCTIMalware {
+  id: number;
+  stix_id: string;
+  name: string;
+  description: string | null;
+  aliases: string[] | null;
+  malware_types: string[] | null;
+  kill_chain_phases: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  confidence: number;
+}
+
+interface OpenCTIIoc {
+  id: number;
+  stix_id: string;
+  indicator_type: string;
+  indicator_value: string;
+  reputation: string;
+  confidence: number;
+  score: number;
+  source: string;
+  labels: string[] | null;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
 const reputationConfig: Record<string, { color: BadgeVariantKey; icon: LucideIconComponent }> = {
   malicious: { color: "destructive", icon: XCircle },
   suspicious: { color: "secondary", icon: AlertTriangle },
   clean: { color: "outline", icon: CheckCircle },
   unknown: { color: "outline", icon: Shield },
 };
+
+function OpenCTIIntelTab() {
+  const { data: actors, isLoading: actorsLoading } = useQuery<OpenCTIActor[]>({
+    queryKey: ["/api/integrations/opencti/actors"],
+  });
+  const { data: campaigns, isLoading: campaignsLoading } = useQuery<OpenCTICampaign[]>({
+    queryKey: ["/api/integrations/opencti/campaigns"],
+  });
+  const { data: malware, isLoading: malwareLoading } = useQuery<OpenCTIMalware[]>({
+    queryKey: ["/api/integrations/opencti/malware"],
+  });
+  const { data: iocsData, isLoading: iocsLoading } = useQuery<{ iocs: OpenCTIIoc[]; total: number }>({
+    queryKey: ["/api/integrations/opencti/iocs"],
+  });
+  const iocs = iocsData?.iocs;
+
+  const empty = (label: string) => (
+    <p className="text-sm text-muted-foreground py-4 text-center">No {label} data from OpenCTI. Configure the integration in Admin Portal → Platform Integrations.</p>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-2">
+        <Radio className="w-5 h-5 text-primary" />
+        <h2 className="text-base font-semibold">OpenCTI Live Intelligence</h2>
+        <Badge variant="outline" className="text-xs border-blue-500/40 text-blue-500">Live Sync</Badge>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader className="py-3 px-4">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Users className="w-4 h-4 text-primary" /> Threat Actor Profiles
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {actorsLoading ? (
+              <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+            ) : !actors?.length ? empty("threat actor") : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {actors.map((actor) => (
+                  <div key={actor.id} className="flex items-start gap-2 p-2 rounded-md border bg-muted/30" data-testid={`opencti-actor-${actor.id}`}>
+                    <Flag className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium truncate">{actor.name}</p>
+                        {actor.country && <Badge variant="outline" className="text-[9px] px-1 py-0 shrink-0">{actor.country}</Badge>}
+                      </div>
+                      {actor.aliases?.length > 0 && (
+                        <p className="text-xs text-muted-foreground truncate">aka {actor.aliases.slice(0, 3).join(", ")}</p>
+                      )}
+                      {actor.description && (
+                        <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{actor.description}</p>
+                      )}
+                      <div className="flex gap-1 flex-wrap mt-1 items-center">
+                        {actor.sophistication && <Badge variant="outline" className="text-[10px] px-1 py-0">{actor.sophistication}</Badge>}
+                        {actor.primary_motivation && <Badge variant="outline" className="text-[10px] px-1 py-0">{actor.primary_motivation}</Badge>}
+                        {(actor.linked_ioc_count ?? 0) > 0 && (
+                          <Badge variant="destructive" className="text-[9px] px-1 py-0 bg-red-500/20 text-red-400 border-red-500/30">
+                            {actor.linked_ioc_count} IOCs
+                          </Badge>
+                        )}
+                        {campaigns && campaigns.filter((c) => c.name && actor.name && (c.description || "").toLowerCase().includes(actor.name.toLowerCase())).length > 0 && (
+                          <Badge variant="outline" className="text-[9px] px-1 py-0 border-orange-500/30 text-orange-400">
+                            {campaigns.filter((c) => (c.description || "").toLowerCase().includes(actor.name.toLowerCase())).length} campaign(s)
+                          </Badge>
+                        )}
+                        {malware && malware.filter((m) => m.name && actor.name && (m.description || "").toLowerCase().includes(actor.name.toLowerCase())).length > 0 && (
+                          <Badge variant="outline" className="text-[9px] px-1 py-0 border-purple-500/30 text-purple-400">
+                            {malware.filter((m) => (m.description || "").toLowerCase().includes(actor.name.toLowerCase())).length} malware
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3 px-4">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Target className="w-4 h-4 text-orange-400" /> Active Campaigns
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {campaignsLoading ? (
+              <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+            ) : !campaigns?.length ? empty("campaign") : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {campaigns.map((campaign) => (
+                  <div key={campaign.id} className="flex items-start gap-2 p-2 rounded-md border bg-muted/30" data-testid={`opencti-campaign-${campaign.id}`}>
+                    <Zap className="w-4 h-4 text-orange-400 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{campaign.name}</p>
+                      {campaign.description && (
+                        <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{campaign.description}</p>
+                      )}
+                      {campaign.first_seen && (
+                        <p className="text-xs text-muted-foreground mt-0.5">First seen: {new Date(campaign.first_seen).toLocaleDateString()}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3 px-4">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Bug className="w-4 h-4 text-purple-400" /> Malware Families
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {malwareLoading ? (
+              <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+            ) : !malware?.length ? empty("malware") : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {malware.map((m) => (
+                  <div key={m.id} className="flex items-start gap-2 p-2 rounded-md border bg-muted/30" data-testid={`opencti-malware-${m.id}`}>
+                    <Bug className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{m.name}</p>
+                      {m.malware_types && m.malware_types.length > 0 && (
+                        <div className="flex gap-1 flex-wrap mt-1">
+                          {m.malware_types.map((t: string) => (
+                            <Badge key={t} variant="outline" className="text-[10px] px-1 py-0 border-purple-500/40 text-purple-400">{t}</Badge>
+                          ))}
+                        </div>
+                      )}
+                      {m.description && (
+                        <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{m.description}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3 px-4">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Shield className="w-4 h-4 text-blue-400" /> Live IOC Feed
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {iocsLoading ? (
+              <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+            ) : !iocs?.length ? empty("IOC") : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {iocs.slice(0, 30).map((ioc) => (
+                  <div key={ioc.id} className="flex items-center gap-2 p-2 rounded-md border bg-muted/30" data-testid={`opencti-ioc-${ioc.id}`}>
+                    <Hash className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <span className="text-xs font-mono truncate flex-1">{ioc.indicator_value}</span>
+                    <Badge variant="outline" className="text-[10px] px-1 py-0 shrink-0">{ioc.indicator_type}</Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 export default function ThreatIntelPage() {
   const { currentTenant } = useTenant();
@@ -581,6 +811,9 @@ export default function ThreatIntelPage() {
           </TabsTrigger>
           <TabsTrigger value="community-intel" data-testid="tab-community-intel" className="flex items-center gap-1.5">
             <Layers className="w-3.5 h-3.5" />Community Intel
+          </TabsTrigger>
+          <TabsTrigger value="opencti-intel" data-testid="tab-opencti-intel" className="flex items-center gap-1.5">
+            <Radio className="w-3.5 h-3.5" />OpenCTI Intel
           </TabsTrigger>
         </TabsList>
 
@@ -877,6 +1110,10 @@ export default function ThreatIntelPage() {
 
         <TabsContent value="community-intel" className="space-y-4 mt-4">
           <CommunityIntelTab tenantId={tenantId} />
+        </TabsContent>
+
+        <TabsContent value="opencti-intel" className="space-y-4 mt-4">
+          <OpenCTIIntelTab />
         </TabsContent>
       </Tabs>
     </div>

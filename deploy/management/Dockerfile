@@ -18,7 +18,7 @@
 #   AI_PROVIDER         — openai | anthropic | azure | vertex | ollama | custom
 #   AI_API_KEY          — AI provider API key
 #   KAFKA_BROKERS       — MSK bootstrap brokers (comma-separated host:port)
-#   OPENSEARCH_URL      — OpenSearch / ElasticSearch endpoint URL
+#   CLICKHOUSE_URL      — ClickHouse OLAP endpoint (single source of truth for security events)
 #   DATA_PLANE_ENDPOINTS — JSON map: {"india":"http://...","bahrain":"http://...","kenya":"http://..."}
 ##############################################################################
 

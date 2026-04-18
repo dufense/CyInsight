@@ -1730,6 +1730,34 @@ export class CynetConnector extends BaseConnector {
     return out;
   }
 
+  private deriveDeviceControlAction(
+    deviceType: string | null | undefined,
+    deviceName: string | null | undefined,
+    deviceStatus: string | null | undefined,
+    epsPrevention: string | null | undefined,
+    isDeviceControl: boolean
+  ): string | null {
+    if (!isDeviceControl) return null;
+    const dt = (deviceType || "").toLowerCase();
+    const dn = (deviceName || "").toLowerCase();
+    const blockedSignal = (deviceStatus || "").toLowerCase().includes("block") ||
+      (epsPrevention || "").toLowerCase().includes("block");
+    const allowedSignal = (deviceStatus || "").toLowerCase().includes("allow") ||
+      (epsPrevention || "").toLowerCase().includes("allow");
+    const state = blockedSignal ? "Blocked" : allowedSignal ? "Allowed" : null;
+    if (!state) return null;
+
+    if (dt === "mtp" || dn.includes("mtp")) return `MTP USB Device ${state}`;
+    if (dt === "usb" || dt === "removable" || dn.includes("usb")) return `USB Device ${state}`;
+    if (dt === "bluetooth" || dn.includes("bluetooth")) return `Bluetooth Device ${state}`;
+    if (dt === "cdrom" || dt === "cd" || dt === "dvd" || dn.includes("cd") || dn.includes("dvd")) return `CD/DVD Device ${state}`;
+    if (dt === "printer" || dn.includes("printer")) return `Printer ${state}`;
+    if (dt === "wifi" || dt === "wireless" || dn.includes("wifi")) return `WiFi Adapter ${state}`;
+    if (dt === "storage" || dn.includes("storage")) return `Storage Device ${state}`;
+    if (deviceName) return `${deviceName} ${state}`;
+    return `Device ${state}`;
+  }
+
   private decodeEpsRemediationCode(code: any): string | null {
     if (code == null) return null;
     const EPS_REMEDIATION_CODES: Record<string, string> = {
@@ -1754,9 +1782,30 @@ export class CynetConnector extends BaseConnector {
       "18": "USB Device Allowed",
       "19": "MTP Device Blocked",
       "20": "MTP Device Allowed",
+      "21": "CD/DVD Device Blocked",
+      "22": "CD/DVD Device Allowed",
+      "23": "Bluetooth Device Blocked",
+      "24": "Bluetooth Device Allowed",
+      "25": "WiFi Adapter Blocked",
+      "26": "WiFi Adapter Allowed",
+      "27": "Printer Blocked",
+      "28": "Printer Allowed",
+      "29": "Storage Device Detected (Blocked)",
+      "30": "Storage Device Detected (Allowed)",
+      "31": "Device Control Policy Applied",
+      "32": "Device Blocked",
+      "33": "Device Allowed",
+      "34": "File Transfer Blocked",
+      "35": "File Transfer Allowed",
+      "36": "Shadow Copy Deleted",
+      "37": "Boot Sector Protected",
+      "38": "MBR Protected",
+      "39": "Honeypot File Triggered",
+      "40": "Decoy Document Accessed",
     };
     const key = String(code);
-    return EPS_REMEDIATION_CODES[key] || `EPS Code ${key}`;
+    if (EPS_REMEDIATION_CODES[key]) return EPS_REMEDIATION_CODES[key];
+    return null;
   }
 
   mapToInternal(rawEvent: Record<string, any>): Record<string, any> {
@@ -1839,7 +1888,24 @@ export class CynetConnector extends BaseConnector {
       if (descFields.deviceId) enrichedDescription += `. Device ID: ${descFields.deviceId}`;
     }
 
-    const resolvedAction = epsRemediationLabel ||
+    const deviceControlAction = this.deriveDeviceControlAction(
+      descFields.deviceType, descFields.deviceName,
+      descFields.deviceStatus, descFields.epsPrevention, isDeviceControl
+    );
+
+    const nameForFallback = (alertName || "").toLowerCase();
+    const epsNameFallback = epsRemediationLabel == null && epsRemediationCode != null
+      ? (nameForFallback.includes("blocked") || nameForFallback.includes("bloc") ? "Blocked"
+        : nameForFallback.includes("detected") || nameForFallback.includes("active") ? "Detected"
+        : nameForFallback.includes("quarantine") ? "Quarantined"
+        : nameForFallback.includes("allow") ? "Allowed"
+        : nameForFallback.includes("kill") ? "Process Killed"
+        : nameForFallback.includes("isolat") ? "Endpoint Isolated"
+        : nameForFallback.includes("device") ? "Device Blocked"
+        : null)
+      : null;
+
+    const resolvedAction = deviceControlAction || epsRemediationLabel || epsNameFallback ||
       normalizeActionLabel(epsActionRaw || rawEvent.Status || rawEvent.status || rawEvent.action, "Cynet 360") ||
       "Detected";
 
