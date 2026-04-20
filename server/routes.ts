@@ -18230,10 +18230,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       }
 
       const wasConnected = existing.status === "connected";
+      const testUser = req.user as any;
       await storage.updateSecurityIntegration(id, {
         status: testResults.success ? "connected" : "error",
         lastPollStatus: testResults.success ? "success" : "error",
         lastPollMessage: testResults.message,
+      });
+      await storage.logIntegrationAudit({
+        tenantId: existing.tenantId,
+        integrationId: id,
+        platformName: existing.platformName,
+        platformKey: existing.platformKey,
+        action: "test_connection",
+        userId: testUser?.claims?.sub || testUser?.id || null,
+        username: testUser?.claims?.email || testUser?.email || null,
+        details: { success: testResults.success, latencyMs: testResults.latencyMs, message: testResults.message },
       });
       await deleteCachePrefix(`tenants:${existing.tenantId}:integrations`);
 
@@ -18306,6 +18317,18 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           lastPollMessage: eventsCount > 0 ? `Pull succeeded (${eventsCount} events) — enrichment pipeline running…` : displayMessage,
           eventsImported: (existing.eventsImported || 0) + eventsCount,
           configJson: updatedConfig,
+        });
+
+        const pullUser = req.user as any;
+        await storage.logIntegrationAudit({
+          tenantId: existing.tenantId,
+          integrationId: id,
+          platformName: existing.platformName,
+          platformKey: existing.platformKey,
+          action: "pull_data",
+          userId: pullUser?.claims?.sub || pullUser?.id || null,
+          username: pullUser?.claims?.email || pullUser?.email || null,
+          details: { eventsPulled: eventsCount, hasMore: pullResult.hasMore, cursor: pullResult.cursor, message: pullResult.message },
         });
 
         if (eventsCount > 0) {

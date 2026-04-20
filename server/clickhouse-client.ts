@@ -436,7 +436,11 @@ export class ClickHouseClient {
       await this._postInsert(insertSql, body, errorPrefix);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("storage View") || msg.includes("NOT_IMPLEMENTED")) {
+      // Single-node CH: *_distributed is either a VIEW (INSERT → NOT_IMPLEMENTED)
+      // or the VIEW/table doesn't exist at all (UNKNOWN_TABLE / "does not exist").
+      const isViewError = msg.includes("storage View") || msg.includes("NOT_IMPLEMENTED");
+      const isMissingTable = msg.includes("UNKNOWN_TABLE") || msg.includes("does not exist") || msg.includes("Code: 60");
+      if (isViewError || isMissingTable) {
         const fallbackSql = insertSql.replace(distributedTable, baseTable);
         await this._postInsert(fallbackSql, body, errorPrefix);
       } else {
@@ -1298,6 +1302,21 @@ export async function initClickHouseSchema(): Promise<void> {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[ClickHouse] distributed-view refresh warning (non-fatal): ${msg.slice(0, 256)}`);
+    }
+  }
+
+  // Safety: ensure incidents_distributed exists as a VIEW in single-node mode
+  // or that the base incidents table exists for fallback inserts. This catches
+  // cases where a partial cluster DDL run dropped the distributed table but
+  // failed before the single-node fallback could recreate it.
+  try {
+    await client.exec(
+      `CREATE VIEW IF NOT EXISTS ${database}.incidents_distributed AS SELECT * FROM ${database}.incidents`,
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("already exists")) {
+      console.warn(`[ClickHouse] incidents_distributed safety check (non-fatal): ${msg.slice(0, 256)}`);
     }
   }
 
