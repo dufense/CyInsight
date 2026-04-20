@@ -101,48 +101,72 @@ export abstract class BaseConnector {
       headers?: Record<string, string>;
       body?: any;
       timeout?: number;
+      retries?: number;
+      retryDelayMs?: number;
     } = {}
   ): Promise<{ status: number; data: any; latencyMs: number }> {
-    const startTime = Date.now();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), options.timeout || 30000);
+    const maxAttempts = (options.retries ?? 2) + 1;
+    const retryDelayMs = options.retryDelayMs ?? 1500;
+    let lastErr: Error | undefined;
 
-    try {
-      const fetchOptions: RequestInit = {
-        method: options.method || "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...options.headers,
-        },
-        signal: controller.signal,
-      };
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const startTime = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), options.timeout || 30000);
 
-      if (options.body) {
-        fetchOptions.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+      try {
+        const fetchOptions: RequestInit = {
+          method: options.method || "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            ...options.headers,
+          },
+          signal: controller.signal,
+        };
+
+        if (options.body) {
+          fetchOptions.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+        }
+
+        const response = await fetch(url, fetchOptions);
+        const latencyMs = Date.now() - startTime;
+
+        let data: any;
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          data = await response.json();
+        } else {
+          data = await response.text();
+        }
+
+        return { status: response.status, data, latencyMs };
+      } catch (error: any) {
+        const latencyMs = Date.now() - startTime;
+        if (error.name === "AbortError") {
+          lastErr = new Error(`Request timed out after ${options.timeout || 30000}ms`);
+        } else {
+          lastErr = error instanceof Error ? error : new Error(String(error));
+        }
+
+        // Retry only on transient network errors (not 4xx).
+        if (attempt < maxAttempts) {
+          const msg = lastErr.message.toLowerCase();
+          const retryable = msg.includes("econnrefused") || msg.includes("econnreset")
+            || msg.includes("etimedout") || msg.includes("enotfound")
+            || msg.includes("enetunreach") || msg.includes("timeout")
+            || msg.includes("temporarily unavailable");
+          if (retryable) {
+            await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
+            continue;
+          }
+        }
+        throw lastErr;
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      const response = await fetch(url, fetchOptions);
-      const latencyMs = Date.now() - startTime;
-
-      let data: any;
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        data = await response.text();
-      }
-
-      return { status: response.status, data, latencyMs };
-    } catch (error: any) {
-      const latencyMs = Date.now() - startTime;
-      if (error.name === "AbortError") {
-        throw new Error(`Request timed out after ${options.timeout || 30000}ms`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
     }
+    throw lastErr!;
   }
 
   protected getCredential(key: string): string | undefined {

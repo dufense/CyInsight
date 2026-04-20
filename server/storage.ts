@@ -52,10 +52,10 @@ import {
   type SourceHealth, type InsertSourceHealth,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, desc, and, or, count, sql, gt, gte, lte, inArray, isNull, isNotNull, getTableColumns } from "drizzle-orm";
+import { eq, desc, and, or, count, sql, gt, gte, lt, lte, inArray, isNull, isNotNull, getTableColumns } from "drizzle-orm";
 import crypto from "crypto";
 import { buildIntegrationGuardSql } from "./log-source-map";
-import type { IngestIncidentPayload } from "./clickhouse-client";
+import { formatChDateTime64, type IngestIncidentPayload } from "./clickhouse-client";
 
 // Per-row EXISTS guards — enforce integration-aware filtering at query level.
 // The guard checks whether each row's tenant currently has the connected
@@ -448,10 +448,23 @@ export class DatabaseStorage implements IStorage {
   // I/O, no `any` casts. Used by both the live dual-write and the durable
   // sweep/backfill paths.
   private static toIncidentPayload(rows: Incident[]): IngestIncidentPayload[] {
-    const toIso = (v: Date | string | null | undefined): string =>
-      v instanceof Date ? v.toISOString()
-      : typeof v === "string" && v ? new Date(v).toISOString()
-      : new Date().toISOString();
+    // ClickHouse self-hosted defaults to `date_time_input_format=basic`, which
+    // only accepts `YYYY-MM-DD HH:MM:SS.sss` and rejects ISO-8601 `T`/`Z`.
+    // We format explicitly to avoid Code: 27 JSONEachRow parse errors.
+    const toChDateTime64 = (v: Date | string | null | undefined): string => {
+      const d = v instanceof Date ? v
+        : typeof v === "string" && v ? new Date(v)
+        : new Date();
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const yyyy = d.getFullYear();
+      const mm = pad(d.getMonth() + 1);
+      const dd = pad(d.getDate());
+      const hh = pad(d.getHours());
+      const mi = pad(d.getMinutes());
+      const ss = pad(d.getSeconds());
+      const ms = String(d.getMilliseconds()).padStart(3, "0");
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}.${ms}`;
+    };
     return rows
       .filter((r) => r && typeof r.id === "number" && typeof r.tenantId === "number")
       .map((r) => ({
@@ -468,8 +481,8 @@ export class DatabaseStorage implements IStorage {
         confidence_score:    typeof r.confidenceScore === "number" ? r.confidenceScore : 0,
         classification:      r.classification ?? "",
         is_true_positive:    r.isTruePositive ? 1 : 0,
-        created_at:          toIso(r.createdAt),
-        updated_at:          toIso(r.updatedAt),
+        created_at:          toChDateTime64(r.createdAt),
+        updated_at:          toChDateTime64(r.updatedAt),
       }));
   }
 
@@ -491,11 +504,28 @@ export class DatabaseStorage implements IStorage {
       if (!chClient) return;
       const payload = DatabaseStorage.toIncidentPayload(rows);
       if (payload.length === 0) return;
-      try {
-        await chClient.insertIncidents(payload);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Storage] ClickHouse incident write error (non-fatal): ${msg}`);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await chClient.insertIncidents(payload);
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const transient =
+            msg.includes("timeout") ||
+            msg.includes("ECONNREFUSED") ||
+            msg.includes("ECONNRESET") ||
+            msg.includes("ETIMEDOUT") ||
+            msg.includes("ENOTFOUND") ||
+            /\b5\d\d\b/.test(msg);
+          if (transient && attempt < 3) {
+            const delay = 500 * attempt;
+            console.warn(`[Storage] ClickHouse incident write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
+            await new Promise((r) => setTimeout(r, delay));
+          } else {
+            console.warn(`[Storage] ClickHouse incident write error (non-fatal, giving up): ${msg}`);
+            return;
+          }
+        }
       }
     });
   }
@@ -676,6 +706,111 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  // ── ClickHouse security_events background sweeper ─────────────────────────
+  // Catches security_events written through any code path that bypasses the
+  // live chDualWrite() (raw SQL inserts, CH outages during dual-write).  Walks
+  // PG in id order, queries CH for existing event_ids, and inserts only the
+  // missing rows.  Cursor advances only after each batch is durably in CH.
+  private static securityEventSweepCursor: number | null = null;
+  private static securityEventSweepRunning = false;
+  static async sweepSecurityEventsToClickHouse(batchLimit = 1000): Promise<number> {
+    if (DatabaseStorage.securityEventSweepRunning) return 0;
+    DatabaseStorage.securityEventSweepRunning = true;
+    let totalShipped = 0;
+    try {
+      const m = await import("./clickhouse-client");
+      const chClient = m.getClickHouseClient();
+      if (!chClient) return 0;
+
+      // Anchor cursor on first run to the current max id so we don't re-ship
+      // the entire history (live dual-write already handled historical rows).
+      if (DatabaseStorage.securityEventSweepCursor === null) {
+        const [maxRow] = await db.select({ maxId: sql<number | null>`max(${securityEvents.id})` }).from(securityEvents);
+        DatabaseStorage.securityEventSweepCursor = maxRow?.maxId ?? 0;
+      }
+
+      const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+      const IPV6_RE = /^[0-9a-fA-F:]+$/;
+      const validIp = (v: string | null | undefined) =>
+        v && (IPV4_RE.test(v) || IPV6_RE.test(v)) ? v : undefined;
+
+      while (true) {
+        const cursor = DatabaseStorage.securityEventSweepCursor;
+        const batch: SecurityEvent[] = await db.select().from(securityEvents)
+          .where(gt(securityEvents.id, cursor))
+          .orderBy(securityEvents.id)
+          .limit(batchLimit);
+        if (batch.length === 0) break;
+
+        // Build payload using the same mapping as chDualWrite().
+        const payload = batch.map((ev) => ({
+          event_id:        ev.eventHash ?? String(ev.id),
+          tenant_id:       ev.tenantId,
+          event_type:      ev.eventType,
+          source_type:     ev.sourceType ?? "",
+          log_source:      ev.logSource ?? "",
+          severity:        ev.severity,
+          host:            ev.asset ?? "",
+          src_ip:          validIp(ev.attacker),
+          dst_ip:          validIp(ev.target),
+          target:          ev.target ?? "",
+          user_name:       ev.attacker && !validIp(ev.attacker) ? ev.attacker : "",
+          mitre_tactic:    ev.mitreTactic ?? "",
+          mitre_technique: ev.mitreTechnique ?? "",
+          raw_event:       ev.rawPayload ? JSON.stringify(ev.rawPayload) : "",
+          ingested_at:     formatChDateTime64(ev.occurredAt),
+          threat:          ev.threat ?? "",
+          action:          ev.action ?? "",
+          recipient:       ev.recipient ?? "",
+          description:     (ev.description ?? "").slice(0, 1000),
+        }));
+
+        // Query CH for existing event_ids in this batch.
+        const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const eventIdList = payload.map((p) => `'${esc(String(p.event_id))}'`).join(",");
+        const database = process.env.CLICKHOUSE_DATABASE ?? "ccc";
+        const existenceSql = `SELECT event_id FROM ${database}.security_events WHERE event_id IN (${eventIdList}) FORMAT JSONEachRow`;
+
+        let existingIds: Set<string>;
+        try {
+          const raw = await chClient.exec(existenceSql);
+          const rows = raw
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line: string) => JSON.parse(line) as { event_id: string });
+          existingIds = new Set(rows.map((r) => r.event_id));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[ClickHouse] Security event sweep existence check failed (cursor held): ${msg}`);
+          break;
+        }
+
+        const missing = payload.filter((p) => !existingIds.has(p.event_id));
+        if (missing.length > 0) {
+          try {
+            await chClient.insertEvents(missing as any);
+            totalShipped += missing.length;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[ClickHouse] Security event sweep insert failed (cursor held): ${msg}`);
+            break;
+          }
+        }
+
+        const tail = batch[batch.length - 1];
+        DatabaseStorage.securityEventSweepCursor = tail.id;
+        if (batch.length < batchLimit) break;
+      }
+      if (totalShipped > 0) {
+        console.log(`[ClickHouse] Security event sweep shipped ${totalShipped} missing rows`);
+      }
+      return totalShipped;
+    } finally {
+      DatabaseStorage.securityEventSweepRunning = false;
+    }
+  }
+
   // ── ClickHouse security_events.target one-time backfill ──────────────────
   // The CH `target` column was added by the Task #202 ALTER migration, so
   // every event ingested *before* that migration has target='' in CH even
@@ -803,12 +938,12 @@ export class DatabaseStorage implements IStorage {
             `WHERE tenant_id = ${safeTenantId} AND event_id IN (${idList}) AND target = ''`;
 
           try {
-            await chClient.query(buildSql(true));
+            await chClient.exec(buildSql(true));
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (useCluster && /cluster|distributed|on cluster/i.test(msg)) {
               try {
-                await chClient.query(buildSql(false));
+                await chClient.exec(buildSql(false));
               } catch (err2) {
                 const msg2 = err2 instanceof Error ? err2.message : String(err2);
                 console.warn(`[ClickHouse] target backfill batch failed (tenant=${safeTenantId}, will retry next startup): ${msg2.slice(0, 256)}`);
@@ -1031,9 +1166,7 @@ export class DatabaseStorage implements IStorage {
       mitre_tactic:    ev.mitreTactic ?? "",
       mitre_technique: ev.mitreTechnique ?? "",
       raw_event:       ev.rawPayload ? JSON.stringify(ev.rawPayload) : "",
-      ingested_at:     ev.occurredAt instanceof Date
-        ? ev.occurredAt.toISOString()
-        : (ev.occurredAt as string | undefined) ?? new Date().toISOString(),
+      ingested_at:     formatChDateTime64(ev.occurredAt),
       // Task #203: mirror the PG security_events columns the threat-flow Sankey
       // depends on so the CH fast-path produces the same level of detail
       // (per-threat names, per-action labels, per-recipient grouping for email).
@@ -1044,9 +1177,29 @@ export class DatabaseStorage implements IStorage {
       // the column for the Sankey, so capping here keeps payload size bounded.
       description:     (ev.description ?? "").slice(0, 1000),
     }));
-    chClient.insertEvents(payload).catch((err: Error) => {
-      console.warn(`[Storage] ClickHouse write error (non-fatal): ${err.message}`);
-    });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await chClient.insertEvents(payload);
+        return;
+      } catch (err: any) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const transient =
+          msg.includes("timeout") ||
+          msg.includes("ECONNREFUSED") ||
+          msg.includes("ECONNRESET") ||
+          msg.includes("ETIMEDOUT") ||
+          msg.includes("ENOTFOUND") ||
+          /\b5\d\d\b/.test(msg);
+        if (transient && attempt < 3) {
+          const delay = 500 * attempt;
+          console.warn(`[Storage] ClickHouse write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
+          await new Promise((r) => setTimeout(r, delay));
+        } else {
+          console.warn(`[Storage] ClickHouse write error (non-fatal, giving up): ${msg}`);
+          return;
+        }
+      }
+    }
   }
 
   async createSecurityEvent(data: InsertSecurityEvent): Promise<SecurityEvent> {
@@ -3866,6 +4019,27 @@ export class DatabaseStorage implements IStorage {
   async updateDlqEntry(id: number, data: Partial<EventDlqEntry>): Promise<EventDlqEntry> {
     const [entry] = await db.update(eventDeadLetterQueue).set(data as any).where(eq(eventDeadLetterQueue.id, id)).returning();
     return entry;
+  }
+
+  /**
+   * Returns DLQ entries eligible for automatic retry:
+   * status='failed', retry_count < max_retries, and not retried in the last 5 minutes.
+   */
+  async getRetryableDlqEntries(limit = 20): Promise<EventDlqEntry[]> {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    return db.select().from(eventDeadLetterQueue)
+      .where(
+        and(
+          eq(eventDeadLetterQueue.status, "failed"),
+          lt(eventDeadLetterQueue.retryCount, eventDeadLetterQueue.maxRetries),
+          or(
+            isNull(eventDeadLetterQueue.lastRetryAt),
+            lte(eventDeadLetterQueue.lastRetryAt, fiveMinutesAgo)
+          )
+        )
+      )
+      .orderBy(eventDeadLetterQueue.createdAt)
+      .limit(limit);
   }
 
   async getOrgStakeholders(tenantId: number, category?: string): Promise<OrgStakeholder[]> {

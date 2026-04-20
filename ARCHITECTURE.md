@@ -686,6 +686,17 @@ sequenceDiagram
     TS-->>S3: Age-off to object storage (after retention)
 ```
 
+### Resilience & Retry Behavior
+
+The ingestion pipeline implements **6 layers of retry and recovery** to handle transient failures without data loss:
+
+1. **ClickHouse HTTP Client Retry** — 3 attempts with exponential backoff for 5xx/connection errors (`clickhouse-client.ts`).
+2. **Security Events Sweeper** — Cursor-based PG→CH backfill that deduplicates via CH existence query; cursor advances only on success (`storage.ts`).
+3. **Live Dual-Write Retry** — 3 attempts with backoff for `chDualWrite()`; PG remains authoritative (`storage.ts`).
+4. **Connector HTTP Retry** — 2 retries for transient network errors in all `BaseConnector` subclasses (`base-connector.ts`).
+5. **Automatic DLQ Retry** — 60s background job replays failed DLQ entries up to `max_retries` (`index.ts`).
+6. **Schema Init Retry Loop** — 5 attempts with exponential backoff (2s→32s) so CH outages at deploy time don't permanently disable analytics (`index.ts`).
+
 ---
 
 ## Multi-Cloud Deployment Topology

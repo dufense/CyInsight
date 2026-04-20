@@ -364,14 +364,14 @@ export async function backfillChThreatFlowDetails(): Promise<{
            name String, applied_at DateTime64(3) DEFAULT now64()
          ) ENGINE = MergeTree() ORDER BY name`;
     try {
-      await ch.query(migrationsTableDdl);
+      await ch.exec(migrationsTableDdl);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes("already exists")) {
         // Fall back to the simpler single-node form if cluster create failed
         // for any reason other than "already exists".
         try {
-          await ch.query(
+          await ch.exec(
             `CREATE TABLE IF NOT EXISTS ${database}._migrations (
                name String, applied_at DateTime64(3) DEFAULT now64()
              ) ENGINE = MergeTree() ORDER BY name`,
@@ -449,7 +449,7 @@ export async function backfillChThreatFlowDetails(): Promise<{
             `AND (threat = '' OR action = '' OR recipient = '' OR description = '') ` +
             `SETTINGS mutations_sync = 2, allow_nondeterministic_mutations = 1`;
           try {
-            await ch.query(sql);
+            await ch.exec(sql);
             totalUpdated += slice.length;
             totalGroups += 1;
           } catch (err: unknown) {
@@ -490,7 +490,7 @@ export async function backfillChThreatFlowDetails(): Promise<{
       return { updated: totalUpdated, groups: totalGroups, skipped: false };
     }
 
-    await ch.query(
+    await ch.exec(
       `INSERT INTO ${database}._migrations (name) VALUES ('${MIGRATION_NAME}')`,
     );
     backfillDone = true;

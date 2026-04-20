@@ -32,6 +32,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
+COPY --from=builder /app/migration-data ./migration-data
+RUN rm -f /app/migration-data/.migrated
+COPY rds-ca-bundle.pem /etc/ssl/certs/rds-ca-bundle.pem
 
 RUN npm prune --production 2>/dev/null
 
@@ -47,7 +50,7 @@ USER appuser
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/_health || exit 1
 
 # Use start-prod.js (cluster manager) instead of running the CJS bundle directly.
 # It respects CLUSTER_WORKERS_MAX for Fargate memory safety and sends SIGTERM
