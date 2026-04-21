@@ -844,17 +844,10 @@ export class DatabaseStorage implements IStorage {
         return 0;
       }
       const database = process.env.CLICKHOUSE_DATABASE ?? "ccc";
-      // Detect cluster vs single-node by checking the _migrations table that
-      // is only created on cluster setups. Cheap probe (single LIMIT 0
-      // metadata read). On error we conservatively assume single-node and
-      // skip the ON CLUSTER clause.
-      let useCluster = false;
-      try {
-        await chClient.query(`SELECT 1 FROM ${database}._migrations LIMIT 0 FORMAT JSONEachRow`);
-        useCluster = true;
-      } catch {
-        useCluster = false;
-      }
+      // Use the cluster flag set during schema init (clickhouse-client.ts).
+      // This avoids the false-positive where _migrations exists because the
+      // threat-flow backfill created it on a single-node deployment.
+      const useCluster = m.clickHouseUsesCluster?.() ?? false;
       const onClusterClause = useCluster ? " ON CLUSTER ccc_cluster" : "";
 
       const escSql = (s: string) =>

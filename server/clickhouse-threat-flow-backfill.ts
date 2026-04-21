@@ -42,7 +42,7 @@
  */
 
 import { pool } from "./db";
-import { getClickHouseClient, HOT_RETENTION_DAYS } from "./clickhouse-client";
+import { getClickHouseClient, HOT_RETENTION_DAYS, clickHouseUsesCluster } from "./clickhouse-client";
 
 const MIGRATION_NAME = "threat_flow_columns_backfill_v1";
 const PG_BATCH_SIZE = 500;
@@ -349,7 +349,7 @@ export async function backfillChThreatFlowDetails(): Promise<{
   let failedGroups = 0;
 
   try {
-    const useCluster = await detectClusterMode(ch);
+    const useCluster = clickHouseUsesCluster();
 
     // The cluster DDL in clickhouse-client.ts creates `_migrations`, but the
     // single-node DDL does not. Ensure it exists in both modes so the

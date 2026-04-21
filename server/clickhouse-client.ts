@@ -52,6 +52,13 @@ export function formatChDateTime64(d: Date | string | null | undefined): string 
 function isTransientError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message;
+  // Fail fast on permanent / config errors that will never succeed on retry.
+  if (
+    msg.includes("Code: 701") ||       // CLUSTER_DOESNT_EXIST
+    msg.includes("Code: 48")           // NOT_IMPLEMENTED (e.g. INSERT into VIEW)
+  ) {
+    return false;
+  }
   return (
     msg.includes("ECONNREFUSED") ||
     msg.includes("ECONNRESET") ||
@@ -97,6 +104,13 @@ async function withRetry<T>(
 // ── Shared tier-routing constant ──────────────────────────────────────────────
 /** Hot-tier retention in days.  Override via HOT_RETENTION_DAYS env var. */
 export const HOT_RETENTION_DAYS = parseInt(process.env.HOT_RETENTION_DAYS ?? "90", 10);
+
+// ── Cluster vs single-node detection ──────────────────────────────────────────
+let _clickHouseUsesCluster = false;
+/** Returns true when the last schema init detected a usable ccc_cluster. */
+export function clickHouseUsesCluster(): boolean {
+  return _clickHouseUsesCluster;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1175,6 +1189,11 @@ export async function initClickHouseSchema(): Promise<void> {
     ORDER BY (tenant_id, id)
     SETTINGS index_granularity = 8192`,
     `CREATE VIEW IF NOT EXISTS ${database}.incidents_distributed AS SELECT * FROM ${database}.incidents`,
+    // Idempotency marker table — used by backfills and migrations in both modes.
+    `CREATE TABLE IF NOT EXISTS ${database}._migrations (
+       name       String,
+       applied_at DateTime64(3) DEFAULT now64()
+     ) ENGINE = MergeTree() ORDER BY name`,
   ];
 
   const isClusterError = (msg: string) =>
@@ -1195,6 +1214,7 @@ export async function initClickHouseSchema(): Promise<void> {
     }
   }
 
+  _clickHouseUsesCluster = !useSingleNode;
   if (useSingleNode) {
     console.log("[ClickHouse] Cluster not available — initializing single-node schema.");
     for (const stmt of singleNodeDdl) {
