@@ -51,7 +51,7 @@ const maxWorkers = parseInt(process.env.CLUSTER_WORKERS_MAX || "1", 10) || 1;
 const numWorkers = Math.min(Math.max(1, requestedWorkers), maxWorkers);
 
 // Maximum RSS in MB before a worker is gracefully recycled (OOM prevention)
-const WORKER_MAX_RSS_MB = parseInt(process.env.WORKER_MAX_RSS_MB || "800", 10);
+const WORKER_MAX_RSS_MB = parseInt(process.env.WORKER_MAX_RSS_MB || "1200", 10);
 
 if (numWorkers === 1 || !cluster.isPrimary) {
   // Single-process mode OR this is a worker — just run the app

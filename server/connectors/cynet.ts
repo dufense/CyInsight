@@ -551,16 +551,17 @@ export class CynetConnector extends BaseConnector {
         if (swMapSize > 0) {
           console.log(`[Cynet] pullAssets: merging software inventory from "${swResult.source}" (${swMapSize} hosts)`);
           let merged = 0;
-          assets = assets.map(a => {
+          for (const a of assets) {
             const key = this.normaliseHostname(a.hostname);
             const sw = swResult.softwareMap[key];
             if (sw && sw.length > 0) {
               merged++;
-              return { ...a, softwareInventory: sw };
+              a.softwareInventory = sw;
             }
-            return a;
-          });
+          }
           console.log(`[Cynet] pullAssets: software merged into ${merged}/${assets.length} assets`);
+          // Release the large software map immediately to help GC during sync
+          swResult.softwareMap = {};
         } else {
           console.log(`[Cynet] pullAssets: software inventory returned 0 hosts — skipping merge`);
         }
@@ -779,7 +780,21 @@ export class CynetConnector extends BaseConnector {
       avVersion: antivirus.DatabaseVersion || h.AntivirusVersion || h.antivirus?.version || h.av_version || "",
       groups: h.Groups || h.groups || h.group_names || (scanGroup.ScanGroupName ? [scanGroup.ScanGroupName] : []),
       lastLoggedInUser,
-      rawPayload: h,
+      rawPayload: {
+        HostName: h.HostName,
+        ComputerName: h.ComputerName,
+        Computer: h.Computer,
+        DisplayName: h.DisplayName,
+        Name: h.Name,
+        name: h.name,
+        hostname: h.hostname,
+        host_name: h.host_name,
+        computer_name: h.computer_name,
+        ScanGroupInfo: h.ScanGroupInfo,
+        LastMask: h.LastMask,
+        TotalCPUPercentage: h.TotalCPUPercentage,
+        MemoryPercentage: h.MemoryPercentage,
+      },
     };
   }
 

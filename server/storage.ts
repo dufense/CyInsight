@@ -69,6 +69,15 @@ const INCIDENT_INTEGRATION_GUARD = sql.raw(
 );
 
 export function computeEventHash(data: Partial<InsertSecurityEvent>): string {
+  const raw = data.rawPayload as any;
+  const uniqueId =
+    raw?._meta?.alertId ||
+    raw?._meta?.eventId ||
+    raw?._meta?.id ||
+    raw?.alertId ||
+    raw?.eventId ||
+    raw?.id ||
+    "";
   const parts = [
     String(data.tenantId || ""),
     data.logSource || "",
@@ -78,6 +87,7 @@ export function computeEventHash(data: Partial<InsertSecurityEvent>): string {
     data.attacker || "",
     data.target || "",
     data.asset || "",
+    uniqueId,
   ].join("|");
   return crypto.createHash("sha256").update(parts).digest("hex");
 }

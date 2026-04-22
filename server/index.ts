@@ -309,9 +309,18 @@ async function ensureSecurityIntegrationsUniqueConstraint() {
 }
 
 async function restorePkfAfricaIntegrations() {
-  const PKF_TENANT_ID = 37;
   await ensureSecurityIntegrationsUniqueConstraint();
   try {
+    // Resolve PKF Africa tenant ID dynamically — dev=37, prod=7, etc.
+    const { rows: tenantRows } = await pool.query<{ id: number }>(
+      `SELECT id FROM tenants WHERE name = 'PKF Africa' LIMIT 1`
+    );
+    if (tenantRows.length === 0) {
+      console.log("[IntegRestore] PKF Africa tenant not found — skipping integration restore.");
+      return;
+    }
+    const PKF_TENANT_ID = tenantRows[0].id;
+
     const { rows: existing } = await pool.query<{ platform_key: string }>(
       `SELECT platform_key FROM security_integrations WHERE tenant_id = $1`,
       [PKF_TENANT_ID]
@@ -354,7 +363,7 @@ async function restorePkfAfricaIntegrations() {
            ON CONFLICT (tenant_id, platform_key) DO NOTHING`,
           [PKF_TENANT_ID, integ.platform_key, integ.platform_name, integ.category, integ.description]
         );
-        console.log(`[IntegRestore] Restored missing PKF Africa integration: ${integ.platform_key} (status: disconnected, credentials required)`);
+        console.log(`[IntegRestore] Restored missing PKF Africa integration: ${integ.platform_key} (tenantId=${PKF_TENANT_ID}, status: disconnected, credentials required)`);
       }
     }
   } catch (err: any) {
