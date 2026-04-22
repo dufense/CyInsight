@@ -462,12 +462,12 @@ async function fixDataTenantIds(tenantMap: Map<number, number>): Promise<void> {
 }
 
 /**
- * Restore PKF Africa (tenant 37) integration rows if they are missing.
+ * Restore PKF Africa integration rows if they are missing.
+ * Tenant ID is resolved dynamically by name so this works in any environment.
  * This is additive-only: it never updates or overwrites existing rows, so real
  * API credentials stored by the admin are never touched. It runs on every startup.
  */
 async function restorePKFAfricaIntegrations(): Promise<void> {
-  const PKF_TENANT_ID = 37;
   const integrations = [
     {
       platform_key: "cynet",
@@ -499,6 +499,15 @@ async function restorePKFAfricaIntegrations(): Promise<void> {
   ];
 
   try {
+    const { rows: tenantRows } = await pool.query<{ id: number }>(
+      `SELECT id FROM tenants WHERE name = 'PKF Africa' LIMIT 1`
+    );
+    if (tenantRows.length === 0) {
+      console.log("  [IntegRestore] PKF Africa tenant not found — skipping.");
+      return;
+    }
+    const PKF_TENANT_ID = tenantRows[0].id;
+
     for (const intg of integrations) {
       const { rowCount } = await pool.query(
         "SELECT id FROM security_integrations WHERE tenant_id = $1 AND platform_key = $2",
@@ -515,7 +524,7 @@ async function restorePKFAfricaIntegrations(): Promise<void> {
           intg.description, intg.status, intg.polling_enabled, intg.polling_interval_minutes,
           "Integration restored — API credentials required. Please re-enter in Security Integrations settings.",
         ]);
-        console.log(`  ✓ Restored missing PKF Africa integration: ${intg.platform_name}`);
+        console.log(`  ✓ Restored missing PKF Africa integration: ${intg.platform_name} (tenantId=${PKF_TENANT_ID})`);
       }
     }
   } catch (e: any) {

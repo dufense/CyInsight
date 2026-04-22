@@ -1469,6 +1469,76 @@ export async function registerRoutes(
     } else {
       await storage.updateSuperadminPassword(existing.id, hash);
     }
+
+    // Also ensure a matching regular user exists so /api/auth/login works
+    const { users: usersTable } = await import("@shared/models/auth");
+    const { tenantUsers: tenantUsersTable, tenants: tenantsTable } = await import("@shared/schema");
+
+    let adminUser: any;
+    const [existingUser] = await db.select().from(usersTable).where(eq(usersTable.username, "admin"));
+    if (!existingUser) {
+      [adminUser] = await db.insert(usersTable).values({
+        id: "superadmin-001",
+        email: "admin@secureops.local",
+        username: "admin",
+        passwordHash: hash,
+        firstName: "Super",
+        lastName: "Admin",
+        mfaEnabled: false,
+      }).returning();
+      console.log("Regular admin user seeded: admin / Admin@123");
+    } else {
+      // Keep password in sync with superadmin
+      await db.update(usersTable).set({ passwordHash: hash }).where(eq(usersTable.username, "admin"));
+      adminUser = existingUser;
+    }
+
+    // ── Ensure admin user is linked to a tenant with platform_admin role ──────
+    // This MUST run regardless of whether the user was just created or already
+    // existed, because earlier deployments may have created the user without
+    // the tenant_users link (e.g. no MSSP tenant existed at the time).
+    if (adminUser) {
+      const allTenants = await db.select().from(tenantsTable);
+      let msspTenant = allTenants.find((t: any) => t.type === "mssp");
+
+      // If no MSSP tenant exists, create one so the admin has somewhere to land
+      if (!msspTenant) {
+        try {
+          const [created] = await db.insert(tenantsTable).values({
+            name: "SecureOps MSSP",
+            slug: "secureops-mssp",
+            type: "mssp",
+            industry: "Cybersecurity",
+            contactEmail: adminUser.email || "admin@secureops.local",
+            brandColor: "#3b82f6",
+          }).returning();
+          msspTenant = created;
+          console.log(`Created default MSSP tenant (id=${msspTenant.id})`);
+        } catch (err: any) {
+          console.warn("Failed to create MSSP tenant:", err.message);
+        }
+      }
+
+      if (msspTenant) {
+        const [existingTenantUser] = await db.select().from(tenantUsersTable).where(eq(tenantUsersTable.userId, adminUser.id));
+        const adminRoles = ["platform_admin", "mss_admin", "mss_analyst", "soc_manager", "security_engineer", "security_analyst", "service_desk", "customer"];
+        if (!existingTenantUser) {
+          await db.insert(tenantUsersTable).values({
+            userId: adminUser.id,
+            tenantId: msspTenant.id,
+            role: "platform_admin",
+            assignedRoles: adminRoles,
+          });
+          console.log(`Linked admin user to MSSP tenant ${msspTenant.id} as platform_admin`);
+        } else if (existingTenantUser.role !== "platform_admin") {
+          // Upgrade role if currently non-admin (e.g. customer)
+          await db.update(tenantUsersTable)
+            .set({ role: "platform_admin", assignedRoles: adminRoles })
+            .where(eq(tenantUsersTable.userId, adminUser.id));
+          console.log(`Upgraded admin user role to platform_admin for tenant ${msspTenant.id}`);
+        }
+      }
+    }
   }
   seedSuperadmin().catch(console.error);
   setTimeout(() => fixNumericActionCodes().catch(console.error), 2000);
@@ -18160,10 +18230,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       }
 
       const wasConnected = existing.status === "connected";
+      const testUser = req.user as any;
       await storage.updateSecurityIntegration(id, {
         status: testResults.success ? "connected" : "error",
         lastPollStatus: testResults.success ? "success" : "error",
         lastPollMessage: testResults.message,
+      });
+      await storage.logIntegrationAudit({
+        tenantId: existing.tenantId,
+        integrationId: id,
+        platformName: existing.platformName,
+        platformKey: existing.platformKey,
+        action: "test_connection",
+        userId: testUser?.claims?.sub || testUser?.id || null,
+        username: testUser?.claims?.email || testUser?.email || null,
+        details: { success: testResults.success, latencyMs: testResults.latencyMs, message: testResults.message },
       });
       await deleteCachePrefix(`tenants:${existing.tenantId}:integrations`);
 
@@ -18236,6 +18317,18 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           lastPollMessage: eventsCount > 0 ? `Pull succeeded (${eventsCount} events) — enrichment pipeline running…` : displayMessage,
           eventsImported: (existing.eventsImported || 0) + eventsCount,
           configJson: updatedConfig,
+        });
+
+        const pullUser = req.user as any;
+        await storage.logIntegrationAudit({
+          tenantId: existing.tenantId,
+          integrationId: id,
+          platformName: existing.platformName,
+          platformKey: existing.platformKey,
+          action: "pull_data",
+          userId: pullUser?.claims?.sub || pullUser?.id || null,
+          username: pullUser?.claims?.email || pullUser?.email || null,
+          details: { eventsPulled: eventsCount, hasMore: pullResult.hasMore, cursor: pullResult.cursor, message: pullResult.message },
         });
 
         if (eventsCount > 0) {

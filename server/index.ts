@@ -309,9 +309,18 @@ async function ensureSecurityIntegrationsUniqueConstraint() {
 }
 
 async function restorePkfAfricaIntegrations() {
-  const PKF_TENANT_ID = 37;
   await ensureSecurityIntegrationsUniqueConstraint();
   try {
+    // Resolve PKF Africa tenant ID dynamically — dev=37, prod=7, etc.
+    const { rows: tenantRows } = await pool.query<{ id: number }>(
+      `SELECT id FROM tenants WHERE name = 'PKF Africa' LIMIT 1`
+    );
+    if (tenantRows.length === 0) {
+      console.log("[IntegRestore] PKF Africa tenant not found — skipping integration restore.");
+      return;
+    }
+    const PKF_TENANT_ID = tenantRows[0].id;
+
     const { rows: existing } = await pool.query<{ platform_key: string }>(
       `SELECT platform_key FROM security_integrations WHERE tenant_id = $1`,
       [PKF_TENANT_ID]
@@ -354,7 +363,7 @@ async function restorePkfAfricaIntegrations() {
            ON CONFLICT (tenant_id, platform_key) DO NOTHING`,
           [PKF_TENANT_ID, integ.platform_key, integ.platform_name, integ.category, integ.description]
         );
-        console.log(`[IntegRestore] Restored missing PKF Africa integration: ${integ.platform_key} (status: disconnected, credentials required)`);
+        console.log(`[IntegRestore] Restored missing PKF Africa integration: ${integ.platform_key} (tenantId=${PKF_TENANT_ID}, status: disconnected, credentials required)`);
       }
     }
   } catch (err: any) {
@@ -459,128 +468,222 @@ let serverReady = false;
 (async () => {
   const port = parseInt(process.env.PORT || "5000", 10);
 
+  // ── Health check endpoint (available immediately) ──
   app.get("/_health", (_req: Request, res: Response) => {
     res.status(200).json({ status: "ok", ready: serverReady });
   });
 
-  await runMigrations();
-  // Ensure tenant_quotas table exists (idempotent — safe to run every startup)
-  await ensureQuotaTable();
-
-  // Initialize ClickHouse schema (no-op if CLICKHOUSE_URL not configured).
-  // We MUST await this before kicking off the incident backfill/sweeper so
-  // that `incidents_distributed` exists when the first INSERT goes out;
-  // otherwise the backfill would fail on a fresh environment, the sweeper's
-  // cursor would never get anchored, and the MITRE fast-path would
-  // permanently undercount until restart. Failures here are still
-  // non-fatal — the catch keeps the rest of startup alive.
-  let chSchemaReady = true;
-  await initClickHouseSchema().catch(err => {
-    chSchemaReady = false;
-    console.warn("[ClickHouse] Schema init warning:", err instanceof Error ? err.message : err);
+  // ── Start listening BEFORE blocking initialization ──
+  // This ensures ALB and Docker health checks pass immediately,
+  // preventing ECS from marking tasks unhealthy during startup.
+  httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
+    log(`serving on port ${port}`);
   });
 
-  // Mirror the PG `incidents` table into ClickHouse so the MITRE coverage
-  // fast-path counts stay aligned with the PG path. Two pieces:
-  //
-  //   1. One-time backfill of all historical PG incidents on startup, so the
-  //      fast-path has full coverage from the moment it goes live (instead
-  //      of slowly converging as new incidents arrive). Idempotent — safe to
-  //      re-run because the CH table is a ReplacingMergeTree(updated_at)
-  //      keyed on (tenant_id, id).
-  //
-  //   2. A 30-second background loop that retries the backfill if it hasn't
-  //      yet succeeded (e.g. CH was briefly unreachable on first attempt),
-  //      then drains any new incidents via the sweeper. The sweeper catches
-  //      every raw-SQL incident write path in routes.ts and the engines
-  //      (Checkpoint email, UEBA escalation, classification/triage/status/IOC
-  //      updates, bulk updates) that bypass storage.createIncident /
-  //      storage.updateIncident, and only advances its (updated_at, id)
-  //      cursor after each batch is durably in CH, so a CH outage never
-  //      strands rows.
-  if (chSchemaReady) {
-    void import("./storage").then(async ({ DatabaseStorage }) => {
-      const runOnce = async () => {
-        try {
-          await DatabaseStorage.backfillIncidentsToClickHouse();
-        } catch (err) {
-          console.warn(
-            "[ClickHouse] Incident backfill error (will retry):",
-            err instanceof Error ? err.message : err,
-          );
-        }
-        try {
-          await DatabaseStorage.sweepIncidentsToClickHouse();
-        } catch (err) {
-          console.warn(
-            "[ClickHouse] Incident sweep error (non-fatal):",
-            err instanceof Error ? err.message : err,
-          );
-        }
-        // Task #206: one-shot backfill of security_events.target for events
-        // ingested before the CH ALTER added the column. The method's own
-        // in-memory `done` guard makes the periodic re-tick a cheap no-op
-        // once it succeeds; failures will be retried on the next tick.
-        try {
-          await DatabaseStorage.backfillSecurityEventTargetsToClickHouse();
-        } catch (err) {
-          console.warn(
-            "[ClickHouse] security_events.target backfill error (will retry):",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      };
-      await runOnce();
-      setInterval(runOnce, 30_000);
-    }).catch(() => { /* startup race — ignore */ });
-
-    // Task #207: one-shot backfill of `threat`/`action`/`recipient`/
-    // `description` for older CH security_events rows ingested before
-    // Task #203's column migration. Idempotent (gated by a row in
-    // `ccc._migrations`) and fire-and-forget — failures simply leave the
-    // marker absent so the next restart retries. Runs after the schema init
-    // so the ALTER UPDATE statements always target the new columns.
-    void import("./clickhouse-threat-flow-backfill")
-      .then(async ({ backfillChThreatFlowDetails, isThreatFlowBackfillComplete }) => {
-        const tryBackfill = async () => {
-          if (isThreatFlowBackfillComplete()) return;
-          try {
-            await backfillChThreatFlowDetails();
-          } catch (err) {
-            console.warn(
-              "[ClickHouse] Threat-flow backfill error (will retry):",
-              err instanceof Error ? err.message : err,
-            );
-          }
-        };
-        await tryBackfill();
-        // Light retry cadence — once the migration marker is written this
-        // becomes a single SELECT on _migrations per tick.
-        setInterval(tryBackfill, 5 * 60_000);
-      })
-      .catch(() => { /* startup race — ignore */ });
-  }
-  const { createPerformanceIndexes, warmUpPool } = await import("./db");
-  warmUpPool(3).catch(err => console.warn("[DB Pool] Warm-up error:", err.message));
-  createPerformanceIndexes().catch(err => console.warn("[DB] Index creation deferred:", err.message));
-
-  // Start crash-guard monitors
-  startMemoryMonitor(30_000);
-  startPoolSaturationMonitor(15_000);
-
+  // ── Run all blocking initialization in the background ──
   if (process.env.NODE_ENV === "production") {
-    await registerRoutes(httpServer, app);
-
-    app.use(globalErrorHandler);
-
-    serveStatic(app);
-
-    httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
-      log(`serving on port ${port}`);
-    });
-
     (async () => {
       try {
+        await runMigrations();
+        // Ensure tenant_quotas table exists (idempotent — safe to run every startup)
+        await ensureQuotaTable();
+
+        // Initialize ClickHouse schema (no-op if CLICKHOUSE_URL not configured).
+        // We MUST await this before kicking off the incident backfill/sweeper so
+        // that `incidents_distributed` exists when the first INSERT goes out.
+        // Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s)
+        // so a transient CH outage at deploy time doesn't permanently disable CH.
+        let chSchemaReady = false;
+        const chTimeoutMs = 15_000;
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          try {
+            await Promise.race([
+              initClickHouseSchema(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`ClickHouse schema init timed out after ${chTimeoutMs}ms`)), chTimeoutMs)
+              ),
+            ]);
+            chSchemaReady = true;
+            console.log("[ClickHouse] Schema init succeeded");
+            break;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[ClickHouse] Schema init attempt ${attempt}/5 failed: ${msg}`);
+            if (attempt < 5) {
+              await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+            }
+          }
+        }
+        if (!chSchemaReady) {
+          console.warn("[ClickHouse] Schema init exhausted all retries — background sweeper will keep retrying");
+        }
+
+        // Mirror the PG `incidents` table into ClickHouse so the MITRE coverage
+        // fast-path counts stay aligned with the PG path. Two pieces:
+        //
+        //   1. One-time backfill of all historical PG incidents on startup, so the
+        //      fast-path has full coverage from the moment it goes live (instead
+        //      of slowly converging as new incidents arrive). Idempotent — safe to
+        //      re-run because the CH table is a ReplacingMergeTree(updated_at)
+        //      keyed on (tenant_id, id).
+        //
+        //   2. A 30-second background loop that retries the backfill if it hasn't
+        //      yet succeeded (e.g. CH was briefly unreachable on first attempt),
+        //      then drains any new incidents via the sweeper. The sweeper catches
+        //      every raw-SQL incident write path in routes.ts and the engines
+        //      (Checkpoint email, UEBA escalation, classification/triage/status/IOC
+        //      updates, bulk updates) that bypass storage.createIncident /
+        //      storage.updateIncident, and only advances its (updated_at, id)
+        //      cursor after each batch is durably in CH, so a CH outage never
+        //      strands rows.
+        if (chSchemaReady) {
+          void import("./storage").then(async ({ DatabaseStorage }) => {
+            const runOnce = async () => {
+              try {
+                await DatabaseStorage.backfillIncidentsToClickHouse();
+              } catch (err) {
+                console.warn(
+                  "[ClickHouse] Incident backfill error (will retry):",
+                  err instanceof Error ? err.message : err,
+                );
+              }
+              try {
+                await DatabaseStorage.sweepIncidentsToClickHouse();
+              } catch (err) {
+                console.warn(
+                  "[ClickHouse] Incident sweep error (non-fatal):",
+                  err instanceof Error ? err.message : err,
+                );
+              }
+              // Task #206: one-shot backfill of security_events.target for events
+              // ingested before the CH ALTER added the column. The method's own
+              // in-memory `done` guard makes the periodic re-tick a cheap no-op
+              // once it succeeds; failures will be retried on the next tick.
+              try {
+                await DatabaseStorage.backfillSecurityEventTargetsToClickHouse();
+              } catch (err) {
+                console.warn(
+                  "[ClickHouse] security_events.target backfill error (will retry):",
+                  err instanceof Error ? err.message : err,
+                );
+              }
+
+              // Security events sweeper: catches any rows that bypassed live dual-write.
+              try {
+                await DatabaseStorage.sweepSecurityEventsToClickHouse();
+              } catch (err) {
+                console.warn(
+                  "[ClickHouse] security event sweep error (will retry):",
+                  err instanceof Error ? err.message : err,
+                );
+              }
+            };
+            await runOnce();
+            setInterval(runOnce, 30_000);
+          }).catch(() => { /* startup race — ignore */ });
+
+          // Task #207: one-shot backfill of `threat`/`action`/`recipient`/
+          // `description` for older CH security_events rows ingested before
+          // Task #203's column migration. Idempotent (gated by a row in
+          // `ccc._migrations`) and fire-and-forget — failures simply leave the
+          // marker absent so the next restart retries. Runs after the schema init
+          // so the ALTER UPDATE statements always target the new columns.
+          void import("./clickhouse-threat-flow-backfill")
+            .then(async ({ backfillChThreatFlowDetails, isThreatFlowBackfillComplete }) => {
+              const tryBackfill = async () => {
+                if (isThreatFlowBackfillComplete()) return;
+                try {
+                  await backfillChThreatFlowDetails();
+                } catch (err) {
+                  console.warn(
+                    "[ClickHouse] Threat-flow backfill error (will retry):",
+                    err instanceof Error ? err.message : err,
+                  );
+                }
+              };
+              await tryBackfill();
+              // Light retry cadence — once the migration marker is written this
+              // becomes a single SELECT on _migrations per tick.
+              setInterval(tryBackfill, 5 * 60_000);
+            })
+            .catch(() => { /* startup race — ignore */ });
+        }
+
+        // ── Automatic DLQ retry job ────────────────────────────────────────────
+        // Replays failed DLQ entries every 60 seconds, up to max_retries, with a
+        // 5-minute cooldown between attempts.  This turns transient pipeline
+        // failures (downstream DB/CH hiccups, external API timeouts) into
+        // self-healing events without operator intervention.
+        void import("./storage").then(async ({ DatabaseStorage }) => {
+          const { runPipelineAsync } = await import("./enrichment-pipeline");
+          const retryDlq = async () => {
+            try {
+              const entries = await new DatabaseStorage().getRetryableDlqEntries(10);
+              if (entries.length === 0) return;
+              console.log(`[DLQ Auto-Retry] Processing ${entries.length} retryable entries`);
+              for (const entry of entries) {
+                const isReplayable =
+                  entry.tenantId &&
+                  entry.batchId &&
+                  entry.rawPayload &&
+                  (() => {
+                    const raw = entry.rawPayload as Record<string, any>;
+                    const evts = raw.events || raw.payload?.events || [];
+                    return Array.isArray(evts) && evts.length > 0;
+                  })();
+
+                if (!isReplayable) {
+                  await new DatabaseStorage().updateDlqEntry(entry.id, {
+                    status: "abandoned",
+                    retryCount: (entry.retryCount || 0) + 1,
+                    lastRetryAt: new Date(),
+                  }).catch(() => {});
+                  continue;
+                }
+
+                await new DatabaseStorage().updateDlqEntry(entry.id, {
+                  status: "retrying",
+                  retryCount: (entry.retryCount || 0) + 1,
+                  lastRetryAt: new Date(),
+                }).catch(() => {});
+
+                const raw = entry.rawPayload as Record<string, any>;
+                const events = raw.events || raw.payload?.events || [];
+                runPipelineAsync(entry.batchId!, entry.tenantId!, events, {
+                  vendorHint: raw.vendorHint || raw.payload?.vendorHint,
+                }).then(() => {
+                  new DatabaseStorage().updateDlqEntry(entry.id, {
+                    status: "recovered",
+                    recoveredAt: new Date(),
+                  }).catch(() => {});
+                }).catch(() => {
+                  new DatabaseStorage().updateDlqEntry(entry.id, {
+                    status: "failed",
+                  }).catch(() => {});
+                });
+              }
+            } catch (err) {
+              console.warn("[DLQ Auto-Retry] Job error:", err instanceof Error ? err.message : err);
+            }
+          };
+          // Run immediately, then every 60s.
+          await retryDlq();
+          setInterval(retryDlq, 60_000);
+        }).catch(() => { /* startup race — ignore */ });
+
+        const { createPerformanceIndexes, warmUpPool } = await import("./db");
+        warmUpPool(3).catch(err => console.warn("[DB Pool] Warm-up error:", err.message));
+        createPerformanceIndexes().catch(err => console.warn("[DB] Index creation deferred:", err.message));
+
+        // Start crash-guard monitors
+        startMemoryMonitor(30_000);
+        startPoolSaturationMonitor(15_000);
+
+        await registerRoutes(httpServer, app);
+        app.use(globalErrorHandler);
+        serveStatic(app);
+
+        // Background tasks that don't block server readiness
         await runProdDataMigration();
         await restorePkfAfricaIntegrations();
         await cleanupInferredCynetEPS();
@@ -616,35 +719,31 @@ let serverReady = false;
       }
     })();
   } else {
-    await runProdDataMigration();
-    await restorePkfAfricaIntegrations();
-    await registerRoutes(httpServer, app);
-
-    app.use(globalErrorHandler);
-
-    const { setupVite } = await import("./vite");
-    await setupVite(httpServer, app);
-
-    httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
-      log(`serving on port ${port}`);
-    });
-
-    serverReady = true;
-    markSchedulerReady();
-    // Start TAXII/OpenCTI schedulers in dev mode too
-    startTaxiiPollScheduler().catch((e: any) => console.error("[TAXII] Scheduler error:", e));
-    startOpenCTISyncScheduler().catch((e: any) => console.error("[OpenCTI] Scheduler error:", e));
-    import("./clickhouse-ingest-monitor").then(({ startClickHouseIngestMonitor }) => {
-      startClickHouseIngestMonitor();
-    }).catch((e: any) => console.error("[ClickHouseIngestMonitor] Import error:", e));
-    import("./clickhouse-fast-path-monitor").then(({ startClickHouseFastPathMonitor }) => {
-      startClickHouseFastPathMonitor();
-    }).catch((e: any) => console.error("[ClickHouseFastPathMonitor] Import error:", e));
-    import("./platform-settings-audit-digest").then(({ startPlatformSettingsAuditDigest }) => {
-      startPlatformSettingsAuditDigest();
-    }).catch((e: any) => console.error("[PlatformSettingsAuditDigest] Import error:", e));
-    await startKafkaConsumerIfPrimary(log);
-    log("Server fully initialized");
+    // Dev mode — same pattern: listen first, init in background
+    (async () => {
+      await runProdDataMigration();
+      await restorePkfAfricaIntegrations();
+      await registerRoutes(httpServer, app);
+      app.use(globalErrorHandler);
+      const { setupVite } = await import("./vite");
+      await setupVite(httpServer, app);
+      serverReady = true;
+      markSchedulerReady();
+      // Start TAXII/OpenCTI schedulers in dev mode too
+      startTaxiiPollScheduler().catch((e: any) => console.error("[TAXII] Scheduler error:", e));
+      startOpenCTISyncScheduler().catch((e: any) => console.error("[OpenCTI] Scheduler error:", e));
+      import("./clickhouse-ingest-monitor").then(({ startClickHouseIngestMonitor }) => {
+        startClickHouseIngestMonitor();
+      }).catch((e: any) => console.error("[ClickHouseIngestMonitor] Import error:", e));
+      import("./clickhouse-fast-path-monitor").then(({ startClickHouseFastPathMonitor }) => {
+        startClickHouseFastPathMonitor();
+      }).catch((e: any) => console.error("[ClickHouseFastPathMonitor] Import error:", e));
+      import("./platform-settings-audit-digest").then(({ startPlatformSettingsAuditDigest }) => {
+        startPlatformSettingsAuditDigest();
+      }).catch((e: any) => console.error("[PlatformSettingsAuditDigest] Import error:", e));
+      await startKafkaConsumerIfPrimary(log);
+      log("Server fully initialized");
+    })();
   }
 
   // ML behavioral jobs — run in all environments using existing shared pool

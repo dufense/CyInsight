@@ -27,9 +27,90 @@ import * as http from "http";
 import * as https from "https";
 import { recordChFastPath } from "./clickhouse-fast-path-stats";
 
+// ── ClickHouse date formatting ────────────────────────────────────────────────
+// Self-hosted ClickHouse defaults to `date_time_input_format=basic`, which only
+// accepts `YYYY-MM-DD HH:MM:SS.sss` and rejects ISO-8601 `T`/`Z` separators.
+// All DateTime64 values sent to CH must use this format to avoid Code: 27
+// JSONEachRow parse errors.
+export function formatChDateTime64(d: Date | string | null | undefined): string {
+  const date = d instanceof Date ? d
+    : typeof d === "string" && d ? new Date(d)
+    : new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}.${ms}`;
+}
+
+// ── Retry helpers ─────────────────────────────────────────────────────────────
+/** Returns true for transient HTTP / network errors that are worth retrying. */
+function isTransientError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  // Fail fast on permanent / config errors that will never succeed on retry.
+  if (
+    msg.includes("Code: 701") ||       // CLUSTER_DOESNT_EXIST
+    msg.includes("Code: 48")           // NOT_IMPLEMENTED (e.g. INSERT into VIEW)
+  ) {
+    return false;
+  }
+  return (
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("ETIMEDOUT") ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("timeout") ||
+    msg.includes("timed out") ||
+    /\b5\d\d\b/.test(msg) ||          // HTTP 5xx embedded in message
+    msg.includes("Code: 159") ||       // CH TimeoutExceeded
+    msg.includes("Code: 209") ||       // CH SocketTimeout
+    msg.includes("Code: 241")          // CH Memory limit exceeded (transient)
+  );
+}
+
+/**
+ * Retry an async operation with exponential backoff.
+ * @param label  Log label (e.g. "ClickHouse INSERT")
+ * @param fn     The operation to retry
+ * @param opts   maxRetries (default 3), baseDelayMs (default 1000)
+ */
+async function withRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  opts: { maxRetries?: number; baseDelayMs?: number } = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 1000;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt > maxRetries || !isTransientError(err)) throw err;
+      const delay = baseDelayMs * attempt;
+      console.warn(`[${label}] Transient error (attempt ${attempt}/${maxRetries + 1}): ${err instanceof Error ? err.message : String(err)}. Retrying in ${delay}ms...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 // ── Shared tier-routing constant ──────────────────────────────────────────────
 /** Hot-tier retention in days.  Override via HOT_RETENTION_DAYS env var. */
 export const HOT_RETENTION_DAYS = parseInt(process.env.HOT_RETENTION_DAYS ?? "90", 10);
+
+// ── Cluster vs single-node detection ──────────────────────────────────────────
+let _clickHouseUsesCluster = false;
+/** Returns true when the last schema init detected a usable ccc_cluster. */
+export function clickHouseUsesCluster(): boolean {
+  return _clickHouseUsesCluster;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -203,8 +284,15 @@ export class ClickHouseClient {
    * Execute a read-only SQL query via HTTP GET.
    * Credentials are sent as headers, not URL params.
    * Returns raw response body (JSONEachRow format).
+   *
+   * **Note:** ClickHouse rejects DDL (CREATE, DROP, ALTER, etc.) on GET because
+   * it treats GET as readonly. Use `exec()` for any modifying query.
    */
   async query(sql: string): Promise<string> {
+    return withRetry("ClickHouse query", () => this._queryRaw(sql), { maxRetries: 3, baseDelayMs: 1000 });
+  }
+
+  private _queryRaw(sql: string): Promise<string> {
     const parsed = new URL(this.url);
     const qs = new URLSearchParams({
       query: sql,
@@ -236,6 +324,58 @@ export class ClickHouseClient {
   }
 
   /**
+   * Execute a modifying SQL statement via HTTP POST.
+   * Use this for DDL (CREATE, DROP, ALTER, TRUNCATE) and INSERT.
+   * The SQL is sent in the request body to avoid URL-length limits.
+   * Credentials are sent as headers, not URL params.
+   * Returns raw response body.
+   */
+  async exec(sql: string): Promise<string> {
+    return withRetry("ClickHouse exec", () => this._execRaw(sql), { maxRetries: 3, baseDelayMs: 1000 });
+  }
+
+  private _execRaw(sql: string): Promise<string> {
+    const parsed = new URL(this.url);
+    const qs = new URLSearchParams({
+      database: this.database,
+      default_format: "JSONEachRow",
+    });
+    const transport = parsed.protocol === "https:" ? https : http;
+    const headers = buildAuthHeaders(this.user, this.password);
+
+    return new Promise<string>((resolve, reject) => {
+      const req = transport.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: `/?${qs.toString()}`,
+          method: "POST",
+          headers: { ...headers, "Content-Length": Buffer.byteLength(sql) },
+          timeout: this.timeoutMs,
+        },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+          res.on("end", () => {
+            if (res.statusCode !== undefined && res.statusCode >= 400) {
+              reject(new Error(`ClickHouse ${res.statusCode}: ${body.slice(0, 256)}`));
+            } else {
+              resolve(body);
+            }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error(`ClickHouse exec timed out after ${this.timeoutMs}ms`));
+      });
+      req.write(sql);
+      req.end();
+    });
+  }
+
+  /**
    * Execute a query and parse each newline-delimited JSON row.
    */
   async queryRows<T = Record<string, unknown>>(sql: string): Promise<T[]> {
@@ -248,11 +388,86 @@ export class ClickHouseClient {
   }
 
   /**
+   * Internal helper: sends an INSERT statement via HTTP POST with the given
+   * body (JSONEachRow).  On >=400 status the promise is rejected with the
+   * response text.
+   */
+  private _postInsert(insertSql: string, body: string, errorPrefix: string): Promise<void> {
+    return withRetry(errorPrefix, () => this._postInsertRaw(insertSql, body, errorPrefix), { maxRetries: 3, baseDelayMs: 1000 });
+  }
+
+  private _postInsertRaw(insertSql: string, body: string, errorPrefix: string): Promise<void> {
+    const parsed = new URL(this.url);
+    const qs = new URLSearchParams({ query: insertSql, database: this.database });
+    const requestUrl = `${parsed.origin}/?${qs.toString()}`;
+    const transport = parsed.protocol === "https:" ? https : http;
+    const headers = buildAuthHeaders(this.user, this.password);
+
+    return new Promise<void>((resolve, reject) => {
+      const reqOptions = new URL(requestUrl);
+      const req = transport.request(
+        {
+          hostname: reqOptions.hostname,
+          port:     reqOptions.port,
+          path:     `${reqOptions.pathname}${reqOptions.search}`,
+          method:   "POST",
+          headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
+          timeout:  this.timeoutMs,
+        },
+        (res) => {
+          let respBody = "";
+          res.on("data", (c: Buffer) => { respBody += c.toString(); });
+          res.on("end", () => {
+            if (res.statusCode !== undefined && res.statusCode >= 400) {
+              reject(new Error(`${errorPrefix} ${res.statusCode}: ${respBody.slice(0, 256)}`));
+            } else {
+              resolve();
+            }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse insert timed out")); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  /**
+   * Single-node safety: ClickHouse VIEWS do not support INSERT.  In cluster
+   * mode `*_distributed` is a Distributed engine table (insertable); in
+   * single-node mode it is a VIEW.  When we hit the VIEW error we silently
+   * retry against the base table.
+   */
+  private async _insertWithFallback(
+    insertSql: string,
+    body: string,
+    errorPrefix: string,
+    distributedTable: string,
+    baseTable: string,
+  ): Promise<void> {
+    try {
+      await this._postInsert(insertSql, body, errorPrefix);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Single-node CH: *_distributed is either a VIEW (INSERT → NOT_IMPLEMENTED)
+      // or the VIEW/table doesn't exist at all (UNKNOWN_TABLE / "does not exist").
+      const isViewError = msg.includes("storage View") || msg.includes("NOT_IMPLEMENTED");
+      const isMissingTable = msg.includes("UNKNOWN_TABLE") || msg.includes("does not exist") || msg.includes("Code: 60");
+      if (isViewError || isMissingTable) {
+        const fallbackSql = insertSql.replace(distributedTable, baseTable);
+        await this._postInsert(fallbackSql, body, errorPrefix);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  /**
    * Insert a single event via HTTP POST (JSONEachRow).
    * Credentials sent via headers; no URL exposure.
    */
   async ingestEvent(event: IngestEventPayload): Promise<void> {
-    const parsed = new URL(this.url);
     const insertSql =
       `INSERT INTO ${this.database}.security_events_distributed ` +
       `(event_id, tenant_id, source_type, log_source, severity, event_type, host, ` +
@@ -260,14 +475,6 @@ export class ClickHouseClient {
       `kill_chain_phase, confidence_score, data_region, raw_event, ` +
       `normalized_event, iocs, ingested_at, ` +
       `threat, action, recipient, description) FORMAT JSONEachRow`;
-
-    const qs = new URLSearchParams({
-      query: insertSql,
-      database: this.database,
-    });
-    const requestUrl = `${parsed.origin}/?${qs.toString()}`;
-    const transport = parsed.protocol === "https:" ? https : http;
-    const headers = { ...buildAuthHeaders(this.user, this.password) };
 
     const row = {
       event_id:         event.event_id ?? crypto.randomUUID(),
@@ -290,7 +497,7 @@ export class ClickHouseClient {
       raw_event:        event.raw_event ?? "",
       normalized_event: event.normalized_event ?? "",
       iocs:             event.iocs ?? "[]",
-      ingested_at:      event.ingested_at ?? new Date().toISOString(),
+      ingested_at:      event.ingested_at ?? formatChDateTime64(new Date()),
       threat:           event.threat ?? "",
       action:           event.action ?? "",
       recipient:        event.recipient ?? "",
@@ -298,34 +505,11 @@ export class ClickHouseClient {
     };
     const body = JSON.stringify(row);
 
-    return new Promise<void>((resolve, reject) => {
-      const reqOptions = new URL(requestUrl);
-      const req = transport.request(
-        {
-          hostname: reqOptions.hostname,
-          port:     reqOptions.port,
-          path:     `${reqOptions.pathname}${reqOptions.search}`,
-          method:   "POST",
-          headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
-          timeout:  this.timeoutMs,
-        },
-        (res) => {
-          let respBody = "";
-          res.on("data", (c: Buffer) => { respBody += c.toString(); });
-          res.on("end", () => {
-            if (res.statusCode !== undefined && res.statusCode >= 400) {
-              reject(new Error(`ClickHouse INSERT ${res.statusCode}: ${respBody.slice(0, 256)}`));
-            } else {
-              resolve();
-            }
-          });
-        },
-      );
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse insert timed out")); });
-      req.write(body);
-      req.end();
-    });
+    await this._insertWithFallback(
+      insertSql, body, "ClickHouse INSERT",
+      `${this.database}.security_events_distributed`,
+      `${this.database}.security_events`,
+    );
   }
 
   /**
@@ -619,7 +803,6 @@ export class ClickHouseClient {
    */
   async insertEvents(events: IngestEventPayload[]): Promise<void> {
     if (events.length === 0) return;
-    const parsed = new URL(this.url);
     const insertSql =
       `INSERT INTO ${this.database}.security_events_distributed ` +
       `(event_id, tenant_id, source_type, log_source, severity, event_type, host, ` +
@@ -627,11 +810,6 @@ export class ClickHouseClient {
       `kill_chain_phase, confidence_score, data_region, raw_event, ` +
       `normalized_event, iocs, ingested_at, ` +
       `threat, action, recipient, description) FORMAT JSONEachRow`;
-
-    const qs = new URLSearchParams({ query: insertSql, database: this.database });
-    const requestUrl = `${parsed.origin}/?${qs.toString()}`;
-    const transport = parsed.protocol === "https:" ? https : http;
-    const headers = buildAuthHeaders(this.user, this.password);
 
     const body = events
       .map((event) =>
@@ -656,7 +834,7 @@ export class ClickHouseClient {
           raw_event:        event.raw_event ?? "",
           normalized_event: event.normalized_event ?? "",
           iocs:             event.iocs ?? "[]",
-          ingested_at:      event.ingested_at ?? new Date().toISOString(),
+          ingested_at:      event.ingested_at ?? formatChDateTime64(new Date()),
           threat:           event.threat ?? "",
           action:           event.action ?? "",
           recipient:        event.recipient ?? "",
@@ -665,34 +843,11 @@ export class ClickHouseClient {
       )
       .join("\n");
 
-    return new Promise<void>((resolve, reject) => {
-      const reqOptions = new URL(requestUrl);
-      const req = transport.request(
-        {
-          hostname: reqOptions.hostname,
-          port:     reqOptions.port,
-          path:     `${reqOptions.pathname}${reqOptions.search}`,
-          method:   "POST",
-          headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
-          timeout:  this.timeoutMs,
-        },
-        (res) => {
-          let respBody = "";
-          res.on("data", (c: Buffer) => { respBody += c.toString(); });
-          res.on("end", () => {
-            if (res.statusCode !== undefined && res.statusCode >= 400) {
-              reject(new Error(`ClickHouse batch INSERT ${res.statusCode}: ${respBody.slice(0, 256)}`));
-            } else {
-              resolve();
-            }
-          });
-        },
-      );
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse batch insert timed out")); });
-      req.write(body);
-      req.end();
-    });
+    await this._insertWithFallback(
+      insertSql, body, "ClickHouse batch INSERT",
+      `${this.database}.security_events_distributed`,
+      `${this.database}.security_events`,
+    );
   }
 
   /**
@@ -705,18 +860,12 @@ export class ClickHouseClient {
    */
   async insertIncidents(rows: IngestIncidentPayload[]): Promise<void> {
     if (rows.length === 0) return;
-    const parsed = new URL(this.url);
     const insertSql =
       `INSERT INTO ${this.database}.incidents_distributed ` +
       `(id, tenant_id, severity, status, source, detection_source, ` +
       `mitre_tactic, mitre_technique_id, mitre_technique, kill_chain_phase, ` +
       `confidence_score, classification, is_true_positive, ` +
       `created_at, updated_at) FORMAT JSONEachRow`;
-
-    const qs = new URLSearchParams({ query: insertSql, database: this.database });
-    const requestUrl = `${parsed.origin}/?${qs.toString()}`;
-    const transport = parsed.protocol === "https:" ? https : http;
-    const headers = buildAuthHeaders(this.user, this.password);
 
     const body = rows
       .map((r) =>
@@ -740,34 +889,11 @@ export class ClickHouseClient {
       )
       .join("\n");
 
-    return new Promise<void>((resolve, reject) => {
-      const reqOptions = new URL(requestUrl);
-      const req = transport.request(
-        {
-          hostname: reqOptions.hostname,
-          port:     reqOptions.port,
-          path:     `${reqOptions.pathname}${reqOptions.search}`,
-          method:   "POST",
-          headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
-          timeout:  this.timeoutMs,
-        },
-        (res) => {
-          let respBody = "";
-          res.on("data", (c: Buffer) => { respBody += c.toString(); });
-          res.on("end", () => {
-            if (res.statusCode !== undefined && res.statusCode >= 400) {
-              reject(new Error(`ClickHouse incidents INSERT ${res.statusCode}: ${respBody.slice(0, 256)}`));
-            } else {
-              resolve();
-            }
-          });
-        },
-      );
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("ClickHouse incidents insert timed out")); });
-      req.write(body);
-      req.end();
-    });
+    await this._insertWithFallback(
+      insertSql, body, "ClickHouse incidents INSERT",
+      `${this.database}.incidents_distributed`,
+      `${this.database}.incidents`,
+    );
   }
 
   /**
@@ -886,34 +1012,34 @@ export async function initClickHouseSchema(): Promise<void> {
       -- log_source stores raw log-source identifiers: millions of unique values are
       -- supported because this field uses String, NOT LowCardinality (which has a
       -- hard 65 536-value cardinality limit and would panic on large deployments).
-      log_source       String CODEC(ZSTD(3))   DEFAULT '',
-      host             String CODEC(ZSTD(3))   DEFAULT '',
-      src_ip           IPv4          DEFAULT '0.0.0.0',
-      dst_ip           IPv4          DEFAULT '0.0.0.0',
+      log_source       String DEFAULT '' CODEC(ZSTD(3)),
+      host             String DEFAULT '' CODEC(ZSTD(3)),
+      src_ip           IPv4 DEFAULT '0.0.0.0',
+      dst_ip           IPv4 DEFAULT '0.0.0.0',
       -- Raw target text (hostname/FQDN/IPv4-literal). Required by the
       -- threat-globe fast-path so multi-office tenants can match offices via
       -- hostname keywords + CIDR identically to the PG path. dst_ip alone is
       -- not enough because it only carries valid IPv4 values.
-      target           String CODEC(ZSTD(3))   DEFAULT '',
-      user_name        String CODEC(ZSTD(3))   DEFAULT '',
-      process_name     String CODEC(ZSTD(3))   DEFAULT '',
+      target           String DEFAULT '' CODEC(ZSTD(3)),
+      user_name        String DEFAULT '' CODEC(ZSTD(3)),
+      process_name     String DEFAULT '' CODEC(ZSTD(3)),
       mitre_tactic     LowCardinality(String) DEFAULT '',
       mitre_technique  LowCardinality(String) DEFAULT '',
       kill_chain_phase LowCardinality(String) DEFAULT '',
-      confidence_score Float32       DEFAULT 0,
+      confidence_score Float32 DEFAULT 0,
       data_region      LowCardinality(String) DEFAULT '',
-      raw_event        String CODEC(ZSTD(6))   DEFAULT '',
-      normalized_event String CODEC(ZSTD(3))   DEFAULT '',
-      iocs             String CODEC(ZSTD(3))   DEFAULT '[]',
+      raw_event        String DEFAULT '' CODEC(ZSTD(6)),
+      normalized_event String DEFAULT '' CODEC(ZSTD(3)),
+      iocs             String DEFAULT '[]' CODEC(ZSTD(3)),
       ingested_at      DateTime64(3) DEFAULT now64(),
       -- Task #203: richer threat-flow Sankey context. Mirrors PG security_events
       -- so the CH fast-path can produce per-threat / per-action / per-recipient
       -- detail equivalent to the PG path. action is LowCardinality (small
       -- enumerated set); the rest are high-cardinality strings.
-      threat           String CODEC(ZSTD(3))   DEFAULT '',
-      action           LowCardinality(String)  DEFAULT '',
-      recipient        String CODEC(ZSTD(3))   DEFAULT '',
-      description      String CODEC(ZSTD(6))   DEFAULT '',
+      threat           String DEFAULT '' CODEC(ZSTD(3)),
+      action           LowCardinality(String) DEFAULT '',
+      recipient        String DEFAULT '' CODEC(ZSTD(3)),
+      description      String DEFAULT '' CODEC(ZSTD(6)),
       INDEX idx_severity     severity      TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_mitre_tactic mitre_tactic  TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_source_type  source_type   TYPE bloom_filter(0.01) GRANULARITY 4,
@@ -946,7 +1072,7 @@ export async function initClickHouseSchema(): Promise<void> {
       severity            LowCardinality(String) DEFAULT '',
       status              LowCardinality(String) DEFAULT '',
       source              LowCardinality(String) DEFAULT '',
-      detection_source    String CODEC(ZSTD(3))   DEFAULT '',
+      detection_source    String DEFAULT '' CODEC(ZSTD(3)),
       mitre_tactic        LowCardinality(String) DEFAULT '',
       mitre_technique_id  LowCardinality(String) DEFAULT '',
       mitre_technique     LowCardinality(String) DEFAULT '',
@@ -1000,26 +1126,26 @@ export async function initClickHouseSchema(): Promise<void> {
       source_type      LowCardinality(String),
       severity         LowCardinality(String),
       event_type       LowCardinality(String),
-      log_source       String CODEC(ZSTD(3))   DEFAULT '',
-      host             String CODEC(ZSTD(3))   DEFAULT '',
-      src_ip           IPv4          DEFAULT '0.0.0.0',
-      dst_ip           IPv4          DEFAULT '0.0.0.0',
-      target           String CODEC(ZSTD(3))   DEFAULT '',
-      user_name        String CODEC(ZSTD(3))   DEFAULT '',
-      process_name     String CODEC(ZSTD(3))   DEFAULT '',
+      log_source       String DEFAULT '' CODEC(ZSTD(3)),
+      host             String DEFAULT '' CODEC(ZSTD(3)),
+      src_ip           IPv4 DEFAULT '0.0.0.0',
+      dst_ip           IPv4 DEFAULT '0.0.0.0',
+      target           String DEFAULT '' CODEC(ZSTD(3)),
+      user_name        String DEFAULT '' CODEC(ZSTD(3)),
+      process_name     String DEFAULT '' CODEC(ZSTD(3)),
       mitre_tactic     LowCardinality(String) DEFAULT '',
       mitre_technique  LowCardinality(String) DEFAULT '',
       kill_chain_phase LowCardinality(String) DEFAULT '',
-      confidence_score Float32       DEFAULT 0,
+      confidence_score Float32 DEFAULT 0,
       data_region      LowCardinality(String) DEFAULT '',
-      raw_event        String CODEC(ZSTD(6))   DEFAULT '',
-      normalized_event String CODEC(ZSTD(3))   DEFAULT '',
-      iocs             String CODEC(ZSTD(3))   DEFAULT '[]',
+      raw_event        String DEFAULT '' CODEC(ZSTD(6)),
+      normalized_event String DEFAULT '' CODEC(ZSTD(3)),
+      iocs             String DEFAULT '[]' CODEC(ZSTD(3)),
       ingested_at      DateTime64(3) DEFAULT now64(),
-      threat           String CODEC(ZSTD(3))   DEFAULT '',
-      action           LowCardinality(String)  DEFAULT '',
-      recipient        String CODEC(ZSTD(3))   DEFAULT '',
-      description      String CODEC(ZSTD(6))   DEFAULT '',
+      threat           String DEFAULT '' CODEC(ZSTD(3)),
+      action           LowCardinality(String) DEFAULT '',
+      recipient        String DEFAULT '' CODEC(ZSTD(3)),
+      description      String DEFAULT '' CODEC(ZSTD(6)),
       INDEX idx_severity     severity      TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_mitre_tactic mitre_tactic  TYPE bloom_filter(0.01) GRANULARITY 4,
       INDEX idx_source_type  source_type   TYPE bloom_filter(0.01) GRANULARITY 4,
@@ -1046,7 +1172,7 @@ export async function initClickHouseSchema(): Promise<void> {
       severity            LowCardinality(String) DEFAULT '',
       status              LowCardinality(String) DEFAULT '',
       source              LowCardinality(String) DEFAULT '',
-      detection_source    String CODEC(ZSTD(3))   DEFAULT '',
+      detection_source    String DEFAULT '' CODEC(ZSTD(3)),
       mitre_tactic        LowCardinality(String) DEFAULT '',
       mitre_technique_id  LowCardinality(String) DEFAULT '',
       mitre_technique     LowCardinality(String) DEFAULT '',
@@ -1063,6 +1189,11 @@ export async function initClickHouseSchema(): Promise<void> {
     ORDER BY (tenant_id, id)
     SETTINGS index_granularity = 8192`,
     `CREATE VIEW IF NOT EXISTS ${database}.incidents_distributed AS SELECT * FROM ${database}.incidents`,
+    // Idempotency marker table — used by backfills and migrations in both modes.
+    `CREATE TABLE IF NOT EXISTS ${database}._migrations (
+       name       String,
+       applied_at DateTime64(3) DEFAULT now64()
+     ) ENGINE = MergeTree() ORDER BY name`,
   ];
 
   const isClusterError = (msg: string) =>
@@ -1074,7 +1205,7 @@ export async function initClickHouseSchema(): Promise<void> {
   let useSingleNode = false;
   for (const stmt of clusterDdl) {
     try {
-      await client.query(stmt.trim());
+      await client.exec(stmt.trim());
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("already exists") || msg.includes("POPULATE")) continue;
@@ -1083,11 +1214,12 @@ export async function initClickHouseSchema(): Promise<void> {
     }
   }
 
+  _clickHouseUsesCluster = !useSingleNode;
   if (useSingleNode) {
     console.log("[ClickHouse] Cluster not available — initializing single-node schema.");
     for (const stmt of singleNodeDdl) {
       try {
-        await client.query(stmt.trim());
+        await client.exec(stmt.trim());
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes("already exists") || msg.includes("POPULATE")) continue;
@@ -1115,8 +1247,8 @@ export async function initClickHouseSchema(): Promise<void> {
           "truncating mis-sharded incidents so the startup backfill can " +
           "rebuild them with the cityHash64(tenant_id, id) sharding key.",
         );
-        await client.query(`TRUNCATE TABLE IF EXISTS ${database}.incidents ON CLUSTER ccc_cluster`);
-        await client.query(
+        await client.exec(`TRUNCATE TABLE IF EXISTS ${database}.incidents ON CLUSTER ccc_cluster`);
+        await client.exec(
           `INSERT INTO ${database}._migrations (name) VALUES ('${MIGRATION}')`,
         );
       }
@@ -1138,20 +1270,20 @@ export async function initClickHouseSchema(): Promise<void> {
   //    PG security_events columns the threat-flow Sankey depends on so the
   //    CH fast-path matches the PG path's specificity.
   const alterColumnStmts: { col: string; type: string }[] = [
-    { col: "target",      type: "String CODEC(ZSTD(3)) DEFAULT ''" },
-    { col: "threat",      type: "String CODEC(ZSTD(3)) DEFAULT ''" },
+    { col: "target",      type: "String DEFAULT '' CODEC(ZSTD(3))" },
+    { col: "threat",      type: "String DEFAULT '' CODEC(ZSTD(3))" },
     { col: "action",      type: "LowCardinality(String) DEFAULT ''" },
-    { col: "recipient",   type: "String CODEC(ZSTD(3)) DEFAULT ''" },
-    { col: "description", type: "String CODEC(ZSTD(6)) DEFAULT ''" },
+    { col: "recipient",   type: "String DEFAULT '' CODEC(ZSTD(3))" },
+    { col: "description", type: "String DEFAULT '' CODEC(ZSTD(6))" },
   ];
 
   const runAlter = async (clusterStmt: string, singleStmt: string | null, label: string) => {
     try {
-      await client.query(useSingleNode && singleStmt ? singleStmt : clusterStmt);
+      await client.exec(useSingleNode && singleStmt ? singleStmt : clusterStmt);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!useSingleNode && isClusterError(msg) && singleStmt) {
-        try { await client.query(singleStmt); }
+        try { await client.exec(singleStmt); }
         catch (err2: unknown) {
           const msg2 = err2 instanceof Error ? err2.message : String(err2);
           console.warn(`[ClickHouse] ALTER ${label} (non-fatal): ${msg2.slice(0, 256)}`);
@@ -1183,13 +1315,28 @@ export async function initClickHouseSchema(): Promise<void> {
   // recreation is needed there.)
   if (useSingleNode) {
     try {
-      await client.query(`DROP VIEW IF EXISTS ${database}.security_events_distributed`);
-      await client.query(
+      await client.exec(`DROP VIEW IF EXISTS ${database}.security_events_distributed`);
+      await client.exec(
         `CREATE VIEW IF NOT EXISTS ${database}.security_events_distributed AS SELECT * FROM ${database}.security_events`,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[ClickHouse] distributed-view refresh warning (non-fatal): ${msg.slice(0, 256)}`);
+    }
+  }
+
+  // Safety: ensure incidents_distributed exists as a VIEW in single-node mode
+  // or that the base incidents table exists for fallback inserts. This catches
+  // cases where a partial cluster DDL run dropped the distributed table but
+  // failed before the single-node fallback could recreate it.
+  try {
+    await client.exec(
+      `CREATE VIEW IF NOT EXISTS ${database}.incidents_distributed AS SELECT * FROM ${database}.incidents`,
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("already exists")) {
+      console.warn(`[ClickHouse] incidents_distributed safety check (non-fatal): ${msg.slice(0, 256)}`);
     }
   }
 

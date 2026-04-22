@@ -1,8 +1,116 @@
 import { pool } from "./db";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
 import fs from "fs";
 import path from "path";
+
+/**
+ * Parse CREATE TABLE IF NOT EXISTS blocks from a SQL string.
+ * Returns a map of tableName -> array of {column, definition}.
+ */
+function parseCreateTableBlocks(sql: string): Map<string, { column: string; definition: string }[]> {
+  const tables = new Map<string, { column: string; definition: string }[]>();
+  // Match CREATE TABLE IF NOT EXISTS "tablename" ( ... )
+  const tableRegex = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"([^"]+)"\s*\(([\s\S]*?)\n\)\s*(?:;|$)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = tableRegex.exec(sql)) !== null) {
+    const tableName = m[1];
+    const body = m[2];
+    const columns: { column: string; definition: string }[] = [];
+    const lines = body.split('\n');
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      // Skip empty lines, comments, and constraints
+      if (!line || line.startsWith('--') || line.startsWith('/*')) continue;
+      // Skip PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK constraints at table level
+      if (/^(PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)\b/i.test(line)) continue;
+      // Match "column_name" type [constraints]
+      const colMatch = line.match(/^"([^"]+)"\s+(.+?)(?:,)?\s*$/);
+      if (colMatch) {
+        const colName = colMatch[1];
+        let colDef = colMatch[2].trim();
+        // Remove inline REFERENCES ... ON DELETE ... (keep type only)
+        colDef = colDef.replace(/\s+REFERENCES\s+\S+(?:\s*\([^)]*\))?\s*(?:ON\s+DELETE\s+\w+)?\s*(?:ON\s+UPDATE\s+\w+)?/i, '');
+        // Remove inline PRIMARY KEY for non-serial columns (serial pk is fine)
+        if (!/serial/i.test(colDef)) {
+          colDef = colDef.replace(/\s+PRIMARY\s+KEY/i, '');
+        }
+        // Clean up trailing commas
+        colDef = colDef.replace(/,$/, '').trim();
+        columns.push({ column: colName, definition: colDef });
+      }
+    }
+    if (columns.length > 0) {
+      tables.set(tableName, columns);
+    }
+  }
+  return tables;
+}
+
+/**
+ * Query information_schema to get existing columns for a table.
+ */
+async function getExistingColumns(client: any, tableName: string): Promise<Set<string>> {
+  const result = await client.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+    [tableName]
+  );
+  return new Set(result.rows.map((r: any) => r.column_name));
+}
+
+/**
+ * Auto-discover missing columns from the 0023 migration and add them idempotently.
+ */
+async function syncMissingColumns() {
+  const migrationFile = path.resolve("./migrations", "0023_add_missing_tables.sql");
+  if (!fs.existsSync(migrationFile)) {
+    console.log("[syncMissingColumns] 0023 migration file not found, skipping.");
+    return;
+  }
+  const sql = fs.readFileSync(migrationFile, "utf-8");
+  const expectedTables = parseCreateTableBlocks(sql);
+
+  const client = await pool.connect();
+  let added = 0;
+  let skipped = 0;
+  try {
+    for (const [tableName, expectedCols] of expectedTables) {
+      // Check if table exists
+      const tableExists = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+        [tableName]
+      );
+      if (tableExists.rows.length === 0) continue; // Table doesn't exist yet, CREATE TABLE will handle it
+
+      const existingCols = await getExistingColumns(client, tableName);
+      for (const { column, definition } of expectedCols) {
+        if (existingCols.has(column)) {
+          skipped++;
+          continue;
+        }
+        try {
+          await client.query(`ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "${column}" ${definition}`);
+          console.log(`[syncMissingColumns] Added "${column}" to "${tableName}"`);
+          added++;
+        } catch (err: any) {
+          console.warn(`[syncMissingColumns] Failed to add "${column}" to "${tableName}": ${err.message}`);
+        }
+      }
+    }
+    console.log(`[syncMissingColumns] Done: ${added} columns added, ${skipped} already present.`);
+
+    // ── Missing unique indexes (not caught by column sync) ────────────────────
+    // The 0023 migration defined event_hash as a plain column without a UNIQUE
+    // constraint. Multiple code paths (storage.ts, migrate-prod-data.ts) use
+    // ON CONFLICT (event_hash) which requires a matching unique index.
+    try {
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_security_events_event_hash ON security_events (event_hash) WHERE event_hash IS NOT NULL`);
+      console.log("[syncMissingColumns] Ensured partial unique index on security_events(event_hash)");
+    } catch (err: any) {
+      console.warn("[syncMissingColumns] Could not create event_hash unique index:", err.message);
+    }
+  } finally {
+    client.release();
+  }
+}
 
 export async function runMigrations() {
   console.log("Running database migrations...");
@@ -60,6 +168,27 @@ export async function runMigrations() {
     client.release();
   }
 
+  // ── Auto-sync missing columns from 0023 migration ────────────────────────────
+  try {
+    await syncMissingColumns();
+  } catch (err: any) {
+    console.error("[Migration] syncMissingColumns error (non-fatal):", err.message);
+  }
+
+  // ── Clear .migrated marker so runProdDataMigration re-imports security_events ─
+  // A previous run completed without the event_hash unique index, causing all
+  // security_events seed inserts to silently fail. Removing the marker forces
+  // the migration to run again — it is idempotent (ON CONFLICT / dedup hashes).
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query(`DELETE FROM migration_markers WHERE key = '.migrated'`);
+      console.log("[Migration] Cleared .migrated marker to allow data re-import.");
+    } finally { client.release(); }
+  } catch (err: any) {
+    console.error("[Migration] Could not clear .migrated marker (non-fatal):", err.message);
+  }
+
   // ── Idempotent column additions (run on every startup, safe to repeat) ──────
   {
     const client3 = await pool.connect();
@@ -86,8 +215,6 @@ export async function runMigrations() {
           updated_at TIMESTAMP NOT NULL DEFAULT NOW()
         );
       `);
-      // Column guards — idempotent for upgraded environments where table may
-      // already exist but was created by an older schema without certain columns.
       await client3.query(`
         ALTER TABLE platform_integrations ADD COLUMN IF NOT EXISTS display_name VARCHAR(100) NOT NULL DEFAULT '';
         ALTER TABLE platform_integrations ADD COLUMN IF NOT EXISTS category VARCHAR(50) NOT NULL DEFAULT 'threat_intel';
@@ -101,7 +228,7 @@ export async function runMigrations() {
         ALTER TABLE platform_integrations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
       `);
 
-      // Seed the 5 default threat-feed integrations (idempotent via ON CONFLICT)
+      // Seed the default threat-feed integrations
       await client3.query(`
         INSERT INTO platform_integrations
           (name, display_name, category, description, enabled, requires_key)
@@ -153,6 +280,37 @@ export async function runMigrations() {
            false, true)
         ON CONFLICT (name) DO NOTHING;
       `);
+
+      // ── Users table auth columns (#0024) ─────────────────────────────────────
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username varchar(100);`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash varchar(255);`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled boolean DEFAULT false;`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret varchar(255);`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS sso_provider varchar(50);`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS sso_external_id varchar(255);`);
+      await client3.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number varchar(30);`);
+      await client3.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'users_email_unique' AND table_name = 'users'
+          ) THEN
+            ALTER TABLE users ADD CONSTRAINT users_email_unique UNIQUE(email);
+          END IF;
+        END $$;
+      `).catch(() => {});
+      await client3.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'users_username_unique' AND table_name = 'users'
+          ) THEN
+            ALTER TABLE users ADD CONSTRAINT users_username_unique UNIQUE(username);
+          END IF;
+        END $$;
+      `).catch(() => {});
 
     } catch (err: any) {
       console.error("Platform integrations migration error (non-fatal):", err.message);
@@ -483,9 +641,6 @@ export async function runMigrations() {
   }
 
   // ── platform_integrations.extra_config column (Task #168) ────────────────────
-  // Required by TAXII client and OpenCTI connector to store URL, pollInterval,
-  // lastSyncedAt and other per-integration configuration that doesn't belong in
-  // api_key. Column is idempotent (IF NOT EXISTS).
   try {
     const clientPi = await pool.connect();
     try {
@@ -517,7 +672,6 @@ export async function runMigrations() {
       `);
       console.log("[Migration] assets performance indexes ensured (Task #169)");
       try {
-        // Canonical schema for migration_markers (key, completed_at, metadata)
         await clientIdx.query(`
           CREATE TABLE IF NOT EXISTS migration_markers (
             key VARCHAR(120) PRIMARY KEY,
@@ -525,7 +679,6 @@ export async function runMigrations() {
             metadata JSONB
           )
         `).catch(() => {});
-        // Heal any table created with the old wrong schema (missing columns)
         await clientIdx.query(`ALTER TABLE migration_markers ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NOT NULL DEFAULT NOW()`).catch(() => {});
         await clientIdx.query(`ALTER TABLE migration_markers ADD COLUMN IF NOT EXISTS metadata JSONB`).catch(() => {});
         const vacuumMarker = await clientIdx.query(
@@ -587,7 +740,6 @@ export async function runMigrations() {
         );
         CREATE INDEX IF NOT EXISTS investigation_exports_tenant_idx ON investigation_exports(tenant_id);
         CREATE INDEX IF NOT EXISTS investigation_exports_session_idx ON investigation_exports(session_id);
-        -- Add bundle_data column idempotently for immutable artifact storage
         ALTER TABLE investigation_exports ADD COLUMN IF NOT EXISTS bundle_data BYTEA;
       `);
       console.log("[Migration] Investigation console tables created/verified (Task #162)");
@@ -601,12 +753,6 @@ export async function runMigrations() {
   }
 
   // ── One-time backfill v2: re-derive action for legacy "EPS Code N" records ──
-  // Uses a CTE that exactly mirrors deriveDeviceControlAction() in cynet.ts:
-  //   - Priority 1: device context (deviceType OR deviceName) → specific label
-  //     with full Blocked/Allowed/Detected state + all device-type branches
-  //   - Priority 2: epsRemediationCode 0–40 map
-  // Also corrects any generic labels left by v1 (e.g. 'Device Blocked' that
-  // could be more specific when deviceName context is available).
   {
     const clientBf = await pool.connect();
     try {
@@ -623,9 +769,6 @@ export async function runMigrations() {
       ).catch(() => ({ rows: [] }));
 
       if (markerV2.rows.length === 0) {
-        // CTE computes the replacement action for each candidate event, mirroring
-        // the normaliser logic exactly (state = Blocked/Allowed/Detected,
-        // prefix = device-type classification from deviceType then deviceName).
         const updated = await clientBf.query(`
           WITH meta AS (
             SELECT
@@ -652,7 +795,6 @@ export async function runMigrations() {
             SELECT
               id,
               action,
-              -- State: Blocked > Allowed > Detected
               CASE
                 WHEN lower(coalesce(m->>'deviceStatus','')) LIKE '%block%'
                   OR lower(coalesce(m->>'epsPrevention','')) LIKE '%block%'
@@ -662,7 +804,6 @@ export async function runMigrations() {
                   THEN 'Allowed'
                 ELSE 'Detected'
               END AS state,
-              -- Device prefix from deviceType then deviceName keywords
               CASE
                 WHEN lower(coalesce(m->>'deviceType','')) = 'mtp'
                   OR lower(coalesce(m->>'deviceName','')) LIKE '%mtp%'
@@ -690,7 +831,6 @@ export async function runMigrations() {
                   THEN m->>'deviceName'
                 ELSE NULL
               END AS device_prefix,
-              -- Fallback: EPS remediation code lookup
               CASE m->>'epsRemediationCode'
                 WHEN '0'  THEN 'No Action'        WHEN '1'  THEN 'Detected Only'
                 WHEN '2'  THEN 'Process Killed'    WHEN '3'  THEN 'File Quarantined'
@@ -725,14 +865,11 @@ export async function runMigrations() {
               id,
               action,
               CASE
-                -- Priority 1: device context with state
                 WHEN is_device_control = true
                   AND (device_type IS NOT NULL OR device_name IS NOT NULL)
                   AND device_prefix IS NOT NULL
                   THEN device_prefix || ' ' || state
-                -- Priority 2: EPS code map
                 WHEN eps_label IS NOT NULL THEN eps_label
-                -- No context: keep existing
                 ELSE action
               END AS new_action
             FROM classified
@@ -776,7 +913,6 @@ export async function runMigrations() {
         );
         CREATE INDEX IF NOT EXISTS clickhouse_ingest_outages_started_idx
           ON clickhouse_ingest_outages(started_at DESC);
-        -- Task #187 — extend with reason / per-tenant fields for fast-path outages.
         ALTER TABLE clickhouse_ingest_outages
           ADD COLUMN IF NOT EXISTS reason VARCHAR(32) NOT NULL DEFAULT 'stalled_ingest';
         ALTER TABLE clickhouse_ingest_outages
@@ -790,10 +926,6 @@ export async function runMigrations() {
       `);
       console.log("[Migration] clickhouse_ingest_outages table ensured (Task #183 + #187)");
 
-      // Cluster-wide bucket aggregation table for fast-path counters (Task #187).
-      // Each worker upserts its own row per (tenant, minute_bucket) so the
-      // monitor and stats endpoint can SUM across all workers regardless of
-      // which one served the originating request.
       await clientCho.query(`
         CREATE TABLE IF NOT EXISTS clickhouse_fast_path_buckets (
           tenant_id INT NOT NULL,
@@ -820,36 +952,85 @@ export async function runMigrations() {
     console.error("[Migration] clickhouse_ingest_outages pool error:", e.message);
   }
 
+  // ── Custom resilient migration runner ───────────────────────────────────────
   try {
-    const migrationDb = drizzle(pool);
-    await migrate(migrationDb, { migrationsFolder: "./migrations" });
-    console.log("Database migrations completed successfully.");
-  } catch (error: any) {
-    if (error.message?.includes("already exists") || error.message?.includes("duplicate")) {
-      console.log("Database schema is up to date.");
-      const journalPath = path.resolve("./migrations/meta/_journal.json");
-      const journal = JSON.parse(fs.readFileSync(journalPath, "utf-8"));
-      const client2 = await pool.connect();
-      try {
-        for (const entry of journal.entries) {
-          const applied = await client2.query(
-            `SELECT id FROM "__drizzle_migrations" WHERE hash = $1`,
-            [entry.tag]
+    const journalPath = path.resolve("./migrations/meta/_journal.json");
+    const journal = JSON.parse(fs.readFileSync(journalPath, "utf-8"));
+    const client2 = await pool.connect();
+    try {
+      await client2.query(`
+        CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
+          id SERIAL PRIMARY KEY,
+          hash text NOT NULL,
+          created_at bigint
+        );
+      `);
+
+      for (const entry of journal.entries) {
+        const applied = await client2.query(
+          `SELECT id FROM "__drizzle_migrations" WHERE hash = $1`,
+          [entry.tag]
+        );
+        if (applied.rows.length > 0) {
+          continue;
+        }
+
+        const migrationFile = path.resolve("./migrations", `${entry.tag}.sql`);
+        if (!fs.existsSync(migrationFile)) {
+          console.warn(`Migration file not found: ${migrationFile}, skipping.`);
+          await client2.query(
+            `INSERT INTO "__drizzle_migrations" (hash, created_at) VALUES ($1, $2)`,
+            [entry.tag, Date.now()]
           );
-          if (applied.rows.length === 0) {
-            await client2.query(
-              `INSERT INTO "__drizzle_migrations" (hash, created_at) VALUES ($1, $2)`,
-              [entry.tag, Date.now()]
-            );
-            console.log(`Marked migration "${entry.tag}" as applied.`);
+          continue;
+        }
+
+        const sql = fs.readFileSync(migrationFile, "utf-8");
+        const statements = sql
+          .split("--> statement-breakpoint")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        let successCount = 0;
+        let skipCount = 0;
+        for (const stmt of statements) {
+          try {
+            await client2.query(stmt);
+            successCount++;
+          } catch (stmtErr: any) {
+            const msg = stmtErr.message || "";
+            const benign =
+              msg.includes("already exists") ||
+              msg.includes("duplicate") ||
+              msg.includes("does not exist") ||
+              msg.includes("undefined_table") ||
+              msg.includes("cannot drop") ||
+              msg.includes("no such table");
+
+            if (benign) {
+              skipCount++;
+            } else {
+              console.warn(`Migration ${entry.tag} statement failed: ${msg}`);
+              throw stmtErr;
+            }
           }
         }
-      } finally {
-        client2.release();
+
+        await client2.query(
+          `INSERT INTO "__drizzle_migrations" (hash, created_at) VALUES ($1, $2)`,
+          [entry.tag, Date.now()]
+        );
+        console.log(
+          `Migration "${entry.tag}" applied (${successCount} OK, ${skipCount} skipped).`
+        );
       }
-    } else {
-      console.error("Migration failed:", error.message);
-      throw error;
+
+      console.log("Database migrations completed successfully.");
+    } finally {
+      client2.release();
     }
+  } catch (error: any) {
+    console.error("Migration failed:", error.message);
+    throw error;
   }
 }

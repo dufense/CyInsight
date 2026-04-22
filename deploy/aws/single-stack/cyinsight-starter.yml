@@ -359,7 +359,7 @@ Resources:
       DBInstanceIdentifier: !Sub "cyinsight-db-${EnvironmentName}"
       DBInstanceClass: db.t3.medium
       Engine: postgres
-      EngineVersion: "16.3"
+      EngineVersion: "16.6"
       AllocatedStorage: 100
       MaxAllocatedStorage: 500
       StorageType: gp3
@@ -418,7 +418,7 @@ Resources:
       Encrypted: true
       PerformanceMode: generalPurpose
       ThroughputMode: bursting
-      Tags:
+      FileSystemTags:
         - Key: Name
           Value: !Sub "cyinsight-clickhouse-${EnvironmentName}"
 
@@ -444,15 +444,19 @@ Resources:
       GroupName: !Sub "cyinsight-clickhouse-efs-sg-${EnvironmentName}"
       GroupDescription: EFS for ClickHouse data
       VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 2049
-          ToPort: 2049
-          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
-          Description: From ClickHouse tasks
       Tags:
         - Key: Name
           Value: !Sub "cyinsight-clickhouse-efs-sg-${EnvironmentName}"
+
+  EFSIngressFromClickHouse:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EFSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+      Description: From ClickHouse tasks
 
   ClickHouseEFSAccessPoint:
     Type: AWS::EFS::AccessPoint
@@ -474,20 +478,29 @@ Resources:
       GroupName: !Sub "cyinsight-clickhouse-sg-${EnvironmentName}"
       GroupDescription: ClickHouse service - allow HTTP from ALB and native from self
       VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 8123
-          ToPort: 8123
-          SourceSecurityGroupId: !Ref ClickHouseALBSecurityGroup
-          Description: HTTP API from ALB
-        - IpProtocol: tcp
-          FromPort: 9000
-          ToPort: 9000
-          SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
-          Description: Native protocol internal
       Tags:
         - Key: Name
           Value: !Sub "cyinsight-clickhouse-sg-${EnvironmentName}"
+
+  ClickHouseIngressFromALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8123
+      ToPort: 8123
+      SourceSecurityGroupId: !Ref ClickHouseALBSecurityGroup
+      Description: HTTP API from ALB
+
+  ClickHouseIngressSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClickHouseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      SourceSecurityGroupId: !Ref ClickHouseSecurityGroup
+      Description: Native protocol internal
 
   ClickHouseALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -536,7 +549,8 @@ Resources:
       UnhealthyThresholdCount: 3
       HealthCheckTimeoutSeconds: 5
       HealthCheckIntervalSeconds: 30
-      SuccessCode: "200"
+      Matcher:
+        HttpCode: "200"
 
   ClickHouseListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -864,12 +878,16 @@ Resources:
               Value: combined
             - Name: AWS_REGION
               Value: !Ref AWS::Region
+            - Name: REDIS_URL
+              Value: !Join [":", [!GetAtt RedisCluster.RedisEndpoint.Address, "6379"]]
+            - Name: DB_SSL
+              Value: "true"
             - Name: DB_SSL_CA
+              Value: /etc/ssl/certs/rds-ca-bundle.pem
+            - Name: NODE_EXTRA_CA_CERTS
               Value: /etc/ssl/certs/rds-ca-bundle.pem
             - Name: PGSSLMODE
               Value: require
-            - Name: NODE_EXTRA_CA_CERTS
-              Value: /etc/ssl/certs/rds-ca-bundle.pem
           Secrets:
             - Name: DATABASE_URL
               ValueFrom: !Sub "${AppSecrets}:DATABASE_URL::"
@@ -883,14 +901,12 @@ Resources:
               ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_PASSWORD::"
             - Name: CLICKHOUSE_DATABASE
               ValueFrom: !Sub "${AppSecrets}:CLICKHOUSE_DATABASE::"
-            - Name: REDIS_URL
-              Value: !Join [":", [!GetAtt RedisCluster.RedisEndpoint.Address, "6379"]]
             - Name: S3_BUCKET
               ValueFrom: !Sub "${AppSecrets}:S3_BUCKET::"
           HealthCheck:
             Command:
               - CMD-SHELL
-              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/_health || exit 1"
             Interval: 30
             Timeout: 5
             Retries: 3
@@ -933,7 +949,7 @@ Resources:
       Protocol: HTTP
       TargetType: ip
       VpcId: !Ref VPC
-      HealthCheckPath: /healthz
+      HealthCheckPath: /_health
       HealthCheckPort: "5000"
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
