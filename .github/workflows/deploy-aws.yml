@@ -93,13 +93,7 @@ on:
         default: false
 
 env:
-  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-  AWS_REGION:     ${{ secrets.AWS_REGION }}
-  VPC_ID:         ${{ secrets.VPC_ID }}
-  PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
-  PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
-  CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
-  SECRETS_PREFIX:  ${{ vars.SECRETS_PREFIX || 'ccc' }}
+  SECRETS_PREFIX: ${{ vars.SECRETS_PREFIX || 'ccc' }}
 
 jobs:
   # ── Job 1: Build and push Docker images to ECR ─────────────────────────────
@@ -111,6 +105,14 @@ jobs:
     outputs:
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
       environment: ${{ steps.set-env.outputs.environment }}
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Checkout repository
@@ -227,6 +229,14 @@ jobs:
     timeout-minutes: 10
     needs: build-and-push
 
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -275,6 +285,14 @@ jobs:
     permissions:
       contents: read
       security-events: write
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Checkout repository
@@ -370,6 +388,14 @@ jobs:
     needs: [build-and-push, validate-secrets, security-scan]
     environment: ${{ needs.build-and-push.outputs.environment }}
 
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -422,6 +448,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [build-and-push, deploy-management]
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Checkout repository
@@ -478,6 +512,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [build-and-push, run-migrations]
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Checkout repository
@@ -551,6 +593,14 @@ jobs:
       (github.event.inputs.deploy_data_planes == 'true' ||
        vars.DEPLOY_DATA_PLANES == 'true')
 
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -605,6 +655,14 @@ jobs:
       github.event.inputs.deploy_receiver == 'true' ||
       vars.DEPLOY_RECEIVER == 'true'
 
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -653,6 +711,14 @@ jobs:
     if: |
       github.event.inputs.deploy_clickhouse == 'true' ||
       vars.DEPLOY_CLICKHOUSE == 'true'
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Checkout repository
@@ -752,6 +818,14 @@ jobs:
     timeout-minutes: 5
     needs: [build-and-push, security-scan, smoke-test]
     if: always()
+
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_REGION:     ${{ secrets.AWS_REGION }}
+      VPC_ID:         ${{ secrets.VPC_ID }}
+      PUBLIC_SUBNETS: ${{ secrets.PUBLIC_SUBNETS }}
+      PRIVATE_SUBNETS: ${{ secrets.PRIVATE_SUBNETS }}
+      CERTIFICATE_ARN: ${{ secrets.CERTIFICATE_ARN }}
 
     steps:
       - name: Print summary
