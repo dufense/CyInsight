@@ -194,26 +194,49 @@ Parameters:
 
   TaskCpu:
     Type: Number
-    Default: 2048
-    AllowedValues: [1024, 2048, 4096]
+    Default: 4096
+    AllowedValues: [1024, 2048, 4096, 8192, 16384]
+    Description: >-
+      Fargate task CPU units (1 vCPU = 1024). Default raised to 4096 — data
+      plane runs the heavy ingest pipeline + ClickHouse fast-path inserter.
 
   TaskMemory:
     Type: Number
-    Default: 4096
-    AllowedValues: [2048, 4096, 8192]
+    Default: 8192
+    AllowedValues: [2048, 4096, 8192, 16384, 30720]
+    Description: >-
+      Fargate task memory (MiB). Default raised to 8192 — Sigma rule engine,
+      enrichment cache, and Kafka batch buffers compete for heap.
 
   DesiredCount:
     Type: Number
-    Default: 2
+    Default: 3
 
   MinCount:
     Type: Number
-    Default: 2
+    Default: 3
 
   MaxCount:
     Type: Number
-    Default: 30
+    Default: 60
     Description: Max task count - data plane scales aggressively for ingest spikes
+
+  # ── DB pool tuning ────────────────────────────────────────────────────────────
+  DbPoolMax:
+    Type: Number
+    Default: 30
+    MinValue: 5
+    MaxValue: 200
+
+  DbStatementTimeoutMs:
+    Type: Number
+    Default: 30000
+    MinValue: 1000
+
+  DbConnectionTimeoutMs:
+    Type: Number
+    Default: 8000
+    MinValue: 1000
 
   LogRetentionDays:
     Type: Number
@@ -584,6 +607,15 @@ Resources:
               Value: verify-ca
             - Name: NODE_EXTRA_CA_CERTS
               Value: /etc/ssl/certs/rds-ca-bundle.pem
+            # ── DB pool tuning (per-task connection budget) ───────────────────
+            - Name: DB_POOL_MAX
+              Value: !Sub "${DbPoolMax}"
+            - Name: DB_STATEMENT_TIMEOUT_MS
+              Value: !Sub "${DbStatementTimeoutMs}"
+            - Name: DB_QUERY_TIMEOUT_MS
+              Value: !Sub "${DbStatementTimeoutMs}"
+            - Name: DB_CONNECTION_TIMEOUT_MS
+              Value: !Sub "${DbConnectionTimeoutMs}"
             - Name: S3_RAW_BUCKET
               Value:
                 Fn::ImportValue: !Sub "${DataLakeStackName}-RawEventsBucketName"

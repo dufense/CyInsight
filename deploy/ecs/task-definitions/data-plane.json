@@ -2,8 +2,8 @@
   "family": "ccc-data-plane",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
-  "cpu": "2048",
-  "memory": "4096",
+  "cpu": "4096",
+  "memory": "8192",
   "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-ecs-execution-role",
   "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ccc-data-plane-task-role",
   "containerDefinitions": [
@@ -28,7 +28,19 @@
         { "name": "APP_REPORTS_DIR",     "value": "/app/data/reports" },
         { "name": "APP_UPLOADS_DIR",     "value": "/app/data/uploads" },
         { "name": "PARQUET_DATA_DIR",    "value": "/app/data/events" },
-        { "name": "DB_POOL_MAX",         "value": "5" }
+        { "name": "DB_POOL_MAX",         "value": "30" },
+        { "name": "DB_STATEMENT_TIMEOUT_MS", "value": "30000" },
+        { "name": "DB_QUERY_TIMEOUT_MS", "value": "30000" },
+        { "name": "DB_CONNECTION_TIMEOUT_MS", "value": "8000" },
+        { "name": "DB_SSL",              "value": "true" },
+        { "name": "PGSSLMODE",           "value": "verify-ca" },
+        { "name": "DB_SSL_CA",           "value": "/etc/ssl/certs/rds-ca-bundle.pem" },
+        { "name": "NODE_EXTRA_CA_CERTS", "value": "/etc/ssl/certs/rds-ca-bundle.pem" },
+        { "name": "HOT_RETENTION_DAYS",  "value": "90" },
+        { "name": "KAFKA_PUBLISH_TIMEOUT_MS", "value": "10000" },
+        { "name": "CLICKHOUSE_DATABASE", "value": "ccc" },
+        { "name": "CLICKHOUSE_USER",     "value": "ccc_admin" },
+        { "name": "CLICKHOUSE_INGEST_MONITOR_INTERVAL_SECONDS", "value": "30" }
       ],
       "secrets": [
         {

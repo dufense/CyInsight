@@ -232,25 +232,56 @@ Parameters:
 
   TaskCpu:
     Type: Number
-    Default: 1024
-    AllowedValues: [512, 1024, 2048, 4096]
+    Default: 2048
+    AllowedValues: [512, 1024, 2048, 4096, 8192, 16384]
+    Description: >-
+      Fargate task CPU units (1 vCPU = 1024). Default raised to 2048 to support
+      detection-pipeline + analytics-dashboard concurrency without throttling.
 
   TaskMemory:
     Type: Number
-    Default: 2048
-    AllowedValues: [1024, 2048, 4096, 8192]
+    Default: 4096
+    AllowedValues: [1024, 2048, 4096, 8192, 16384, 30720]
+    Description: >-
+      Fargate task memory (MiB). Default raised to 4096 so the LLM/Sigma engines
+      and heap-cache layers don't OOM under burst load.
 
   DesiredCount:
     Type: Number
-    Default: 2
+    Default: 3
 
   MinCount:
     Type: Number
-    Default: 2
+    Default: 3
 
   MaxCount:
     Type: Number
-    Default: 20
+    Default: 30
+
+  # ── DB pool tuning (Aurora connection budget) ────────────────────────────────
+  DbPoolMax:
+    Type: Number
+    Default: 25
+    MinValue: 5
+    MaxValue: 200
+    Description: >-
+      Per-task PostgreSQL connection pool size. Multiply by DesiredCount to size
+      Aurora's max_connections budget (e.g. 25 × 3 = 75 conns + session store).
+
+  DbStatementTimeoutMs:
+    Type: Number
+    Default: 30000
+    MinValue: 1000
+    Description: Postgres-side per-statement timeout in milliseconds.
+
+  DbConnectionTimeoutMs:
+    Type: Number
+    Default: 8000
+    MinValue: 1000
+    Description: >-
+      Client-side connection acquisition timeout (ms). Bumped from 3s to 8s so
+      brief Aurora failovers don't cascade into "timeout exceeded when trying to
+      connect" errors that crash the dashboard route boundary.
 
   LogRetentionDays:
     Type: Number
@@ -693,6 +724,18 @@ Resources:
               Value: verify-ca
             - Name: NODE_EXTRA_CA_CERTS
               Value: /etc/ssl/certs/rds-ca-bundle.pem
+            # ── DB pool tuning (Aurora connection budget) ─────────────────────
+            # Defaults are sized for DesiredCount=3 against an Aurora
+            # Serverless v2 cluster (8-32 ACU). Raise DbPoolMax + Aurora
+            # max_connections together if you scale DesiredCount above 5.
+            - Name: DB_POOL_MAX
+              Value: !Sub "${DbPoolMax}"
+            - Name: DB_STATEMENT_TIMEOUT_MS
+              Value: !Sub "${DbStatementTimeoutMs}"
+            - Name: DB_QUERY_TIMEOUT_MS
+              Value: !Sub "${DbStatementTimeoutMs}"
+            - Name: DB_CONNECTION_TIMEOUT_MS
+              Value: !Sub "${DbConnectionTimeoutMs}"
             # ── Data Plane federation ─────────────────────────────────────────
             # JSON map of data-plane internal ALB URLs per logical region.
             # Values are populated AFTER the data-plane stacks are deployed.
