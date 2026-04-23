@@ -60,18 +60,24 @@ function buildSslConfig(): pg.PoolConfig["ssl"] {
 //   db.m5.large:    ~823 connections max
 //
 // With ECS Fargate (multiple task replicas), divide the RDS limit by replica count.
-// Default 20 leaves room for multiple replicas and the session store.
-const POOL_MAX = parseInt(process.env.DB_POOL_MAX ?? "20", 10);
-const STATEMENT_TIMEOUT_MS = parseInt(process.env.DB_STATEMENT_TIMEOUT_MS ?? "15000", 10);
-const QUERY_TIMEOUT_MS = parseInt(process.env.DB_QUERY_TIMEOUT_MS ?? "15000", 10);
+// Default 30 (raised from 20) accommodates the detection pipeline + analytics
+// dashboards which can spike to ~25 concurrent queries per task. Tune via
+// DB_POOL_MAX env var per deployment based on Aurora capacity / replica count.
+const POOL_MAX = parseInt(process.env.DB_POOL_MAX ?? "30", 10);
+const STATEMENT_TIMEOUT_MS = parseInt(process.env.DB_STATEMENT_TIMEOUT_MS ?? "30000", 10);
+const QUERY_TIMEOUT_MS = parseInt(process.env.DB_QUERY_TIMEOUT_MS ?? "30000", 10);
+// connectionTimeoutMillis bumped 3000 → 8000 so brief Aurora failovers / spikes
+// don't immediately surface as "timeout exceeded when trying to connect" cascades.
+const CONNECTION_TIMEOUT_MS = parseInt(process.env.DB_CONNECTION_TIMEOUT_MS ?? "8000", 10);
+const IDLE_TIMEOUT_MS = parseInt(process.env.DB_IDLE_TIMEOUT_MS ?? "10000", 10);
 
 const sslConfig = buildSslConfig();
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: POOL_MAX,
-  idleTimeoutMillis: 10_000,
-  connectionTimeoutMillis: 3_000,
+  idleTimeoutMillis: IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
   // statement_timeout: Postgres-level per-statement timeout (milliseconds)
   // query_timeout: node-postgres client-side socket timeout
   statement_timeout: STATEMENT_TIMEOUT_MS,
