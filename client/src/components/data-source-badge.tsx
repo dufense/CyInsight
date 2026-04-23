@@ -5,7 +5,7 @@ import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-interface DataSourceBadgeProps {
+export interface DataSourceBadgeProps {
   source?: string | null;
   latencyMs?: number | null;
   className?: string;
@@ -22,11 +22,37 @@ const sampleStore = new Map<string, number[]>();
 const subscribers = new Map<string, Set<() => void>>();
 const keyOrder: string[] = [];
 let hydrated = false;
+let hydrateRequested = false;
 
 function safeStorage(): Storage | null {
   try {
     if (typeof window === "undefined") return null;
     return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function safeRemoveItem(storage: Storage, key: string) {
+  try {
+    storage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+function safeSetItem(storage: Storage, key: string, value: string) {
+  try {
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeGetItem(storage: Storage, key: string): string | null {
+  try {
+    return storage.getItem(key);
   } catch {
     return null;
   }
@@ -56,11 +82,7 @@ function evictOldest(storage: Storage) {
     const oldest = keyOrder.shift();
     if (!oldest) break;
     sampleStore.delete(oldest);
-    try {
-      storage.removeItem(STORAGE_PREFIX + oldest);
-    } catch {
-      /* ignore */
-    }
+    safeRemoveItem(storage, STORAGE_PREFIX + oldest);
   }
 }
 
@@ -77,7 +99,7 @@ function hydrate() {
   });
   for (const key of index) {
     try {
-      const raw = storage.getItem(STORAGE_PREFIX + key);
+      const raw = safeGetItem(storage, STORAGE_PREFIX + key);
       if (!raw) continue;
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
@@ -89,7 +111,7 @@ function hydrate() {
         sampleStore.set(key, nums);
         keyOrder.push(key);
       } else {
-        storage.removeItem(STORAGE_PREFIX + key);
+        safeRemoveItem(storage, STORAGE_PREFIX + key);
       }
     } catch {
       /* ignore */
@@ -99,25 +121,28 @@ function hydrate() {
   writeIndex(storage);
 }
 
-hydrate();
+function requestHydrate() {
+  if (hydrateRequested) return;
+  hydrateRequested = true;
+  // Defer to next tick so module-level evaluation never blocks render
+  if (typeof window !== "undefined") {
+    Promise.resolve().then(hydrate).catch(() => {
+      hydrated = false;
+      hydrateRequested = false;
+    });
+  }
+}
 
 function persistKey(key: string, samples: number[]) {
   const storage = safeStorage();
   if (!storage) return;
-  try {
-    storage.setItem(STORAGE_PREFIX + key, JSON.stringify(samples));
-  } catch {
-    // Likely quota — drop the oldest and try once more.
-    if (keyOrder.length > 0 && keyOrder[0] !== key) {
-      const oldest = keyOrder.shift()!;
-      sampleStore.delete(oldest);
-      try {
-        storage.removeItem(STORAGE_PREFIX + oldest);
-        storage.setItem(STORAGE_PREFIX + key, JSON.stringify(samples));
-      } catch {
-        /* give up */
-      }
-    }
+  if (safeSetItem(storage, STORAGE_PREFIX + key, JSON.stringify(samples))) return;
+  // Likely quota — drop the oldest and try once more.
+  if (keyOrder.length > 0 && keyOrder[0] !== key) {
+    const oldest = keyOrder.shift()!;
+    sampleStore.delete(oldest);
+    safeRemoveItem(storage, STORAGE_PREFIX + oldest);
+    safeSetItem(storage, STORAGE_PREFIX + key, JSON.stringify(samples));
   }
 }
 
@@ -143,9 +168,22 @@ function pushSample(key: string, value: number) {
 
 function useSamples(key: string | undefined): number[] {
   const [, force] = useState(0);
+  const hydratedRef = useRef(false);
+
+  if (!hydratedRef.current) {
+    hydratedRef.current = true;
+    requestHydrate();
+  }
+
   useEffect(() => {
     if (!key) return;
-    const fn = () => force((n) => n + 1);
+    const fn = () => {
+      try {
+        force((n) => n + 1);
+      } catch {
+        /* ignore stale state updates */
+      }
+    };
     let subs = subscribers.get(key);
     if (!subs) {
       subs = new Set();
@@ -153,7 +191,11 @@ function useSamples(key: string | undefined): number[] {
     }
     subs.add(fn);
     return () => {
-      subs!.delete(fn);
+      try {
+        subs?.delete(fn);
+      } catch {
+        /* ignore */
+      }
     };
   }, [key]);
   return key ? sampleStore.get(key) ?? [] : [];
@@ -165,7 +207,9 @@ function quantile(sorted: number[], q: number): number {
   const base = Math.floor(pos);
   const rest = pos - base;
   const next = sorted[base + 1];
-  return next !== undefined ? sorted[base] + rest * (next - sorted[base]) : sorted[base];
+  const baseVal = sorted[base];
+  if (next === undefined || !Number.isFinite(baseVal)) return Number.isFinite(baseVal) ? baseVal : 0;
+  return baseVal + rest * (next - baseVal);
 }
 
 type TrendLevel = "normal" | "warning" | "critical";
@@ -190,8 +234,13 @@ function computeTrend(samples: number[]): TrendInfo {
   if (n < TREND_MIN_SAMPLES) {
     return { level: "normal", recent: 0, baseline: 0, ratio: 1 };
   }
-  const recentSlice = samples.slice(-TREND_RECENT_WINDOW);
-  const baselineSlice = samples.slice(0, n - TREND_RECENT_WINDOW);
+  // Filter out any non-finite values that might have crept in
+  const clean = samples.filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (clean.length < TREND_MIN_SAMPLES) {
+    return { level: "normal", recent: 0, baseline: 0, ratio: 1 };
+  }
+  const recentSlice = clean.slice(-TREND_RECENT_WINDOW);
+  const baselineSlice = clean.slice(0, clean.length - TREND_RECENT_WINDOW);
   const median = (arr: number[]) => {
     const s = [...arr].sort((a, b) => a - b);
     return quantile(s, 0.5);

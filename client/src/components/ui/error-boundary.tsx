@@ -44,6 +44,15 @@ export class ModuleErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoun
   }
 
   componentDidCatch(error: Error, errorInfo: any) {
+    const moduleName = this.props.moduleName || "Module";
+    // Always log the full error payload so production logs / Sentry capture it
+    console.error(
+      `[${moduleName}] ModuleErrorBoundary caught error:`,
+      error?.name,
+      error?.message,
+      error?.stack,
+      errorInfo
+    );
     if (isChunkLoadError(error)) {
       const stored = sessionStorage.getItem(CHUNK_RELOAD_KEY);
       const lastAttempt = stored ? parseInt(stored, 10) : 0;
@@ -51,14 +60,13 @@ export class ModuleErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoun
       if (!withinWindow) {
         // Record timestamp so subsequent errors within 5 min don't loop
         sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
-        console.warn(`[${this.props.moduleName || 'Module'}] Stale chunk detected — reloading page to pick up new assets.`);
+        console.warn(`[${moduleName}] Stale chunk detected — reloading page to pick up new assets.`);
         window.location.reload();
         return;
       }
       // TTL guard still active — don't loop; show error UI instead
-      console.error(`[${this.props.moduleName || 'Module'}] Chunk reload already attempted within the last 5 min — showing error UI.`);
+      console.error(`[${moduleName}] Chunk reload already attempted within the last 5 min — showing error UI.`);
     }
-    console.error(`[${this.props.moduleName || 'Module'}] Error:`, error, errorInfo);
   }
 
   handleRetry = () => {
@@ -93,9 +101,12 @@ export class ModuleErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoun
                   ? `The ${moduleName} module encountered an unexpected error. Other parts of the platform are unaffected.`
                   : "This section encountered an unexpected error. You can retry or navigate elsewhere."}
               </p>
-              {isDev && this.state.error && (
+              {this.state.error && (
                 <div className="mt-3 p-3 rounded-md bg-destructive/10 border border-destructive/20 text-left">
-                  <p className="text-xs font-mono text-destructive break-all">{this.state.error.message}</p>
+                  <p className="text-xs font-mono text-destructive break-all">{this.state.error.name}: {this.state.error.message}</p>
+                  {isDev && this.state.error.stack && (
+                    <pre className="text-[10px] font-mono text-destructive/80 mt-2 max-h-32 overflow-auto whitespace-pre-wrap">{this.state.error.stack}</pre>
+                  )}
                 </div>
               )}
             </div>

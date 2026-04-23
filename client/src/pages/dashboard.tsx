@@ -27,7 +27,7 @@ import { ThreatGlobe } from "@/components/dashboard/ThreatGlobe";
 import { IncidentHeatmap } from "@/components/dashboard/IncidentHeatmap";
 import { LiveEventsTicker } from "@/components/dashboard/LiveEventsTicker";
 import { useDashboardFilter } from "@/components/dashboard/DashboardFilterContext";
-import { DataSourceBadge } from "@/components/data-source-badge";
+import { SafeDataSourceBadge } from "@/components/data-source-badge-safe";
 import { RiskBar, CountryFlag, AppIcon } from "@/lib/visual-helpers";
 import { ExpandableCard } from "@/components/ui/expandable-card";
 import { Button } from "@/components/ui/button";
@@ -1245,7 +1245,7 @@ function ThreatFlowSection({ tenantId, domain, title }: { tenantId: number; doma
       <CardHeader className="pb-2">
         <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
           {displayTitle}
-          <span className="ml-auto"><DataSourceBadge source={data?.source} latencyMs={data?.latencyMs} /></span>
+          <span className="ml-auto"><SafeDataSourceBadge source={data?.source} latencyMs={data?.latencyMs} /></span>
         </CardTitle>
       </CardHeader>
       <CardContent className="pt-0">
@@ -1742,7 +1742,7 @@ export default function DashboardPage() {
             ))}
           </div>
           {(stats?.source || typeof stats?.latencyMs === "number") && (
-            <DataSourceBadge source={stats?.source} latencyMs={stats?.latencyMs} samplesKey="dashboard-stats" sampleId={dataUpdatedAt} />
+            <SafeDataSourceBadge source={stats?.source} latencyMs={stats?.latencyMs} samplesKey="dashboard-stats" sampleId={dataUpdatedAt} />
           )}
           <Badge variant="outline" className="gap-1.5 text-[10px] cursor-pointer hover:bg-muted/50 transition-colors"
             onClick={() => setLiveFeedOpen(!liveFeedOpen)} data-testid="live-feed-toggle">
@@ -2503,7 +2503,7 @@ export default function DashboardPage() {
                   <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
                   <span className="text-muted-foreground">Global Threat Activity</span>
                   <span className="ml-auto flex items-center gap-2">
-                    <DataSourceBadge source={s.source} latencyMs={s.latencyMs} />
+                    <SafeDataSourceBadge source={s.source} latencyMs={s.latencyMs} />
                     <span className="text-[9px] font-mono text-red-400/70 bg-red-500/10 px-1.5 py-0.5 rounded border border-red-500/20">LIVE TRACKING</span>
                   </span>
                 </CardTitle>
@@ -2628,7 +2628,7 @@ export default function DashboardPage() {
                   <Activity className="w-4 h-4 text-blue-500" />
                   Events Timeline
                   {liveMode && <span className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />}
-                  <span className="ml-auto"><DataSourceBadge source={s.source} latencyMs={s.latencyMs} /></span>
+                  <span className="ml-auto"><SafeDataSourceBadge source={s.source} latencyMs={s.latencyMs} /></span>
                 </CardTitle>
                 <p className="text-[10px] text-muted-foreground mt-0.5">Event volume by severity over time</p>
               </CardHeader>
@@ -5576,7 +5576,7 @@ export default function DashboardPage() {
               </div>
               <div className="flex items-center gap-2">
                 {drilldownData?.source && (
-                  <DataSourceBadge source={drilldownData.source} latencyMs={drilldownData.latencyMs} samplesKey="dashboard-drilldown" sampleId={drilldownUpdatedAt} />
+                  <SafeDataSourceBadge source={drilldownData.source} latencyMs={drilldownData.latencyMs} samplesKey="dashboard-drilldown" sampleId={drilldownUpdatedAt} />
                 )}
               <Button variant="ghost" size="icon" onClick={closeDrilldown} data-testid="drilldown-close">
                 <X className="w-4 h-4" />
