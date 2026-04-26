@@ -46,6 +46,12 @@ const SEVERITY_COLORS: Record<string, string> = {
 const EVENT_TYPES = ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud", "web", "database", "ot_iot"];
 const SOURCE_TYPES = ["firewall", "edr", "siem", "ids", "waf", "dlp", "cloud_trail", "proxy", "dns", "email_gateway", "endpoint", "identity_provider"];
 
+/** Format a Date as "YYYY-MM-DDTHH:MM" in local time (for datetime-local inputs). */
+function toLocalDateTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 interface QueryParams {
   startDate?: string;
   endDate?: string;
@@ -506,8 +512,11 @@ export default function LogInvestigationPage() {
   }, [pollingQueryId]);
 
   const buildQueryParams = useCallback((): QueryParams => ({
-    startDate: startDate || undefined,
-    endDate: endDate || undefined,
+    // Convert timezone-naive datetime-local strings to unambiguous UTC ISO strings.
+    // datetime-local gives "YYYY-MM-DDTHH:MM" (browser local time).
+    // toISOString() gives "YYYY-MM-DDTHH:MM:SS.sssZ" (UTC).
+    startDate: startDate ? new Date(startDate).toISOString() : undefined,
+    endDate: endDate ? new Date(endDate).toISOString() : undefined,
     severity: severity.length > 0 ? severity : undefined,
     sourceType: sourceType ? [sourceType] : undefined,
     eventType: eventType || undefined,
@@ -770,8 +779,8 @@ export default function LogInvestigationPage() {
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
                     className="h-8 text-xs"
-                    min={sourceMode === "live" ? new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 16) : undefined}
-                    max={new Date().toISOString().slice(0, 16)}
+                    min={sourceMode === "live" ? toLocalDateTime(new Date(Date.now() - 90 * 86400000)) : undefined}
+                    max={toLocalDateTime(new Date())}
                     data-testid="input-start-date"
                   />
                 </div>
@@ -782,8 +791,8 @@ export default function LogInvestigationPage() {
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
                     className="h-8 text-xs"
-                    min={sourceMode === "live" ? new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 16) : undefined}
-                    max={new Date().toISOString().slice(0, 16)}
+                    min={sourceMode === "live" ? toLocalDateTime(new Date(Date.now() - 90 * 86400000)) : undefined}
+                    max={toLocalDateTime(new Date())}
                     data-testid="input-end-date"
                   />
                 </div>

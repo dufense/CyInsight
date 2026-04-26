@@ -329,6 +329,8 @@ export function DataSourceBadge({
     };
   }, [samples]);
 
+  const trend = useMemo(() => computeTrend(samples), [samples]);
+
   if (!source) return null;
 
   const Icon = isOlap ? Zap : Database;
@@ -345,7 +347,6 @@ export function DataSourceBadge({
   const baseSparkColor = isOlap
     ? "text-emerald-600 dark:text-emerald-400"
     : "text-blue-600 dark:text-blue-400";
-  const trend = useMemo(() => computeTrend(samples), [samples]);
   const sparkColor =
     trend.level === "critical"
       ? "text-red-600 dark:text-red-400"

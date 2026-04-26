@@ -61,12 +61,20 @@ import { formatChDateTime64, type IngestIncidentPayload } from "./clickhouse-cli
 // The guard checks whether each row's tenant currently has the connected
 // integration that maps to that row's log_source / detection_source value,
 // completely eliminating the multi-tenant union problem.
-const EVENT_INTEGRATION_GUARD = sql.raw(
-  buildIntegrationGuardSql('"security_events"."tenant_id"', '"security_events"."log_source"'),
-);
-const INCIDENT_INTEGRATION_GUARD = sql.raw(
-  buildIntegrationGuardSql('"incidents"."tenant_id"', '"incidents"."detection_source"'),
-);
+//
+// IMPORTANT: These are functions (not consts) so that updates to
+// LOG_SOURCE_TO_PLATFORM_KEY in log-source-map.ts are picked up without
+// requiring a full server restart.
+function eventIntegrationGuard() {
+  return sql.raw(
+    buildIntegrationGuardSql('"security_events"."tenant_id"', '"security_events"."log_source"'),
+  );
+}
+function incidentIntegrationGuard() {
+  return sql.raw(
+    buildIntegrationGuardSql('"incidents"."tenant_id"', '"incidents"."detection_source"'),
+  );
+}
 
 export function computeEventHash(data: Partial<InsertSecurityEvent>): string {
   const raw = data.rawPayload as any;
@@ -420,7 +428,7 @@ export class DatabaseStorage implements IStorage {
 
   async getIncidents(tenantId: number, includeNonSecurity = false, maxRows = 500): Promise<Incident[]> {
     if (!tenantId || isNaN(tenantId) || tenantId <= 0) return [];
-    const conditions: any[] = [eq(incidents.tenantId, tenantId), INCIDENT_INTEGRATION_GUARD];
+    const conditions: any[] = [eq(incidents.tenantId, tenantId), incidentIntegrationGuard()];
     if (!includeNonSecurity) conditions.push(DatabaseStorage.nonSecurityFilter);
     return db.select().from(incidents)
       .where(and(...conditions))
@@ -435,7 +443,7 @@ export class DatabaseStorage implements IStorage {
 
   async getIncidentGuarded(id: number): Promise<Incident | undefined> {
     const [inc] = await db.select().from(incidents)
-      .where(and(eq(incidents.id, id), INCIDENT_INTEGRATION_GUARD));
+      .where(and(eq(incidents.id, id), incidentIntegrationGuard()));
     return inc;
   }
 
@@ -1111,7 +1119,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(securityEvents)
       .where(and(
         eq(securityEvents.tenantId, tenantId),
-        EVENT_INTEGRATION_GUARD,
+        eventIntegrationGuard(),
       ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(maxRows);
@@ -1122,7 +1130,7 @@ export class DatabaseStorage implements IStorage {
       .where(and(
         eq(securityEvents.tenantId, tenantId),
         eq(securityEvents.eventType, eventType as any),
-        EVENT_INTEGRATION_GUARD,
+        eventIntegrationGuard(),
       ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(maxRows);
@@ -1332,7 +1340,7 @@ export class DatabaseStorage implements IStorage {
 
   async getSecurityEventById(id: number, tenantId: number): Promise<SecurityEvent | undefined> {
     const [event] = await db.select().from(securityEvents)
-      .where(and(eq(securityEvents.id, id), eq(securityEvents.tenantId, tenantId), EVENT_INTEGRATION_GUARD));
+      .where(and(eq(securityEvents.id, id), eq(securityEvents.tenantId, tenantId), eventIntegrationGuard()));
     return event;
   }
 
@@ -1753,7 +1761,7 @@ export class DatabaseStorage implements IStorage {
   async getIncidentsPaginated(tenantIds: number[], page: number, pageSize: number, filters?: { severity?: string | string[]; status?: string; classification?: string }): Promise<{ data: Incident[]; total: number }> {
     if (tenantIds.length === 0) return { data: [], total: 0 };
     const clampedPageSize = Math.min(pageSize, 100);
-    const conditions: any[] = [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter, INCIDENT_INTEGRATION_GUARD];
+    const conditions: any[] = [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter, incidentIntegrationGuard()];
     if (filters?.severity) {
       const sevList = Array.isArray(filters.severity) ? filters.severity : filters.severity.includes(",") ? filters.severity.split(",").map(s => s.trim()) : [filters.severity];
       conditions.push(sevList.length === 1 ? eq(incidents.severity, sevList[0] as any) : inArray(incidents.severity, sevList as any));
@@ -1783,7 +1791,7 @@ export class DatabaseStorage implements IStorage {
     const conditions: any[] = tenantIds.length === 1
       ? [eq(incidents.tenantId, tenantIds[0]), DatabaseStorage.nonSecurityFilter]
       : [inArray(incidents.tenantId, tenantIds), DatabaseStorage.nonSecurityFilter];
-    conditions.push(INCIDENT_INTEGRATION_GUARD);
+    conditions.push(incidentIntegrationGuard());
     if (timeFilter) conditions.push(gte(incidents.createdAt, timeFilter));
     return db.select().from(incidents)
       .where(and(...conditions))
@@ -1798,7 +1806,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(securityEvents)
       .where(and(
         inArray(securityEvents.tenantId, tenantIds),
-        EVENT_INTEGRATION_GUARD,
+        eventIntegrationGuard(),
       ))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(hardCap);
@@ -1811,7 +1819,7 @@ export class DatabaseStorage implements IStorage {
       ? eq(securityEvents.tenantId, tenantIds[0])
       : inArray(securityEvents.tenantId, tenantIds);
     return db.select().from(securityEvents)
-      .where(and(tenantCond, eq(securityEvents.eventType, "sse"), EVENT_INTEGRATION_GUARD))
+      .where(and(tenantCond, eq(securityEvents.eventType, "sse"), eventIntegrationGuard()))
       .orderBy(desc(securityEvents.occurredAt))
       .limit(rowLimit);
   }
@@ -1847,7 +1855,7 @@ export class DatabaseStorage implements IStorage {
     const conditions: any[] = tenantIds.length === 1
       ? [eq(securityEvents.tenantId, tenantIds[0])]
       : [inArray(securityEvents.tenantId, tenantIds)];
-    conditions.push(EVENT_INTEGRATION_GUARD);
+    conditions.push(eventIntegrationGuard());
     if (timeFilter) conditions.push(gte(securityEvents.occurredAt, timeFilter));
     return db.select(cols).from(securityEvents)
       .where(and(...conditions))
@@ -3748,7 +3756,18 @@ export class DatabaseStorage implements IStorage {
     if (hostnames.length === 0) return [];
     const lowerHostnames = hostnames.map(h => h.toLowerCase());
     const { eolFindings, ...lightCols } = getTableColumns(assets);
-    return db.select(lightCols).from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames)));
+
+    // Chunk into groups of 100 to avoid massive IN-clause plan regressions
+    const CHUNK = 100;
+    const results: any[] = [];
+    for (let i = 0; i < lowerHostnames.length; i += CHUNK) {
+      const chunk = lowerHostnames.slice(i, i + CHUNK);
+      const rows = await db.select(lightCols).from(assets).where(
+        and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, chunk))
+      );
+      results.push(...rows);
+    }
+    return results;
   }
 
   async getUserAssets(tenantId: number): Promise<UserAsset[]> {

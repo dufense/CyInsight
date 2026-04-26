@@ -110,6 +110,18 @@ if (numWorkers === 1 || !cluster.isPrimary) {
   cluster.on('message', (worker, message) => {
     if (!message || message.type !== 'memory_report') return;
     const rssMB = Math.round(message.rss / 1024 / 1024);
+    const heapSizeLimit = message.heapSizeLimit || message.heapTotal || 1;
+    const heapRatio = message.heapUsed / heapSizeLimit;
+    const heapUsedMB = Math.round(message.heapUsed / 1024 / 1024);
+    const heapLimitMB = Math.round(heapSizeLimit / 1024 / 1024);
+
+    // Log critical heap pressure (using heapSizeLimit to avoid false positives)
+    if (heapRatio >= 0.92) {
+      console.error(
+        `[Cluster][Memory] Worker ${worker.process.pid} CRITICAL: heap ${heapUsedMB}/${heapLimitMB}MB (${Math.round(heapRatio * 100)}%), RSS=${rssMB}MB`
+      );
+    }
+
     if (rssMB > WORKER_MAX_RSS_MB) {
       console.error(
         `[Cluster] Worker ${worker.process.pid} RSS ${rssMB}MB exceeds ${WORKER_MAX_RSS_MB}MB limit — ` +

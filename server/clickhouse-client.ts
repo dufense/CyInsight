@@ -37,13 +37,13 @@ export function formatChDateTime64(d: Date | string | null | undefined): string 
     : typeof d === "string" && d ? new Date(d)
     : new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  const yyyy = date.getFullYear();
-  const mm = pad(date.getMonth() + 1);
-  const dd = pad(date.getDate());
-  const hh = pad(date.getHours());
-  const mi = pad(date.getMinutes());
-  const ss = pad(date.getSeconds());
-  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  const yyyy = date.getUTCFullYear();
+  const mm = pad(date.getUTCMonth() + 1);
+  const dd = pad(date.getUTCDate());
+  const hh = pad(date.getUTCHours());
+  const mi = pad(date.getUTCMinutes());
+  const ss = pad(date.getUTCSeconds());
+  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}.${ms}`;
 }
 
@@ -548,8 +548,8 @@ export class ClickHouseClient {
     // guard the MV is used for sub-second response.
     if (integrationGuardSql) {
       const conditions: string[] = [`tenant_id IN (${ids.join(",")})`, integrationGuardSql];
-      if (startDate) conditions.push(`ingested_at >= '${startDate.toISOString()}'`);
-      if (endDate)   conditions.push(`ingested_at <  '${endDate.toISOString()}'`);
+      if (startDate) conditions.push(`ingested_at >= '${formatChDateTime64(startDate)}'`);
+      if (endDate)   conditions.push(`ingested_at <  '${formatChDateTime64(endDate)}'`);
       if (severity?.length)   conditions.push(`severity IN (${quotedStringList(severity)})`);
       if (sourceType?.length) conditions.push(`source_type IN (${quotedStringList(sourceType)})`);
       const where = conditions.join(" AND ");
@@ -569,8 +569,8 @@ export class ClickHouseClient {
     }
 
     const conditions: string[] = [`tenant_id IN (${ids.join(",")})`];
-    if (startDate) conditions.push(`hour >= '${startDate.toISOString()}'`);
-    if (endDate)   conditions.push(`hour <  '${endDate.toISOString()}'`);
+    if (startDate) conditions.push(`hour >= '${formatChDateTime64(startDate)}'`);
+    if (endDate)   conditions.push(`hour <  '${formatChDateTime64(endDate)}'`);
     if (severity?.length)   conditions.push(`severity IN (${quotedStringList(severity)})`);
     if (sourceType?.length) conditions.push(`source_type IN (${quotedStringList(sourceType)})`);
     const where = conditions.join(" AND ");
@@ -601,8 +601,8 @@ export class ClickHouseClient {
     const ids = Array.isArray(tenantIds) ? tenantIds : [tenantIds];
     const { startDate, endDate, integrationGuardSql } = filters;
     const conditions: string[] = [`tenant_id IN (${ids.join(",")})`];
-    if (startDate) conditions.push(`ingested_at >= '${startDate.toISOString()}'`);
-    if (endDate)   conditions.push(`ingested_at <  '${endDate.toISOString()}'`);
+    if (startDate) conditions.push(`ingested_at >= '${formatChDateTime64(startDate)}'`);
+    if (endDate)   conditions.push(`ingested_at <  '${formatChDateTime64(endDate)}'`);
     if (integrationGuardSql) conditions.push(integrationGuardSql);
     const where = conditions.join(" AND ");
 
@@ -644,8 +644,8 @@ export class ClickHouseClient {
     } = filters;
     const { logSource } = filters;
     const conditions: string[] = [`tenant_id IN (${ids.join(",")})`];
-    if (startDate)          conditions.push(`ingested_at >= '${startDate.toISOString()}'`);
-    if (endDate)            conditions.push(`ingested_at <  '${endDate.toISOString()}'`);
+    if (startDate)          conditions.push(`ingested_at >= '${formatChDateTime64(startDate)}'`);
+    if (endDate)            conditions.push(`ingested_at <  '${formatChDateTime64(endDate)}'`);
     if (severity?.length)   conditions.push(`severity IN (${quotedStringList(severity)})`);
     if (sourceType?.length) conditions.push(`source_type IN (${quotedStringList(sourceType)})`);
     if (logSource?.length)  conditions.push(`log_source IN (${quotedStringList(logSource)})`);
@@ -708,7 +708,7 @@ export class ClickHouseClient {
     integrationGuardSql?: string,
   ): Promise<Record<string, unknown>[]> {
     const ids = Array.isArray(tenantIds) ? tenantIds : [tenantIds];
-    const since = new Date(Date.now() - lookbackHours * 3_600_000).toISOString();
+    const since = formatChDateTime64(new Date(Date.now() - lookbackHours * 3_600_000));
     const guard = integrationGuardSql ? `AND ${integrationGuardSql}` : "";
     const sql = `
       SELECT
@@ -748,7 +748,7 @@ export class ClickHouseClient {
     integrationGuardSql?: string,
   ): Promise<{ logSource: string; count: number }[]> {
     const ids = Array.isArray(tenantIds) ? tenantIds : [tenantIds];
-    const since = new Date(Date.now() - lookbackHours * 3_600_000).toISOString();
+    const since = formatChDateTime64(new Date(Date.now() - lookbackHours * 3_600_000));
     const guard = integrationGuardSql ? `AND ${integrationGuardSql}` : "";
     const sql = `
       SELECT
@@ -778,7 +778,7 @@ export class ClickHouseClient {
     integrationGuardSql?: string,
   ): Promise<{ eventType: string; count: number }[]> {
     const ids = Array.isArray(tenantIds) ? tenantIds : [tenantIds];
-    const since = new Date(Date.now() - lookbackHours * 3_600_000).toISOString();
+    const since = formatChDateTime64(new Date(Date.now() - lookbackHours * 3_600_000));
     const guard = integrationGuardSql ? `AND ${integrationGuardSql}` : "";
     const sql = `
       SELECT

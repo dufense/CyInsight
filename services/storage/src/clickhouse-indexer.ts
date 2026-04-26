@@ -23,6 +23,23 @@
 
 import type { EventRecord } from "./event-writer";
 
+// ClickHouse default date_time_input_format=basic only accepts
+// YYYY-MM-DD HH:MM:SS.sss and rejects ISO-8601 T/Z separators.
+function formatChDateTime64(d: Date | string | null | undefined): string {
+  const date = d instanceof Date ? d
+    : typeof d === "string" && d ? new Date(d)
+    : new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = date.getUTCFullYear();
+  const mm = pad(date.getUTCMonth() + 1);
+  const dd = pad(date.getUTCDate());
+  const hh = pad(date.getUTCHours());
+  const mi = pad(date.getUTCMinutes());
+  const ss = pad(date.getUTCSeconds());
+  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}.${ms}`;
+}
+
 export interface ClickHouseConfig {
   url: string;
   database: string;
@@ -280,8 +297,8 @@ export class ClickHouseIndexer {
 
   /** Map EventRecord to a flat row object for JSONEachRow format */
   private toClickHouseRow(e: EventRecord): Record<string, unknown> {
-    const now = new Date().toISOString();
-    const occurred = e.occurredAt ?? now;
+    const now = formatChDateTime64(new Date());
+    const occurred = formatChDateTime64(e.occurredAt ?? new Date());
     const safeIp = (v?: string | null) => {
       if (!v) return "0.0.0.0";
       return /^(\d{1,3}\.){3}\d{1,3}$/.test(v) ? v : "0.0.0.0";
@@ -336,8 +353,8 @@ export class ClickHouseIndexer {
     if (params.target) conditions.push(`target ilike '%${this.escapeString(params.target)}%'`);
     if (params.attacker) conditions.push(`attacker = '${this.escapeString(params.attacker)}'`);
     if (params.description) conditions.push(`description ilike '%${this.escapeString(params.description)}%'`);
-    if (params.dateFrom) conditions.push(`occurred_at >= '${params.dateFrom.toISOString()}'`);
-    if (params.dateTo) conditions.push(`occurred_at <= '${params.dateTo.toISOString()}'`);
+    if (params.dateFrom) conditions.push(`occurred_at >= '${formatChDateTime64(params.dateFrom)}'`);
+    if (params.dateTo) conditions.push(`occurred_at <= '${formatChDateTime64(params.dateTo)}'`);
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const order = `ORDER BY occurred_at ${params.sortOrder === "asc" ? "ASC" : "DESC"}`;

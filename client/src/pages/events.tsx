@@ -984,7 +984,7 @@ export default function EventsPage() {
                       <Badge variant="outline" className="text-[10px] font-mono shrink-0">{c.iocType === "ip" ? "IP" : "Target"}</Badge>
                       <span className="text-xs font-mono font-medium truncate" title={c.iocValue}>{c.iocValue}</span>
                       <div className="flex items-center gap-1 flex-wrap ml-auto">
-                        {c.eventTypes.map((et: string) => {
+                        {(Array.isArray(c.eventTypes) ? c.eventTypes : []).map((et: string) => {
                           const Icon = EVENT_TYPE_ICONS[et] || Shield;
                           return (
                             <Badge key={et} variant="secondary" className="text-[9px] gap-0.5">
