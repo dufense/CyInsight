@@ -2104,7 +2104,8 @@ export async function registerRoutes(
       if (type === "customer" && !parentId) {
         return res.status(400).json({ message: "Customer tenants require a parent MSSP" });
       }
-      const tenant = await storage.createTenant(req.body);
+      const validated = insertTenantSchema.parse(req.body);
+      const tenant = await storage.createTenant(validated);
       await deleteCachePrefix("tenants:list:");
       await deleteCachePrefix("tenants:hierarchy:");
       res.json(tenant);
@@ -2117,7 +2118,8 @@ export async function registerRoutes(
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tenant = await storage.updateTenant(parseInt(req.params.id), req.body);
+      const validated = insertTenantSchema.partial().parse(req.body);
+      const tenant = await storage.updateTenant(parseInt(req.params.id), validated);
       await deleteCachePrefix("tenants:list:");
       await deleteCachePrefix("tenants:hierarchy:");
       res.json(tenant);
@@ -3201,7 +3203,8 @@ export async function registerRoutes(
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tu = await storage.createTenantUser(req.body);
+      const validated = insertTenantUserSchema.parse(req.body);
+      const tu = await storage.createTenantUser(validated);
       res.json(tu);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to create tenant user" });
@@ -3212,7 +3215,8 @@ export async function registerRoutes(
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tu = await storage.updateTenantUser(parseInt(req.params.id), req.body);
+      const validated = insertTenantUserSchema.partial().parse(req.body);
+      const tu = await storage.updateTenantUser(parseInt(req.params.id), validated);
       res.json(tu);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to update tenant user" });
@@ -3250,12 +3254,12 @@ export async function registerRoutes(
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const data = {
+      const validated = insertLicenseSchema.parse({
         ...req.body,
         startDate: new Date(req.body.startDate),
         expiresAt: new Date(req.body.expiresAt),
-      };
-      const license = await storage.createLicense(data);
+      });
+      const license = await storage.createLicense(validated);
       res.json(license);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to create license" });
@@ -3266,10 +3270,12 @@ export async function registerRoutes(
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const data = { ...req.body };
-      if (data.startDate) data.startDate = new Date(data.startDate);
-      if (data.expiresAt) data.expiresAt = new Date(data.expiresAt);
-      const license = await storage.updateLicense(parseInt(req.params.id), data);
+      const validated = insertLicenseSchema.partial().parse({
+        ...req.body,
+        startDate: req.body.startDate ? new Date(req.body.startDate) : undefined,
+        expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : undefined,
+      });
+      const license = await storage.updateLicense(parseInt(req.params.id), validated);
       res.json(license);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to update license" });

@@ -430,6 +430,10 @@ async function gracefulShutdown(signal: string) {
     new Promise((r) => setTimeout(r, 3000)),
   ]);
 
+  import("./ch-outbox-worker")
+    .then(({ stopChOutboxWorker }) => stopChOutboxWorker())
+    .catch(() => {});
+
   httpServer.close(async () => {
     console.log("[Shutdown] HTTP server closed — draining DB connections...");
     await drainConnections(4000);
@@ -741,6 +745,8 @@ let serverReady = false;
         markSchedulerReady();
         const { startAIAgentScheduler } = await import("./ai-agent-scheduler");
         startAIAgentScheduler();
+        const { startChOutboxWorker } = await import("./ch-outbox-worker");
+        startChOutboxWorker(5_000);
         const { startEdrScheduler } = await import("./edr-scheduler");
         startEdrScheduler();
         if (isKafkaPrimaryWorker()) {

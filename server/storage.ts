@@ -513,39 +513,20 @@ export class DatabaseStorage implements IStorage {
     } catch { return null; }
   }
 
-  // Live dual-write: fire-and-forget, non-fatal. Called from createIncident /
-  // updateIncident on the hot path — we never want a CH outage to block a
-  // storage call. Anything missed here will be picked up by the next sweep.
+  // Live dual-write: write to outbox for background worker processing.
+  // This prevents data loss during CH outages.
   static chDualWriteIncidents(rows: Incident[]): void {
     if (rows.length === 0) return;
-    void DatabaseStorage.getChClientForIncidents().then(async (chClient) => {
-      if (!chClient) return;
-      const payload = DatabaseStorage.toIncidentPayload(rows);
-      if (payload.length === 0) return;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          await chClient.insertIncidents(payload);
-          return;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const transient =
-            msg.includes("timeout") ||
-            msg.includes("ECONNREFUSED") ||
-            msg.includes("ECONNRESET") ||
-            msg.includes("ETIMEDOUT") ||
-            msg.includes("ENOTFOUND") ||
-            /\b5\d\d\b/.test(msg);
-          if (transient && attempt < 3) {
-            const delay = 500 * attempt;
-            console.warn(`[Storage] ClickHouse incident write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
-            await new Promise((r) => setTimeout(r, delay));
-          } else {
-            console.warn(`[Storage] ClickHouse incident write error (non-fatal, giving up): ${msg}`);
-            return;
-          }
-        }
+    const payload = DatabaseStorage.toIncidentPayload(rows);
+    if (payload.length === 0) return;
+    void (async () => {
+      try {
+        const values = payload.map(p => `('incidents', '${JSON.stringify(p).replace(/'/g, "''")}'::jsonb)`).join(",");
+        await pool.query(`INSERT INTO ch_outbox (table_name, payload_json) VALUES ${values}`);
+      } catch (err) {
+        console.warn(`[Storage] Outbox incident insert error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
       }
-    });
+    })();
   }
 
   // Awaitable variant: throws on insert failure. Used by the sweeper and
@@ -1137,19 +1118,12 @@ export class DatabaseStorage implements IStorage {
       .limit(maxRows);
   }
 
-  // ── ClickHouse dual-write helper ──────────────────────────────────────────
-  // Called after each successful PG insert so every storage path automatically
-  // mirrors events to the hot tier without per-route wiring.
+  // ── ClickHouse outbox dual-write helper ────────────────────────────────────
+  // Writes to the ch_outbox table instead of directly to ClickHouse.
+  // A background worker processes the outbox and inserts into CH.
+  // This prevents data loss during CH outages.
   private async chDualWrite(events: SecurityEvent[]): Promise<void> {
     if (events.length === 0) return;
-    let chClient: { insertEvents: (rows: unknown[]) => Promise<void> } | null = null;
-    try {
-      const m = await import("./clickhouse-client") as {
-        getClickHouseClient: () => { insertEvents: (rows: unknown[]) => Promise<void> } | null;
-      };
-      chClient = m.getClickHouseClient();
-    } catch { return; }
-    if (!chClient) return;
 
     const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
     const IPV6_RE = /^[0-9a-fA-F:]+$/;
@@ -1161,56 +1135,28 @@ export class DatabaseStorage implements IStorage {
       tenant_id:       ev.tenantId,
       event_type:      ev.eventType,
       source_type:     ev.sourceType ?? "",
-      // log_source carries the product-name identifier (e.g. "Cynet 360") used
-      // by the integration-awareness guard. The CH read path enforces the same
-      // guard against log_source, so PG and CH visibility stay in parity.
       log_source:      ev.logSource ?? "",
       severity:        ev.severity,
       host:            ev.asset ?? "",
       src_ip:          validIp(ev.attacker),
       dst_ip:          validIp(ev.target),
-      // Mirror the raw target string (hostname or IP) so the threat-globe
-      // fast-path can match offices the same way the PG path does. Without
-      // this, multi-office tenants saw all CH-path arcs collapse to the
-      // tenant's default office because dst_ip is empty for hostname targets.
       target:          ev.target ?? "",
       user_name:       ev.attacker && !validIp(ev.attacker) ? ev.attacker : "",
       mitre_tactic:    ev.mitreTactic ?? "",
       mitre_technique: ev.mitreTechnique ?? "",
       raw_event:       ev.rawPayload ? JSON.stringify(ev.rawPayload) : "",
       ingested_at:     formatChDateTime64(ev.occurredAt),
-      // Task #203: mirror the PG security_events columns the threat-flow Sankey
-      // depends on so the CH fast-path produces the same level of detail
-      // (per-threat names, per-action labels, per-recipient grouping for email).
       threat:          ev.threat ?? "",
       action:          ev.action ?? "",
       recipient:       ev.recipient ?? "",
-      // Trim long descriptions — the PG fast-path already LEFT(TRIM(description),200)s
-      // the column for the Sankey, so capping here keeps payload size bounded.
       description:     (ev.description ?? "").slice(0, 1000),
     }));
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await chClient.insertEvents(payload);
-        return;
-      } catch (err: any) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const transient =
-          msg.includes("timeout") ||
-          msg.includes("ECONNREFUSED") ||
-          msg.includes("ECONNRESET") ||
-          msg.includes("ETIMEDOUT") ||
-          msg.includes("ENOTFOUND") ||
-          /\b5\d\d\b/.test(msg);
-        if (transient && attempt < 3) {
-          const delay = 500 * attempt;
-          console.warn(`[Storage] ClickHouse write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
-          await new Promise((r) => setTimeout(r, delay));
-        } else {
-          console.warn(`[Storage] ClickHouse write error (non-fatal, giving up): ${msg}`);
-          return;
-        }
-      }
+
+    try {
+      const values = payload.map(p => `('security_events', '${JSON.stringify(p).replace(/'/g, "''")}'::jsonb)`).join(",");
+      await pool.query(`INSERT INTO ch_outbox (table_name, payload_json) VALUES ${values}`);
+    } catch (err: any) {
+      console.warn(`[Storage] Outbox insert error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
