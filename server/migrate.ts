@@ -671,6 +671,61 @@ export async function runMigrations() {
           ON assets(tenant_id, endpoint_type);
       `);
       console.log("[Migration] assets performance indexes ensured (Task #169)");
+
+      // Functional indexes for Cynet hostname lookups and cleanup queries (Task #190)
+      try {
+        await clientIdx.query(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_assets_tenant_lower_hostname
+            ON assets (tenant_id, LOWER(hostname))
+            WHERE hostname IS NOT NULL AND hostname != '';
+        `);
+        console.log("[Migration] idx_assets_tenant_lower_hostname created");
+      } catch (e: any) {
+        // CONCURRENTLY may fail if index creation races; IF NOT EXISTS should prevent this,
+        // but catch and log just in case.
+        if (!e.message?.includes('already exists')) {
+          console.error("[Migration] idx_assets_tenant_lower_hostname error (non-fatal):", e.message);
+        }
+      }
+
+      try {
+        await clientIdx.query(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_assets_tenant_lower_trim_hostname
+            ON assets (tenant_id, LOWER(TRIM(hostname)))
+            WHERE hostname IS NOT NULL AND TRIM(hostname) != '' AND LENGTH(TRIM(hostname)) >= 2;
+        `);
+        console.log("[Migration] idx_assets_tenant_lower_trim_hostname created");
+      } catch (e: any) {
+        if (!e.message?.includes('already exists')) {
+          console.error("[Migration] idx_assets_tenant_lower_trim_hostname error (non-fatal):", e.message);
+        }
+      }
+
+      try {
+        await clientIdx.query(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_assets_tenant_trim_ip
+            ON assets (tenant_id, TRIM(ip_address))
+            WHERE ip_address IS NOT NULL AND TRIM(ip_address) != '' AND TRIM(ip_address) != '0.0.0.0';
+        `);
+        console.log("[Migration] idx_assets_tenant_trim_ip created");
+      } catch (e: any) {
+        if (!e.message?.includes('already exists')) {
+          console.error("[Migration] idx_assets_tenant_trim_ip error (non-fatal):", e.message);
+        }
+      }
+
+      try {
+        await clientIdx.query(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_assets_tenant_lower_trim_os
+            ON assets (tenant_id, LOWER(TRIM(operating_system)))
+            WHERE operating_system IS NOT NULL AND TRIM(operating_system) != '';
+        `);
+        console.log("[Migration] idx_assets_tenant_lower_trim_os created");
+      } catch (e: any) {
+        if (!e.message?.includes('already exists')) {
+          console.error("[Migration] idx_assets_tenant_lower_trim_os error (non-fatal):", e.message);
+        }
+      }
       try {
         await clientIdx.query(`
           CREATE TABLE IF NOT EXISTS migration_markers (

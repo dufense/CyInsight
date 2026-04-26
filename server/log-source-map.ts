@@ -6,10 +6,14 @@
  * integration-aware filtering.
  */
 export const LOG_SOURCE_TO_PLATFORM_KEY: Record<string, string> = {
-  "Cynet 360":  "cynet",
-  "Skyhigh SSE": "skyhigh_sse",
-  "FortiNAC":   "fortinac",
-  "FortiGate":  "fortigate",
+  "Cynet 360":          "cynet",
+  "Skyhigh SSE":        "skyhigh_sse",
+  "FortiNAC":           "fortinac",
+  "FortiGate":          "fortigate",
+  "Checkpoint HEC":     "checkpoint_hec",
+  "Checkpoint Harmony Email": "checkpoint_hec",
+  "CrowdStrike Falcon": "crowdstrike",
+  "Microsoft Entra ID": "azure_ad",
 };
 
 /**

@@ -19,6 +19,7 @@ import {
 } from "./crash-guard";
 
 import { pool } from "./db";
+import pg from "pg";
 import { ensureQuotaTable } from "./quota-engine";
 import { initClickHouseSchema } from "./clickhouse-client";
 
@@ -133,16 +134,37 @@ if (cluster.isWorker && process.send) {
   process.on("message", (msg: any) => {
     if (msg?.type === "healthcheck") {
       const mem = process.memoryUsage();
+      const v8 = require("v8");
+      const heapStats = v8.getHeapStatistics();
       try {
-        process.send!({ type: "memory_report", rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal });
+        process.send!({
+          type: "memory_report",
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          heapTotal: mem.heapTotal,
+          heapSizeLimit: heapStats.heap_size_limit,
+        });
       } catch {}
     }
   });
 }
 
 async function runStartupAssetCleanup() {
+  // Use a dedicated client with extended timeouts for heavy cleanup queries.
+  // pool.connect() inherits the pool's query_timeout (30s), so we create a
+  // one-off Client with both statement_timeout and query_timeout set to 120s.
+  const sslConfig = (pool as any).options?.ssl;
+  const client = new pg.Client({
+    connectionString: process.env.DATABASE_URL,
+    statement_timeout: 120_000,
+    query_timeout: 120_000,
+    connectionTimeoutMillis: 10_000,
+    ...(sslConfig ? { ssl: sslConfig } : {}),
+  });
   try {
-    const dedupResult = await pool.query(`
+    await client.connect();
+
+    const dedupResult = await client.query(`
       DELETE FROM assets WHERE id IN (
         SELECT id FROM (
           SELECT id, ROW_NUMBER() OVER (
@@ -163,7 +185,7 @@ async function runStartupAssetCleanup() {
       }
     }
 
-    const ipDedupResult = await pool.query(`
+    const ipDedupResult = await client.query(`
       DELETE FROM assets WHERE id IN (
         SELECT id FROM (
           SELECT id, ROW_NUMBER() OVER (
@@ -182,18 +204,18 @@ async function runStartupAssetCleanup() {
       console.log(`[Cleanup] IP-based dedup: removed ${ipDedupCount} duplicate assets without hostnames`);
     }
 
-    await pool.query(`DELETE FROM assets WHERE (hostname IS NULL OR TRIM(hostname) = '') AND (ip_address IS NULL OR TRIM(ip_address) = '')`).then(r => {
+    await client.query(`DELETE FROM assets WHERE (hostname IS NULL OR TRIM(hostname) = '') AND (ip_address IS NULL OR TRIM(ip_address) = '')`).then(r => {
       if (r.rowCount && r.rowCount > 0) console.log(`[Cleanup] Removed ${r.rowCount} ghost assets (no hostname, no IP)`);
     }).catch(() => {});
 
-    const osFixResult = await pool.query(`
+    const osFixResult = await client.query(`
       UPDATE assets SET operating_system = TRIM(REGEXP_REPLACE(operating_system, '^(.+?)\\s+\\1', '\\1'))
       WHERE operating_system ~ '^(.+?)\\s+\\1'
     `);
     const osFixed = osFixResult.rowCount || 0;
     if (osFixed > 0) console.log(`[Cleanup] Fixed ${osFixed} duplicated OS strings`);
 
-    const riskFixResult = await pool.query(`
+    const riskFixResult = await client.query(`
       UPDATE assets SET risk_score = LEAST(100, ROUND(risk_score / 5.0))
       WHERE risk_score > 100
     `);
@@ -201,7 +223,7 @@ async function runStartupAssetCleanup() {
     if (riskFixed > 0) console.log(`[Cleanup] Normalized ${riskFixed} risk scores from >100 to 0-100 range`);
 
     const STATUS_VALUES = ['active', 'inactive', 'online', 'offline', 'paused', 'enabled', 'disabled', 'running', 'stopped', 'unknown'];
-    const versionCandidates = await pool.query<{ id: number }>(`
+    const versionCandidates = await client.query<{ id: number }>(`
       SELECT id FROM assets
       WHERE software_inventory IS NOT NULL 
         AND jsonb_typeof(software_inventory) = 'array'
@@ -223,7 +245,7 @@ async function runStartupAssetCleanup() {
     const BATCH_SIZE_CLEANUP = 100;
     for (let bi = 0; bi < candidateIds.length; bi += BATCH_SIZE_CLEANUP) {
       const batchIds = candidateIds.slice(bi, bi + BATCH_SIZE_CLEANUP);
-      const batchResult = await pool.query(`
+      const batchResult = await client.query(`
         UPDATE assets SET software_inventory = (
           SELECT jsonb_agg(
             CASE 
@@ -246,7 +268,7 @@ async function runStartupAssetCleanup() {
     if (versionFixed > 0) console.log(`[Cleanup] Fixed software versions for ${versionFixed} assets (removed status values, synced CynetEPS versions)`);
 
     const OS_STATUS_VALUES = ['decommissioned', 'running', 'operational', 'powered off', 'powered on', 'inactive', 'retired', 'unknown', 'n/a', 'none', 'not available', 'shutoff', 'suspended', 'pending', 'maintenance', 'active', 'online', 'offline', 'down', 'up', 'stopped'];
-    const osStatusFixResult = await pool.query(`
+    const osStatusFixResult = await client.query(`
       UPDATE assets SET 
         status = CASE 
           WHEN LOWER(TRIM(operating_system)) IN ('decommissioned', 'retired') THEN 'decommissioned'
@@ -259,7 +281,7 @@ async function runStartupAssetCleanup() {
     const osStatusFixed = osStatusFixResult.rowCount || 0;
     if (osStatusFixed > 0) console.log(`[Cleanup] Fixed ${osStatusFixed} assets with status values stored as OS (moved to status field)`);
 
-    const tsRegionFixResult = await pool.query(`
+    const tsRegionFixResult = await client.query(`
       UPDATE assets SET cloud_region = NULL
       WHERE cloud_region IS NOT NULL AND cloud_region ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
     `);
@@ -271,6 +293,8 @@ async function runStartupAssetCleanup() {
     }
   } catch (err: any) {
     console.error(`[Cleanup] Asset cleanup error:`, err.message);
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
@@ -690,7 +714,10 @@ let serverReady = false;
         await runStartupEnrichment();
         const ipsCleaned = await cleanInvalidIPAddresses();
         if (ipsCleaned > 0) log(`Cleaned ${ipsCleaned} invalid IP addresses`);
-        await runStartupAssetCleanup();
+        // Run cleanup asynchronously so it doesn't block server startup
+        setTimeout(() => {
+          runStartupAssetCleanup().catch(e => console.error("[Cleanup] Async startup error:", e.message));
+        }, 5000);
         runSigmaEnrichmentOnExistingEvents().catch(e => console.error("[Sigma] Startup enrichment error:", e));
         serverReady = true;
         markSchedulerReady();

@@ -218,7 +218,7 @@ import {
   matchMalwareContent,
   type SigmaMatch,
 } from "./sigma-engine";
-import { getClickHouseClient, isClickHouseEnabled, HOT_RETENTION_DAYS, logChQuery, rotateClickHousePassword } from "./clickhouse-client";
+import { getClickHouseClient, isClickHouseEnabled, HOT_RETENTION_DAYS, logChQuery, rotateClickHousePassword, formatChDateTime64 } from "./clickhouse-client";
 import { getAthenaClient } from "./athena-client";
 import { publishEvents } from "./kafka/producer";
 import { KAFKA_TOPICS } from "./kafka/topics";
@@ -5007,8 +5007,8 @@ export async function registerRoutes(
           GROUP BY target, event_type, COALESCE(log_source, source_type, 'Unknown')
         )
         SELECT ioc_value, ioc_type, 
-               array_agg(DISTINCT event_type) as event_types,
-               array_agg(DISTINCT log_source) as log_sources,
+               array_agg(DISTINCT event_type::text) as event_types,
+               array_agg(DISTINCT log_source::text) as log_sources,
                SUM(hit_count)::int as total_hits
         FROM ioc_sources
         GROUP BY ioc_value, ioc_type
@@ -5085,8 +5085,8 @@ export async function registerRoutes(
               toUInt64(count())                        AS total
             FROM security_events_distributed
             WHERE tenant_id IN (${tenantIds.join(",")})
-              AND ingested_at >= '${start.toISOString()}'
-              AND ingested_at <= '${end.toISOString()}'
+              AND ingested_at >= '${formatChDateTime64(start)}'
+              AND ingested_at <= '${formatChDateTime64(end)}'
               ${guardSql}
             GROUP BY ts
             ORDER BY ts ASC
@@ -18557,7 +18557,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     const existingMap = new Map(existingAssets.map(a => [(a.hostname || "").toLowerCase(), a]));
     let stored = 0;
 
-    const BATCH_SIZE = 3;
+    const BATCH_SIZE = 50;
     let failed = 0;
 
     for (let i = 0; i < validHosts.length; i += BATCH_SIZE) {
@@ -36120,9 +36120,9 @@ Write a concise, actionable narrative explaining the most critical attack path a
         const ph = tenantIds.map((_: any, i: number) => `$${i + 1}`).join(",");
         const dimRes = await pool.query(
           `SELECT
-            array_agg(DISTINCT event_type) FILTER (WHERE event_type IS NOT NULL) AS event_types,
-            array_agg(DISTINCT mitre_tactic) FILTER (WHERE mitre_tactic IS NOT NULL) AS tactics,
-            array_agg(DISTINCT log_source) FILTER (WHERE log_source IS NOT NULL) AS log_sources
+            array_agg(DISTINCT event_type::text) FILTER (WHERE event_type IS NOT NULL) AS event_types,
+            array_agg(DISTINCT mitre_tactic::text) FILTER (WHERE mitre_tactic IS NOT NULL) AS tactics,
+            array_agg(DISTINCT log_source::text) FILTER (WHERE log_source IS NOT NULL) AS log_sources
            FROM (SELECT event_type, mitre_tactic, log_source FROM security_events WHERE tenant_id IN (${ph}) LIMIT 5000) sub`,
           tenantIds
         );
@@ -38631,7 +38631,7 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
       if (chCoverage) {
         try {
           const chStart = Date.now();
-          const sinceIso = since.toISOString();
+          const sinceIso = formatChDateTime64(since);
           // Mirror the PG fallback's filter set exactly so per-tile counts are
           // apples-to-apples between the two paths: tenant_id, time window,
           // and a non-null mitre_technique_id. The CH column is non-nullable
@@ -38947,7 +38947,7 @@ Keep response concise, actionable, technical. Max 200 words.`;
       if (chArcsClient) {
         try {
           const chStart = Date.now();
-          const sinceIso = since.toISOString();
+          const sinceIso = formatChDateTime64(since);
           const tenantList = tenantIds.join(",");
           // Same integration-awareness guard the events fast-paths use, so
           // arcs only reflect log sources the tenant has actively connected.
@@ -45983,13 +45983,13 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       const chClient = getClickHouseClient();
       if (isLiveOnly && chClient) {
         try {
-          const hotCutoffStr = hotCutoff.toISOString().slice(0, 19).replace("T", " ");
+          const hotCutoffStr = formatChDateTime64(hotCutoff);
           const chConditions: string[] = [
             `tenant_id = ${tId}`,
             `occurred_at >= '${hotCutoffStr}'`,
           ];
-          if (parsedStart) chConditions.push(`occurred_at >= '${parsedStart.toISOString().slice(0, 19).replace("T", " ")}'`);
-          if (parsedEnd)   chConditions.push(`occurred_at <= '${parsedEnd.toISOString().slice(0, 19).replace("T", " ")}'`);
+          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
+          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
           if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
           if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
           if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
