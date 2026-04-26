@@ -6417,8 +6417,11 @@ export async function registerRoutes(
       if (!password || password.length < 6) {
         return res.status(400).json({ message: "Password must be at least 6 characters" });
       }
+      if (!password || password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(password, 10);
+      const hash = await bcrypt.hash(password, 12);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");
@@ -6448,7 +6451,7 @@ export async function registerRoutes(
       }
       const tempPassword = "SecureOps@" + Math.random().toString(36).slice(2, 10);
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(tempPassword, 10);
+      const hash = await bcrypt.hash(tempPassword, 12);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");

@@ -3504,7 +3504,80 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTenant(id: number): Promise<void> {
-    await db.update(tenants).set({ parentId: null }).where(eq(tenants.parentId, id));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query("UPDATE tenants SET parent_id = NULL WHERE parent_id = $1", [id]);
+
+      const projectRes = await client.query("SELECT id FROM projects WHERE tenant_id = $1", [id]);
+      const projectIds = projectRes.rows.map((r: any) => r.id);
+      if (projectIds.length > 0) {
+        for (const pid of projectIds) {
+          await client.query("DELETE FROM activity_logs WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_activities WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_raci WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_risks WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_scope WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM tasks WHERE project_id = $1", [pid]);
+        }
+        await client.query("DELETE FROM projects WHERE tenant_id = $1", [id]);
+      }
+
+      const ticketRes = await client.query("SELECT id FROM tickets WHERE tenant_id = $1", [id]);
+      const ticketIds = ticketRes.rows.map((r: any) => r.id);
+      if (ticketIds.length > 0) {
+        for (const tkid of ticketIds) {
+          await client.query("DELETE FROM ticket_attachments WHERE ticket_id = $1", [tkid]);
+          await client.query("DELETE FROM ticket_comments WHERE ticket_id = $1", [tkid]);
+          await client.query("DELETE FROM ticket_feedback WHERE ticket_id = $1", [tkid]);
+        }
+        await client.query("DELETE FROM tickets WHERE tenant_id = $1", [id]);
+      }
+
+      const serviceRes = await client.query("SELECT id FROM services WHERE tenant_id = $1", [id]);
+      if (serviceRes.rows.length > 0) {
+        for (const svc of serviceRes.rows) {
+          await client.query("DELETE FROM sla_definitions WHERE service_id = $1", [svc.id]);
+        }
+        await client.query("DELETE FROM services WHERE tenant_id = $1", [id]);
+      }
+
+      await client.query("DELETE FROM shift_rosters WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ai_agent_activity_logs WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM project_raci WHERE team_member_id IN (SELECT id FROM team_members WHERE tenant_id = $1)", [id]);
+      await client.query("DELETE FROM team_members WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM incidents WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM security_events WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM assets WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM user_assets WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM reports WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM report_schedules WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM documents WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM security_integrations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM licenses WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenant_users WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ai_investigations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM analyst_feedback WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM cloud_app_risk_attributes WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM data_retention_policies WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM email_configurations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM incident_notifications WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM infrastructure_locations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ingest_api_keys WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ingest_batches WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM risk_scores WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenant_security_tools WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenants WHERE id = $1", [id]);
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
     const projectList = await db.select({ id: projects.id }).from(projects).where(eq(projects.tenantId, id));
     const projectIds = projectList.map(p => p.id);
