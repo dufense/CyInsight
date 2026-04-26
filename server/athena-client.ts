@@ -22,9 +22,28 @@ import {
   StartQueryExecutionCommand,
   GetQueryExecutionCommand,
   GetQueryResultsCommand,
+  StopQueryExecutionCommand,
   type QueryExecution,
   type ResultSet,
 } from "@aws-sdk/client-athena";
+
+function withRetry<T>(fn: () => Promise<T>, retries = 3, baseDelayMs = 500): Promise<T> {
+  return fn().catch(async (err: any) => {
+    const isRetryable =
+      err?.name === "ThrottlingException" ||
+      err?.name === "TooManyRequestsException" ||
+      err?.name === "ServiceUnavailableException" ||
+      err?.name === "InternalServerException" ||
+      err?.code === "ECONNRESET" ||
+      err?.code === "ETIMEDOUT" ||
+      err?.code === "ENOTFOUND" ||
+      err?.message?.includes("timeout") ||
+      err?.statusCode >= 500;
+    if (retries <= 0 || !isRetryable) throw err;
+    await new Promise(r => setTimeout(r, baseDelayMs * Math.pow(2, 3 - retries)));
+    return withRetry(fn, retries - 1, baseDelayMs);
+  });
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -139,25 +158,25 @@ export class CccAthenaClient {
    * Use pollQuery() to check status and fetch results.
    */
   async startQuery(sql: string, tenantId?: number): Promise<string> {
-    const bucketBase = this.resultsBucket.startsWith("s3://")
-      ? this.resultsBucket
-      : `s3://${this.resultsBucket}`;
-    // Per-tenant output prefix ensures result isolation and supports
-    // tenant-scoped lifecycle policies on the S3 bucket.
-    const tenantPrefix = tenantId != null ? `tenant_id=${tenantId}/` : "";
-    const outputLocation = `${bucketBase}/forensics/athena-results/${tenantPrefix}`;
-    const cmd = new StartQueryExecutionCommand({
-      QueryString: sql,
-      QueryExecutionContext: { Database: this.database },
-      ResultConfiguration: {
-        OutputLocation: outputLocation,
-        EncryptionConfiguration: { EncryptionOption: "SSE_S3" },
-      },
-      WorkGroup: this.workGroup,
+    return withRetry(async () => {
+      const bucketBase = this.resultsBucket.startsWith("s3://")
+        ? this.resultsBucket
+        : `s3://${this.resultsBucket}`;
+      const tenantPrefix = tenantId != null ? `tenant_id=${tenantId}/` : "";
+      const outputLocation = `${bucketBase}/forensics/athena-results/${tenantPrefix}`;
+      const cmd = new StartQueryExecutionCommand({
+        QueryString: sql,
+        QueryExecutionContext: { Database: this.database },
+        ResultConfiguration: {
+          OutputLocation: outputLocation,
+          EncryptionConfiguration: { EncryptionOption: "SSE_S3" },
+        },
+        WorkGroup: this.workGroup,
+      });
+      const resp = await this.client.send(cmd);
+      if (!resp.QueryExecutionId) throw new Error("Athena did not return a QueryExecutionId");
+      return resp.QueryExecutionId;
     });
-    const resp = await this.client.send(cmd);
-    if (!resp.QueryExecutionId) throw new Error("Athena did not return a QueryExecutionId");
-    return resp.QueryExecutionId;
   }
 
   /**
@@ -179,6 +198,12 @@ export class CccAthenaClient {
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
+    // Cancel the query to avoid unnecessary Athena charges
+    try {
+      await this.client.send(new StopQueryExecutionCommand({ QueryExecutionId: queryId }));
+    } catch (e: any) {
+      console.warn(`[Athena] Failed to cancel timed-out query ${queryId}:`, e.message);
+    }
     return { state: "TIMEOUT" };
   }
 
@@ -186,9 +211,11 @@ export class CccAthenaClient {
    * Fetch a raw QueryExecution record (status, stats, error info).
    */
   async getQueryStatus(queryId: string): Promise<QueryExecution | undefined> {
-    const cmd = new GetQueryExecutionCommand({ QueryExecutionId: queryId });
-    const resp = await this.client.send(cmd);
-    return resp.QueryExecution;
+    return withRetry(async () => {
+      const cmd = new GetQueryExecutionCommand({ QueryExecutionId: queryId });
+      const resp = await this.client.send(cmd);
+      return resp.QueryExecution;
+    });
   }
 
   /**
@@ -205,12 +232,14 @@ export class CccAthenaClient {
     let firstPage = true;
 
     do {
-      const cmd = new GetQueryResultsCommand({
-        QueryExecutionId: queryId,
-        MaxResults: Math.min(maxRows - rows.length, 1000),
-        NextToken: nextToken,
+      const resp = await withRetry(async () => {
+        const cmd = new GetQueryResultsCommand({
+          QueryExecutionId: queryId,
+          MaxResults: Math.min(maxRows - rows.length, 1000),
+          NextToken: nextToken,
+        });
+        return this.client.send(cmd);
       });
-      const resp = await this.client.send(cmd);
       const resultSet: ResultSet = resp.ResultSet ?? { Rows: [] };
 
       // On the first page the Athena SDK always returns the column header row

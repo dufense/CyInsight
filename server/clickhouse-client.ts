@@ -305,9 +305,10 @@ export class ClickHouseClient {
 
     return new Promise<string>((resolve, reject) => {
       const req = transport.get(requestUrl, { headers, timeout: this.timeoutMs }, (res) => {
-        let body = "";
-        res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => { chunks.push(chunk); });
         res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
           if (res.statusCode !== undefined && res.statusCode >= 400) {
             reject(new Error(`ClickHouse ${res.statusCode}: ${body.slice(0, 256)}`));
           } else {

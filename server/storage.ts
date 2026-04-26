@@ -989,7 +989,8 @@ export class DatabaseStorage implements IStorage {
     const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     const rows = await db.select({ dedupHash: incidents.dedupHash })
       .from(incidents)
-      .where(and(eq(incidents.tenantId, tenantId), sql`${incidents.dedupHash} IS NOT NULL`, gte(incidents.createdAt, cutoff)));
+      .where(and(eq(incidents.tenantId, tenantId), sql`${incidents.dedupHash} IS NOT NULL`, gte(incidents.createdAt, cutoff)))
+      .limit(10000);
     return new Set(rows.map(r => r.dedupHash!).filter(Boolean));
   }
 
@@ -3751,7 +3752,7 @@ export class DatabaseStorage implements IStorage {
   async getAssetsByHostnames(tenantId: number, hostnames: string[]): Promise<Asset[]> {
     if (hostnames.length === 0) return [];
     const lowerHostnames = hostnames.map(h => h.toLowerCase());
-    return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames)));
+    return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames))).limit(1000);
   }
 
   async getAssetsByHostnamesLight(tenantId: number, hostnames: string[]): Promise<any[]> {
@@ -3766,7 +3767,7 @@ export class DatabaseStorage implements IStorage {
       const chunk = lowerHostnames.slice(i, i + CHUNK);
       const rows = await db.select(lightCols).from(assets).where(
         and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, chunk))
-      );
+      ).limit(1000);
       results.push(...rows);
     }
     return results;

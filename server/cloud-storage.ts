@@ -42,6 +42,29 @@ export const DEFAULT_RETENTION_POLICY: RetentionPolicy = {
   archiveAfterDays: 1095,
 };
 
+function withRetry<T>(
+  fn: () => Promise<T>,
+  opts: { retries?: number; baseDelayMs?: number; maxDelayMs?: number } = {}
+): Promise<T> {
+  const { retries = 3, baseDelayMs = 500, maxDelayMs = 8000 } = opts;
+  return fn().catch(async (err: any) => {
+    const isRetryable =
+      err?.code === "ECONNRESET" ||
+      err?.code === "ETIMEDOUT" ||
+      err?.code === "ENOTFOUND" ||
+      err?.name === "TimeoutError" ||
+      err?.name === "NetworkingError" ||
+      err?.message?.includes("timeout") ||
+      err?.message?.includes("ECONNREFUSED") ||
+      err?.message?.includes("Temporary failure") ||
+      err?.statusCode >= 500;
+    if (retries <= 0 || !isRetryable) throw err;
+    const delay = Math.min(baseDelayMs * Math.pow(2, 3 - retries), maxDelayMs);
+    await new Promise(r => setTimeout(r, delay));
+    return withRetry(fn, { retries: retries - 1, baseDelayMs, maxDelayMs });
+  });
+}
+
 export interface CloudStorageConfig {
   provider: CloudStorageProvider;
   region?: string;
@@ -615,11 +638,11 @@ export class CloudStorageService {
   }
 
   async upload(bucket: string, key: string, data: Buffer | string, metadata?: StorageMetadata): Promise<{ etag: string }> {
-    return this.backend.upload(bucket, key, data, metadata);
+    return withRetry(() => this.backend.upload(bucket, key, data, metadata));
   }
 
   async download(bucket: string, key: string): Promise<{ data: Buffer; metadata?: StorageMetadata }> {
-    return this.backend.download(bucket, key);
+    return withRetry(() => this.backend.download(bucket, key));
   }
 
   async list(bucket: string, prefix?: string, maxKeys?: number, continuationToken?: string): Promise<{
@@ -627,23 +650,23 @@ export class CloudStorageService {
     nextToken?: string;
     isTruncated: boolean;
   }> {
-    return this.backend.list(bucket, prefix, maxKeys, continuationToken);
+    return withRetry(() => this.backend.list(bucket, prefix, maxKeys, continuationToken));
   }
 
   async delete(bucket: string, key: string): Promise<void> {
-    return this.backend.delete(bucket, key);
+    return withRetry(() => this.backend.delete(bucket, key));
   }
 
   async generatePresignedUrl(bucket: string, key: string, expirySeconds?: number): Promise<string> {
-    return this.backend.generatePresignedUrl(bucket, key, expirySeconds);
+    return withRetry(() => this.backend.generatePresignedUrl(bucket, key, expirySeconds));
   }
 
   async headObject(bucket: string, key: string): Promise<StorageObject | null> {
-    return this.backend.headObject(bucket, key);
+    return withRetry(() => this.backend.headObject(bucket, key));
   }
 
   async ensureBucket(bucket: string): Promise<void> {
-    return this.backend.ensureBucket(bucket);
+    return withRetry(() => this.backend.ensureBucket(bucket));
   }
 
   getTierForAge(ageDays: number, policy: RetentionPolicy = DEFAULT_RETENTION_POLICY): StorageTier {

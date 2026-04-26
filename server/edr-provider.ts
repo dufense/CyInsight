@@ -62,6 +62,10 @@ async function httpReq(
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       signal: controller.signal,
     });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
     let data: any;
     const ct = res.headers.get("content-type") ?? "";
     data = ct.includes("application/json") ? await res.json() : await res.text();
