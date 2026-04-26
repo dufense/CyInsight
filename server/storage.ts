@@ -3525,69 +3525,6 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-    const projectList = await db.select({ id: projects.id }).from(projects).where(eq(projects.tenantId, id));
-    const projectIds = projectList.map(p => p.id);
-    if (projectIds.length > 0) {
-      for (const pid of projectIds) {
-        await db.delete(activityLogs).where(eq(activityLogs.projectId, pid));
-        await db.delete(projectActivities).where(eq(projectActivities.projectId, pid));
-        await db.delete(projectRaci).where(eq(projectRaci.projectId, pid));
-        await db.delete(projectRisks).where(eq(projectRisks.projectId, pid));
-        await db.delete(projectScope).where(eq(projectScope.projectId, pid));
-        await db.delete(tasks).where(eq(tasks.projectId, pid));
-      }
-      await db.delete(projects).where(eq(projects.tenantId, id));
-    }
-
-    const ticketList = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.tenantId, id));
-    const ticketIds = ticketList.map(t => t.id);
-    if (ticketIds.length > 0) {
-      for (const tkid of ticketIds) {
-        await db.delete(ticketAttachments).where(eq(ticketAttachments.ticketId, tkid));
-        await db.delete(ticketComments).where(eq(ticketComments.ticketId, tkid));
-        await db.delete(ticketFeedback).where(eq(ticketFeedback.ticketId, tkid));
-      }
-      await db.delete(tickets).where(eq(tickets.tenantId, id));
-    }
-
-    const serviceList = await db.select({ id: services.id }).from(services).where(eq(services.tenantId, id));
-    if (serviceList.length > 0) {
-      for (const svc of serviceList) {
-        await db.delete(slaDefinitions).where(eq(slaDefinitions.serviceId, svc.id));
-      }
-      await db.delete(services).where(eq(services.tenantId, id));
-    }
-
-    await db.delete(shiftRosters).where(eq(shiftRosters.tenantId, id));
-    await db.delete(aiAgentActivityLog).where(eq(aiAgentActivityLog.tenantId, id));
-    await db.delete(projectRaci).where(sql`${projectRaci.teamMemberId} IN (SELECT id FROM team_members WHERE tenant_id = ${id})`);
-    await db.delete(teamMembers).where(eq(teamMembers.tenantId, id));
-
-    await db.delete(incidents).where(eq(incidents.tenantId, id));
-    await db.delete(securityEvents).where(eq(securityEvents.tenantId, id));
-    await db.delete(assets).where(eq(assets.tenantId, id));
-    await db.delete(userAssets).where(eq(userAssets.tenantId, id));
-    await db.delete(reports).where(eq(reports.tenantId, id));
-    await db.delete(reportSchedules).where(eq(reportSchedules.tenantId, id));
-    await db.delete(documents).where(eq(documents.tenantId, id));
-    await db.delete(securityIntegrations).where(eq(securityIntegrations.tenantId, id));
-    await db.delete(licenses).where(eq(licenses.tenantId, id));
-    await db.delete(tenantUsers).where(eq(tenantUsers.tenantId, id));
-    await db.delete(aiInvestigations).where(eq(aiInvestigations.tenantId, id));
-    await db.delete(analystFeedback).where(eq(analystFeedback.tenantId, id));
-    await db.delete(cloudAppRiskAttributes).where(eq(cloudAppRiskAttributes.tenantId, id));
-    await db.delete(dataRetentionPolicies).where(eq(dataRetentionPolicies.tenantId, id));
-    await db.delete(emailConfigurations).where(eq(emailConfigurations.tenantId, id));
-    await db.delete(incidentNotifications).where(eq(incidentNotifications.tenantId, id));
-    await db.delete(infrastructureLocations).where(eq(infrastructureLocations.tenantId, id));
-    await db.delete(ingestApiKeys).where(eq(ingestApiKeys.tenantId, id));
-    await db.delete(ingestBatches).where(eq(ingestBatches.tenantId, id));
-    await db.delete(riskScores).where(eq(riskScores.tenantId, id));
-    await db.delete(tenantSecurityTools).where(eq(tenantSecurityTools.tenantId, id));
-
-    await db.delete(tenants).where(eq(tenants.id, id));
-  }
-
   async getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]> {
     return db.select().from(tenantUsers).where(eq(tenantUsers.tenantId, tenantId)).orderBy(tenantUsers.createdAt);
   }
