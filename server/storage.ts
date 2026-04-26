@@ -1891,6 +1891,8 @@ export class DatabaseStorage implements IStorage {
     };
     const interval = intervals[timeRange];
     if (!interval) return sql``;
+    const allowedCols = ["occurred_at", "created_at", "updated_at", "resolved_at", "detected_at"];
+    if (!allowedCols.includes(dateCol)) return sql``;
     return sql.raw(` AND ${dateCol} >= NOW() - INTERVAL '${interval}'`);
   }
 
@@ -1901,7 +1903,7 @@ export class DatabaseStorage implements IStorage {
     if (safeIds.length === 0) return emptyAgg;
     const tenantFilter = safeIds.length === 1
       ? sql`tenant_id = ${safeIds[0]}`
-      : sql`tenant_id = ANY(${sql.raw(`ARRAY[${safeIds.join(",")}]`)})`;
+      : sql`tenant_id = ANY(ARRAY[${sql.join(safeIds.map(id => sql`${id}`), sql`, `)}])`;
 
     const evTimeFilter = this.getTimeRangeSQL(timeRange, "occurred_at");
     const incTimeFilter = this.getTimeRangeSQL(timeRange, "created_at");

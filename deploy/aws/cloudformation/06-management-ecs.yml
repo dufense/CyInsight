@@ -914,7 +914,7 @@ Resources:
       TargetType: ip
       VpcId:
         Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
-      HealthCheckPath: /health
+      HealthCheckPath: /healthz
       HealthCheckPort: "5000"
       HealthCheckProtocol: HTTP
       HealthCheckIntervalSeconds: 30
@@ -1014,7 +1014,7 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 60
 
   ScalingPolicyMemory:
@@ -1027,8 +1027,29 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageMemoryUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 60
+
+  # ── Scheduled Scaling ──────────────────────────────────────────────────────────
+  ScaleDownNightAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 1
+        MaxCapacity: 30
+      Schedule: "cron(0 20 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
+
+  ScaleUpMorningAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 3
+        MaxCapacity: 30
+      Schedule: "cron(0 8 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
 
 Outputs:
 

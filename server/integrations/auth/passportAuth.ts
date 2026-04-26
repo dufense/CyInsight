@@ -1,6 +1,6 @@
 import passport from "passport";
 import session from "express-session";
-import type { Express, RequestHandler } from "express";
+import type { Express, RequestHandler, Request, Response, NextFunction } from "express";
 import connectPg from "connect-pg-simple";
 import RedisStore from "connect-redis";
 import { authStorage } from "./storage";
@@ -9,6 +9,7 @@ import { users, tenantSsoConfigs } from "@shared/models/auth";
 import { db, pool } from "../../db";
 import { eq, and } from "drizzle-orm";
 import { getRedisClient } from "../../cache";
+import crypto from "crypto";
 
 export function getSession() {
   const sessionTtlMs = 7 * 24 * 60 * 60 * 1000;
@@ -58,6 +59,7 @@ export function getSession() {
 export async function setupAuth(app: Express) {
   app.set("trust proxy", 1);
   app.use(getSession());
+  app.use(csrfMiddleware);
   app.use(passport.initialize());
   app.use(passport.session());
 
@@ -245,3 +247,56 @@ export const isAuthenticated: RequestHandler = async (req, res, next) => {
 
   return next();
 };
+
+// ── CSRF Protection (Double Submit Cookie) ──────────────────────────────────────
+const CSRF_COOKIE_NAME = "XSRF-TOKEN";
+const CSRF_HEADER_NAME = "x-xsrf-token";
+const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+export function generateCsrfToken(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function parseCookies(req: Request): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return cookies;
+  cookieHeader.split(";").forEach(cookie => {
+    const [name, ...rest] = cookie.trim().split("=");
+    if (name) cookies[name] = decodeURIComponent(rest.join("="));
+  });
+  return cookies;
+}
+
+export function csrfMiddleware(req: Request, res: Response, next: NextFunction): void {
+  // Skip CSRF for API key auth (not cookie-based)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("ApiKey ")) {
+    return next();
+  }
+
+  const cookies = parseCookies(req);
+
+  // For safe methods, ensure CSRF cookie exists
+  if (CSRF_SAFE_METHODS.has(req.method)) {
+    if (!cookies[CSRF_COOKIE_NAME]) {
+      const token = generateCsrfToken();
+      res.setHeader("Set-Cookie", `${CSRF_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; ${process.env.NODE_ENV === "production" ? "Secure; " : ""}SameSite=Strict`);
+    }
+    return next();
+  }
+
+  // For state-changing methods, validate CSRF token
+  const cookieToken = cookies[CSRF_COOKIE_NAME];
+  const headerToken = req.headers[CSRF_HEADER_NAME] as string | undefined;
+
+  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+    return res.status(403).json({ message: "CSRF token mismatch" });
+  }
+
+  next();
+}
+
+export function setupCsrf(app: Express): void {
+  app.use(csrfMiddleware);
+}

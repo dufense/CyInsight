@@ -19,6 +19,11 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+function getCookie(name: string): string | undefined {
+  const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+  return match ? decodeURIComponent(match[2]) : undefined;
+}
+
 export async function apiRequest(
   method: string,
   url: string,
@@ -26,10 +31,20 @@ export async function apiRequest(
   timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const signal = createTimeoutSignal(timeoutMs);
+  const headers: Record<string, string> = {};
+  if (data) headers["Content-Type"] = "application/json";
+
+  // Include CSRF token for state-changing requests
+  const safeMethods = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+  if (!safeMethods.has(method.toUpperCase())) {
+    const csrfToken = getCookie("XSRF-TOKEN");
+    if (csrfToken) headers["x-xsrf-token"] = csrfToken;
+  }
+
   try {
     const res = await fetch(url, {
       method,
-      headers: data ? { "Content-Type": "application/json" } : {},
+      headers,
       body: data ? JSON.stringify(data) : undefined,
       credentials: "include",
       signal,
