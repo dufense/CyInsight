@@ -1051,6 +1051,37 @@ Resources:
       ScalableTargetId: !Ref AutoScalingTarget
       TimeZone: "Asia/Kolkata"
 
+  ScalingPolicyRequests:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-mgmt-${EnvironmentName}-requests"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${ALB.FullLoadBalancerName}/${ALBTargetGroup.TargetGroupFullName}"
+        TargetValue: 500.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 30
+
+  AlarmScaleOut:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-${EnvironmentName}-scale-out"
+      MetricName: RunningTaskCount
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref MaxCount
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
 Outputs:
 
   ALBDNSName:

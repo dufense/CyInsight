@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, type RefObject, type ReactNode } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
+import DOMPurify from "dompurify";
 import { Download, Image, ImageMinus, FileText, Loader2, Maximize2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -211,7 +212,7 @@ export function ExpandableChartWrapper({ title, children, actions, contentRef }:
           </DialogHeader>
           <div ref={expandedRef} className="min-h-[200px]">
             {children ? children : (
-              <div dangerouslySetInnerHTML={{ __html: clonedHtml }} />
+              <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(clonedHtml) }} />
             )}
           </div>
         </DialogContent>
