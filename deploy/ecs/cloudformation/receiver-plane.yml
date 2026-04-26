@@ -65,6 +65,18 @@ Parameters:
     MinValue: 1
     MaxValue: 20
 
+  MinCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 50
+
+  MaxCount:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 100
+
   SecretsPrefix:
     Type: String
     Default: "ccc"
@@ -85,6 +97,15 @@ Resources:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub "ccc-receiver-${EnvironmentName}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
       ClusterSettings:
         - Name: containerInsights
           Value: enabled
@@ -368,8 +389,13 @@ Resources:
       ServiceName: !Sub "ccc-receiver-plane-${EnvironmentName}"
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref TaskDefinition
-      LaunchType: FARGATE
       DesiredCount: !Ref DesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 4
+          Base: 1
+        - CapacityProvider: FARGATE
+          Weight: 1
       EnableExecuteCommand: true
       DeploymentConfiguration:
         MinimumHealthyPercent: 50

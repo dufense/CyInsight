@@ -34,56 +34,55 @@ function matchKeywords(text: string, keywords: string[]): string[] {
 }
 
 function extractIPs(event: Record<string, any>): string[] {
-  const ipFields = ["sourceIp", "source_ip", "attacker", "destinationIp", "destination_ip", "target", "clientIp"];
   const IPV4 = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g;
-  const results: string[] = [];
+  const results = new Set<string>();
   const text = JSON.stringify(event);
   const matches = text.match(IPV4) || [];
   const PRIVATE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.)/;
   for (const ip of matches) {
-    if (!PRIVATE.test(ip) && !results.includes(ip)) results.push(ip);
+    if (!PRIVATE.test(ip)) results.add(ip);
   }
-  return results.slice(0, 10);
+  return Array.from(results).slice(0, 10);
 }
 
 function extractHashes(event: Record<string, any>): string[] {
-  const hashFields = ["md5", "sha1", "sha256", "hash", "fileHash", "file_hash", "processHash"];
-  const results: string[] = [];
+  const results = new Set<string>();
   const text = JSON.stringify(event);
   const md5 = text.match(/\b[a-f0-9]{32}\b/gi) || [];
   const sha256 = text.match(/\b[a-f0-9]{64}\b/gi) || [];
   for (const h of [...md5, ...sha256]) {
-    if (!results.includes(h.toLowerCase())) results.push(h.toLowerCase());
+    results.add(h.toLowerCase());
   }
-  return results.slice(0, 5);
+  return Array.from(results).slice(0, 5);
 }
 
 function extractUsers(event: Record<string, any>): string[] {
   const userFields = ["userName", "user_name", "user", "userId", "accountName", "actor", "principal"];
-  const results: string[] = [];
+  const results = new Set<string>();
+  const skipUsers = new Set(["system", "root", "admin", "local service"]);
   for (const f of userFields) {
     const v = event[f] || event.raw_payload?.[f];
     if (v && typeof v === "string" && v.length > 1 && v.length < 100) {
       const clean = v.split("\\").pop()?.split("@")[0]?.trim() || "";
-      if (clean && !["system", "root", "admin", "local service"].includes(clean.toLowerCase()) && !results.includes(clean)) {
-        results.push(clean);
+      if (clean && !skipUsers.has(clean.toLowerCase())) {
+        results.add(clean);
       }
     }
   }
-  return results.slice(0, 5);
+  return Array.from(results).slice(0, 5);
 }
 
 function extractHosts(event: Record<string, any>): string[] {
   const hostFields = ["hostname", "host", "asset", "device", "computer", "endpoint", "machine"];
-  const results: string[] = [];
+  const results = new Set<string>();
   for (const f of hostFields) {
     const v = event[f] || event.raw_payload?.[f];
     if (v && typeof v === "string" && v.length > 1 && v.length < 100 && !v.includes(" ")) {
-      if (!results.includes(v)) results.push(v);
+      results.add(v);
     }
   }
-  if (event.asset && !results.includes(event.asset)) results.push(event.asset);
-  return results.slice(0, 5);
+  if (event.asset) results.add(event.asset);
+  return Array.from(results).slice(0, 5);
 }
 
 function extractDomains(event: Record<string, any>): string[] {
@@ -91,12 +90,12 @@ function extractDomains(event: Record<string, any>): string[] {
   const SAFE = new Set(["microsoft.com", "google.com", "amazon.com", "cloudflare.com", "windows.com"]);
   const text = JSON.stringify(event);
   const matches = text.match(DOMAIN_RE) || [];
-  const results: string[] = [];
+  const results = new Set<string>();
   for (const d of matches) {
     const lower = d.toLowerCase();
-    if (!SAFE.has(lower) && !results.includes(lower)) results.push(lower);
+    if (!SAFE.has(lower)) results.add(lower);
   }
-  return results.slice(0, 5);
+  return Array.from(results).slice(0, 5);
 }
 
 function scoreSignals(signals: SignalResult[]): number {

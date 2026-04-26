@@ -275,9 +275,13 @@ export function GlobalSearch() {
           q: searchQuery,
           ...(tenantId ? { tenantId: String(tenantId) } : {}),
         });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30_000);
         const res = await fetch(`/api/global-search?${params}`, {
           credentials: "include",
+          signal: controller.signal,
         });
+        clearTimeout(timeout);
         if (res.ok) {
           const data: GlobalSearchResults = await res.json();
           let allResults = transformResults(data, currentTenant?.id || null);

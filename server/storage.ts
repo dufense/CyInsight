@@ -513,39 +513,20 @@ export class DatabaseStorage implements IStorage {
     } catch { return null; }
   }
 
-  // Live dual-write: fire-and-forget, non-fatal. Called from createIncident /
-  // updateIncident on the hot path — we never want a CH outage to block a
-  // storage call. Anything missed here will be picked up by the next sweep.
+  // Live dual-write: write to outbox for background worker processing.
+  // This prevents data loss during CH outages.
   static chDualWriteIncidents(rows: Incident[]): void {
     if (rows.length === 0) return;
-    void DatabaseStorage.getChClientForIncidents().then(async (chClient) => {
-      if (!chClient) return;
-      const payload = DatabaseStorage.toIncidentPayload(rows);
-      if (payload.length === 0) return;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          await chClient.insertIncidents(payload);
-          return;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const transient =
-            msg.includes("timeout") ||
-            msg.includes("ECONNREFUSED") ||
-            msg.includes("ECONNRESET") ||
-            msg.includes("ETIMEDOUT") ||
-            msg.includes("ENOTFOUND") ||
-            /\b5\d\d\b/.test(msg);
-          if (transient && attempt < 3) {
-            const delay = 500 * attempt;
-            console.warn(`[Storage] ClickHouse incident write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
-            await new Promise((r) => setTimeout(r, delay));
-          } else {
-            console.warn(`[Storage] ClickHouse incident write error (non-fatal, giving up): ${msg}`);
-            return;
-          }
-        }
+    const payload = DatabaseStorage.toIncidentPayload(rows);
+    if (payload.length === 0) return;
+    void (async () => {
+      try {
+        const values = payload.map(p => `('incidents', '${JSON.stringify(p).replace(/'/g, "''")}'::jsonb)`).join(",");
+        await pool.query(`INSERT INTO ch_outbox (table_name, payload_json) VALUES ${values}`);
+      } catch (err) {
+        console.warn(`[Storage] Outbox incident insert error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
       }
-    });
+    })();
   }
 
   // Awaitable variant: throws on insert failure. Used by the sweeper and
@@ -989,7 +970,8 @@ export class DatabaseStorage implements IStorage {
     const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     const rows = await db.select({ dedupHash: incidents.dedupHash })
       .from(incidents)
-      .where(and(eq(incidents.tenantId, tenantId), sql`${incidents.dedupHash} IS NOT NULL`, gte(incidents.createdAt, cutoff)));
+      .where(and(eq(incidents.tenantId, tenantId), sql`${incidents.dedupHash} IS NOT NULL`, gte(incidents.createdAt, cutoff)))
+      .limit(10000);
     return new Set(rows.map(r => r.dedupHash!).filter(Boolean));
   }
 
@@ -1136,19 +1118,12 @@ export class DatabaseStorage implements IStorage {
       .limit(maxRows);
   }
 
-  // ── ClickHouse dual-write helper ──────────────────────────────────────────
-  // Called after each successful PG insert so every storage path automatically
-  // mirrors events to the hot tier without per-route wiring.
+  // ── ClickHouse outbox dual-write helper ────────────────────────────────────
+  // Writes to the ch_outbox table instead of directly to ClickHouse.
+  // A background worker processes the outbox and inserts into CH.
+  // This prevents data loss during CH outages.
   private async chDualWrite(events: SecurityEvent[]): Promise<void> {
     if (events.length === 0) return;
-    let chClient: { insertEvents: (rows: unknown[]) => Promise<void> } | null = null;
-    try {
-      const m = await import("./clickhouse-client") as {
-        getClickHouseClient: () => { insertEvents: (rows: unknown[]) => Promise<void> } | null;
-      };
-      chClient = m.getClickHouseClient();
-    } catch { return; }
-    if (!chClient) return;
 
     const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
     const IPV6_RE = /^[0-9a-fA-F:]+$/;
@@ -1160,56 +1135,28 @@ export class DatabaseStorage implements IStorage {
       tenant_id:       ev.tenantId,
       event_type:      ev.eventType,
       source_type:     ev.sourceType ?? "",
-      // log_source carries the product-name identifier (e.g. "Cynet 360") used
-      // by the integration-awareness guard. The CH read path enforces the same
-      // guard against log_source, so PG and CH visibility stay in parity.
       log_source:      ev.logSource ?? "",
       severity:        ev.severity,
       host:            ev.asset ?? "",
       src_ip:          validIp(ev.attacker),
       dst_ip:          validIp(ev.target),
-      // Mirror the raw target string (hostname or IP) so the threat-globe
-      // fast-path can match offices the same way the PG path does. Without
-      // this, multi-office tenants saw all CH-path arcs collapse to the
-      // tenant's default office because dst_ip is empty for hostname targets.
       target:          ev.target ?? "",
       user_name:       ev.attacker && !validIp(ev.attacker) ? ev.attacker : "",
       mitre_tactic:    ev.mitreTactic ?? "",
       mitre_technique: ev.mitreTechnique ?? "",
       raw_event:       ev.rawPayload ? JSON.stringify(ev.rawPayload) : "",
       ingested_at:     formatChDateTime64(ev.occurredAt),
-      // Task #203: mirror the PG security_events columns the threat-flow Sankey
-      // depends on so the CH fast-path produces the same level of detail
-      // (per-threat names, per-action labels, per-recipient grouping for email).
       threat:          ev.threat ?? "",
       action:          ev.action ?? "",
       recipient:       ev.recipient ?? "",
-      // Trim long descriptions — the PG fast-path already LEFT(TRIM(description),200)s
-      // the column for the Sankey, so capping here keeps payload size bounded.
       description:     (ev.description ?? "").slice(0, 1000),
     }));
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await chClient.insertEvents(payload);
-        return;
-      } catch (err: any) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const transient =
-          msg.includes("timeout") ||
-          msg.includes("ECONNREFUSED") ||
-          msg.includes("ECONNRESET") ||
-          msg.includes("ETIMEDOUT") ||
-          msg.includes("ENOTFOUND") ||
-          /\b5\d\d\b/.test(msg);
-        if (transient && attempt < 3) {
-          const delay = 500 * attempt;
-          console.warn(`[Storage] ClickHouse write error (attempt ${attempt}/3, retrying in ${delay}ms): ${msg}`);
-          await new Promise((r) => setTimeout(r, delay));
-        } else {
-          console.warn(`[Storage] ClickHouse write error (non-fatal, giving up): ${msg}`);
-          return;
-        }
-      }
+
+    try {
+      const values = payload.map(p => `('security_events', '${JSON.stringify(p).replace(/'/g, "''")}'::jsonb)`).join(",");
+      await pool.query(`INSERT INTO ch_outbox (table_name, payload_json) VALUES ${values}`);
+    } catch (err: any) {
+      console.warn(`[Storage] Outbox insert error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1891,6 +1838,8 @@ export class DatabaseStorage implements IStorage {
     };
     const interval = intervals[timeRange];
     if (!interval) return sql``;
+    const allowedCols = ["occurred_at", "created_at", "updated_at", "resolved_at", "detected_at"];
+    if (!allowedCols.includes(dateCol)) return sql``;
     return sql.raw(` AND ${dateCol} >= NOW() - INTERVAL '${interval}'`);
   }
 
@@ -1901,7 +1850,7 @@ export class DatabaseStorage implements IStorage {
     if (safeIds.length === 0) return emptyAgg;
     const tenantFilter = safeIds.length === 1
       ? sql`tenant_id = ${safeIds[0]}`
-      : sql`tenant_id = ANY(${sql.raw(`ARRAY[${safeIds.join(",")}]`)})`;
+      : sql`tenant_id = ANY(ARRAY[${sql.join(safeIds.map(id => sql`${id}`), sql`, `)}])`;
 
     const evTimeFilter = this.getTimeRangeSQL(timeRange, "occurred_at");
     const incTimeFilter = this.getTimeRangeSQL(timeRange, "created_at");
@@ -3501,7 +3450,80 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTenant(id: number): Promise<void> {
-    await db.update(tenants).set({ parentId: null }).where(eq(tenants.parentId, id));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query("UPDATE tenants SET parent_id = NULL WHERE parent_id = $1", [id]);
+
+      const projectRes = await client.query("SELECT id FROM projects WHERE tenant_id = $1", [id]);
+      const projectIds = projectRes.rows.map((r: any) => r.id);
+      if (projectIds.length > 0) {
+        for (const pid of projectIds) {
+          await client.query("DELETE FROM activity_logs WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_activities WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_raci WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_risks WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM project_scope WHERE project_id = $1", [pid]);
+          await client.query("DELETE FROM tasks WHERE project_id = $1", [pid]);
+        }
+        await client.query("DELETE FROM projects WHERE tenant_id = $1", [id]);
+      }
+
+      const ticketRes = await client.query("SELECT id FROM tickets WHERE tenant_id = $1", [id]);
+      const ticketIds = ticketRes.rows.map((r: any) => r.id);
+      if (ticketIds.length > 0) {
+        for (const tkid of ticketIds) {
+          await client.query("DELETE FROM ticket_attachments WHERE ticket_id = $1", [tkid]);
+          await client.query("DELETE FROM ticket_comments WHERE ticket_id = $1", [tkid]);
+          await client.query("DELETE FROM ticket_feedback WHERE ticket_id = $1", [tkid]);
+        }
+        await client.query("DELETE FROM tickets WHERE tenant_id = $1", [id]);
+      }
+
+      const serviceRes = await client.query("SELECT id FROM services WHERE tenant_id = $1", [id]);
+      if (serviceRes.rows.length > 0) {
+        for (const svc of serviceRes.rows) {
+          await client.query("DELETE FROM sla_definitions WHERE service_id = $1", [svc.id]);
+        }
+        await client.query("DELETE FROM services WHERE tenant_id = $1", [id]);
+      }
+
+      await client.query("DELETE FROM shift_rosters WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ai_agent_activity_logs WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM project_raci WHERE team_member_id IN (SELECT id FROM team_members WHERE tenant_id = $1)", [id]);
+      await client.query("DELETE FROM team_members WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM incidents WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM security_events WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM assets WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM user_assets WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM reports WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM report_schedules WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM documents WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM security_integrations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM licenses WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenant_users WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ai_investigations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM analyst_feedback WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM cloud_app_risk_attributes WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM data_retention_policies WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM email_configurations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM incident_notifications WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM infrastructure_locations WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ingest_api_keys WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM ingest_batches WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM risk_scores WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenant_security_tools WHERE tenant_id = $1", [id]);
+      await client.query("DELETE FROM tenants WHERE id = $1", [id]);
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
     const projectList = await db.select({ id: projects.id }).from(projects).where(eq(projects.tenantId, id));
     const projectIds = projectList.map(p => p.id);
@@ -3749,7 +3771,7 @@ export class DatabaseStorage implements IStorage {
   async getAssetsByHostnames(tenantId: number, hostnames: string[]): Promise<Asset[]> {
     if (hostnames.length === 0) return [];
     const lowerHostnames = hostnames.map(h => h.toLowerCase());
-    return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames)));
+    return db.select().from(assets).where(and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, lowerHostnames))).limit(1000);
   }
 
   async getAssetsByHostnamesLight(tenantId: number, hostnames: string[]): Promise<any[]> {
@@ -3764,7 +3786,7 @@ export class DatabaseStorage implements IStorage {
       const chunk = lowerHostnames.slice(i, i + CHUNK);
       const rows = await db.select(lightCols).from(assets).where(
         and(eq(assets.tenantId, tenantId), inArray(sql`LOWER(${assets.hostname})`, chunk))
-      );
+      ).limit(1000);
       results.push(...rows);
     }
     return results;

@@ -10,6 +10,15 @@ let dailySummariesRunning = false;
 let responsesRunning = false;
 let notificationsRunning = false;
 let resolutionsRunning = false;
+const _intervalHandles: NodeJS.Timeout[] = [];
+
+export function clearSchedulerIntervals(): void {
+  for (const handle of _intervalHandles) {
+    clearInterval(handle);
+  }
+  _intervalHandles.length = 0;
+  schedulerRunning = false;
+}
 
 async function schedulerQuery(sql: string, params?: any[]): Promise<any> {
   const client = await pool.connect();
@@ -24,10 +33,12 @@ async function schedulerQuery(sql: string, params?: any[]): Promise<any> {
 }
 
 function scheduleInterval(fn: () => Promise<void>, interval: number, firstDelay: number): void {
-  setTimeout(() => {
+  const timeout = setTimeout(() => {
     fn().catch(() => {});
-    setInterval(() => fn().catch(() => {}), interval);
+    const intv = setInterval(() => fn().catch(() => {}), interval);
+    _intervalHandles.push(intv);
   }, firstDelay);
+  _intervalHandles.push(timeout);
 }
 
 export function startAIAgentScheduler(): void {

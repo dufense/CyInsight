@@ -45,7 +45,10 @@ export function ThreatMapMini({ height = 280 }: { height?: number }) {
   const { data, isLoading } = useQuery<ThreatMapResponse>({
     queryKey: ["/api/threat-map/arcs", tenantId, "168"],
     queryFn: async () => {
-      const res = await fetch(`/api/threat-map/arcs?tenantId=${tenantId}&hours=168`, { credentials: "include" });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      const res = await fetch(`/api/threat-map/arcs?tenantId=${tenantId}&hours=168`, { credentials: "include", signal: controller.signal });
+      clearTimeout(timeout);
       return res.json();
     },
     enabled: !!tenantId,

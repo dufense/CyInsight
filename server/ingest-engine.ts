@@ -6,23 +6,42 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_EVENTS = 1000;
 
 const rateLimitMap = new Map<number, { count: number; windowStart: number }>();
+const rateLimitLocks = new Map<number, Promise<void>>();
 
-export function checkRateLimit(tenantId: number, eventCount: number): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-  let entry = rateLimitMap.get(tenantId);
-
-  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    entry = { count: 0, windowStart: now };
-    rateLimitMap.set(tenantId, entry);
+async function acquireTenantLock(tenantId: number): Promise<() => void> {
+  while (rateLimitLocks.has(tenantId)) {
+    await rateLimitLocks.get(tenantId);
   }
+  let release: () => void;
+  const lock = new Promise<void>(resolve => { release = resolve; });
+  rateLimitLocks.set(tenantId, lock);
+  return () => {
+    rateLimitLocks.delete(tenantId);
+    release!();
+  };
+}
 
-  const remaining = RATE_LIMIT_MAX_EVENTS - entry.count;
-  if (eventCount > remaining) {
-    return { allowed: false, remaining };
+export async function checkRateLimit(tenantId: number, eventCount: number): Promise<{ allowed: boolean; remaining: number }> {
+  const release = await acquireTenantLock(tenantId);
+  try {
+    const now = Date.now();
+    let entry = rateLimitMap.get(tenantId);
+
+    if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+      entry = { count: 0, windowStart: now };
+      rateLimitMap.set(tenantId, entry);
+    }
+
+    const remaining = RATE_LIMIT_MAX_EVENTS - entry.count;
+    if (eventCount > remaining) {
+      return { allowed: false, remaining };
+    }
+
+    entry.count += eventCount;
+    return { allowed: true, remaining: remaining - eventCount };
+  } finally {
+    release();
   }
-
-  entry.count += eventCount;
-  return { allowed: true, remaining: remaining - eventCount };
 }
 
 export function generateApiKey(): { rawKey: string; keyHash: string; keyPrefix: string } {

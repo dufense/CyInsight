@@ -237,18 +237,10 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 200 * 1024 * 1024 } });
 
 
-let heavyQueryRunning = 0;
-const MAX_CONCURRENT_HEAVY = 2;
+import pLimit from "p-limit";
+const heavyQueryLimit = pLimit(2);
 async function withHeavyQueryLimit<T>(fn: () => Promise<T>): Promise<T> {
-  while (heavyQueryRunning >= MAX_CONCURRENT_HEAVY) {
-    await new Promise(r => setTimeout(r, 100));
-  }
-  heavyQueryRunning++;
-  try {
-    return await fn();
-  } finally {
-    heavyQueryRunning--;
-  }
+  return heavyQueryLimit(fn);
 }
 
 const openai = createAIClient();
@@ -1803,7 +1795,7 @@ export async function registerRoutes(
     res.json({ success: true });
   });
 
-  app.post("/api/admin/purge-simulated-data", async (req: any, res) => {
+  app.post("/api/admin/purge-simulated-data", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isSuperAdminUser = req.session?.isSuperAdmin;
       let isAdminRole = false;
@@ -2087,7 +2079,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tenant-admin/tenants", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.get("/api/tenant-admin/tenants", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -2098,7 +2090,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/tenant-admin/tenants", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.post("/api/tenant-admin/tenants", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -2112,7 +2104,8 @@ export async function registerRoutes(
       if (type === "customer" && !parentId) {
         return res.status(400).json({ message: "Customer tenants require a parent MSSP" });
       }
-      const tenant = await storage.createTenant(req.body);
+      const validated = insertTenantSchema.parse(req.body);
+      const tenant = await storage.createTenant(validated);
       await deleteCachePrefix("tenants:list:");
       await deleteCachePrefix("tenants:hierarchy:");
       res.json(tenant);
@@ -2121,11 +2114,12 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/tenant-admin/tenants/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.patch("/api/tenant-admin/tenants/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tenant = await storage.updateTenant(parseInt(req.params.id), req.body);
+      const validated = insertTenantSchema.partial().parse(req.body);
+      const tenant = await storage.updateTenant(parseInt(req.params.id), validated);
       await deleteCachePrefix("tenants:list:");
       await deleteCachePrefix("tenants:hierarchy:");
       res.json(tenant);
@@ -2134,7 +2128,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/tenant-admin/tenants/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.delete("/api/tenant-admin/tenants/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -3188,7 +3182,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tenant-admin/tenant-users", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.get("/api/tenant-admin/tenant-users", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -3205,29 +3199,31 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/tenant-admin/tenant-users", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.post("/api/tenant-admin/tenant-users", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tu = await storage.createTenantUser(req.body);
+      const validated = insertTenantUserSchema.parse(req.body);
+      const tu = await storage.createTenantUser(validated);
       res.json(tu);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to create tenant user" });
     }
   });
 
-  app.patch("/api/tenant-admin/tenant-users/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.patch("/api/tenant-admin/tenant-users/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const tu = await storage.updateTenantUser(parseInt(req.params.id), req.body);
+      const validated = insertTenantUserSchema.partial().parse(req.body);
+      const tu = await storage.updateTenantUser(parseInt(req.params.id), validated);
       res.json(tu);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to update tenant user" });
     }
   });
 
-  app.delete("/api/tenant-admin/tenant-users/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.delete("/api/tenant-admin/tenant-users/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -3238,7 +3234,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tenant-admin/licenses", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.get("/api/tenant-admin/licenses", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -3254,37 +3250,39 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/tenant-admin/licenses", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.post("/api/tenant-admin/licenses", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const data = {
+      const validated = insertLicenseSchema.parse({
         ...req.body,
         startDate: new Date(req.body.startDate),
         expiresAt: new Date(req.body.expiresAt),
-      };
-      const license = await storage.createLicense(data);
+      });
+      const license = await storage.createLicense(validated);
       res.json(license);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to create license" });
     }
   });
 
-  app.patch("/api/tenant-admin/licenses/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.patch("/api/tenant-admin/licenses/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const data = { ...req.body };
-      if (data.startDate) data.startDate = new Date(data.startDate);
-      if (data.expiresAt) data.expiresAt = new Date(data.expiresAt);
-      const license = await storage.updateLicense(parseInt(req.params.id), data);
+      const validated = insertLicenseSchema.partial().parse({
+        ...req.body,
+        startDate: req.body.startDate ? new Date(req.body.startDate) : undefined,
+        expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : undefined,
+      });
+      const license = await storage.updateLicense(parseInt(req.params.id), validated);
       res.json(license);
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to update license" });
     }
   });
 
-  app.delete("/api/tenant-admin/licenses/:id", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.delete("/api/tenant-admin/licenses/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -3295,7 +3293,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tenant-admin/stats", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.get("/api/tenant-admin/stats", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const isAdmin = await assertAdminAccess(req);
       if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
@@ -6425,8 +6423,11 @@ export async function registerRoutes(
       if (!password || password.length < 6) {
         return res.status(400).json({ message: "Password must be at least 6 characters" });
       }
+      if (!password || password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(password, 10);
+      const hash = await bcrypt.hash(password, 12);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");
@@ -6456,7 +6457,7 @@ export async function registerRoutes(
       }
       const tempPassword = "SecureOps@" + Math.random().toString(36).slice(2, 10);
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(tempPassword, 10);
+      const hash = await bcrypt.hash(tempPassword, 12);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");
@@ -6563,6 +6564,29 @@ export async function registerRoutes(
     return [t - 1, t, t + 1].some(c => totpGenerate(secret, c) === token);
   }
 
+  // ── MFA Secret Encryption ──────────────────────────────────────────────────────
+  const MFA_ENC_KEY = process.env.MFA_ENCRYPTION_KEY || process.env.SESSION_SECRET || "";
+  function encryptMfaSecret(plain: string): string {
+    if (!MFA_ENC_KEY || MFA_ENC_KEY.length < 32) return plain; // fallback if key not set
+    const { createCipheriv, randomBytes, scryptSync } = require("crypto");
+    const key = scryptSync(MFA_ENC_KEY, "mfa-salt", 32);
+    const iv = randomBytes(16);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return iv.toString("hex") + ":" + authTag.toString("hex") + ":" + encrypted.toString("hex");
+  }
+  function decryptMfaSecret(cipherText: string): string {
+    if (!cipherText.includes(":")) return cipherText; // not encrypted (backward compat)
+    if (!MFA_ENC_KEY || MFA_ENC_KEY.length < 32) return cipherText;
+    const { createDecipheriv, scryptSync } = require("crypto");
+    const key = scryptSync(MFA_ENC_KEY, "mfa-salt", 32);
+    const [ivHex, authTagHex, encryptedHex] = cipherText.split(":");
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
+    decipher.setAuthTag(Buffer.from(authTagHex, "hex"));
+    return decipher.update(encryptedHex, "hex") + decipher.final("utf8");
+  }
+
   app.post("/api/auth/mfa/setup", isAuthenticated, async (req: any, res) => {
     try {
       const user = req.user as any;
@@ -6578,8 +6602,9 @@ export async function registerRoutes(
       const account = encodeURIComponent(dbUser?.username || dbUser?.email || userId);
       const otpauthUrl = `otpauth://totp/SecureOps:${account}?secret=${secret}&issuer=SecureOps&algorithm=SHA1&digits=6&period=30`;
       const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
-      await dbInstance.update(users).set({ mfaSecret: secret, updatedAt: new Date() }).where(eq(users.id, userId));
-      res.json({ secret, qrCodeUrl: qrCodeDataUrl, otpauth: otpauthUrl });
+      const encryptedSecret = encryptMfaSecret(secret);
+      await dbInstance.update(users).set({ mfaSecret: encryptedSecret, updatedAt: new Date() }).where(eq(users.id, userId));
+      res.json({ qrCodeUrl: qrCodeDataUrl });
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to setup MFA" });
     }
@@ -6597,7 +6622,8 @@ export async function registerRoutes(
       const { eq } = await import("drizzle-orm");
       const [dbUser] = await dbInstance.select().from(users).where(eq(users.id, userId));
       if (!dbUser?.mfaSecret) return res.status(400).json({ message: "MFA not set up" });
-      const isValid = totpVerify(token, dbUser.mfaSecret);
+      const plainSecret = decryptMfaSecret(dbUser.mfaSecret);
+      const isValid = totpVerify(token, plainSecret);
       if (!isValid) return res.status(400).json({ message: "Invalid MFA code" });
       await dbInstance.update(users).set({ mfaEnabled: true, updatedAt: new Date() }).where(eq(users.id, userId));
       res.json({ message: "MFA enabled successfully" });
@@ -24229,7 +24255,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         return res.status(400).json({ message: "No events found in payload" });
       }
 
-      const rateCheck = checkRateLimit(tenantId, events.length);
+      const rateCheck = await checkRateLimit(tenantId, events.length);
       if (!rateCheck.allowed) {
         return res.status(429).json({
           message: "Rate limit exceeded",

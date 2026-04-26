@@ -50,7 +50,7 @@ USER appuser
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/_health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1
 
 # Use start-prod.js (cluster manager) instead of running the CJS bundle directly.
 # It respects CLUSTER_WORKERS_MAX for Fargate memory safety and sends SIGTERM

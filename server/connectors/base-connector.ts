@@ -140,6 +140,10 @@ export abstract class BaseConnector {
           data = await response.text();
         }
 
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+        }
+
         return { status: response.status, data, latencyMs };
       } catch (error: any) {
         const latencyMs = Date.now() - startTime;

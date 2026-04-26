@@ -708,7 +708,7 @@ Resources:
           HealthCheck:
             Command:
               - CMD-SHELL
-              - "wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1"
+              - "wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1"
             Interval: 30
             Timeout: 5
             Retries: 3
@@ -867,7 +867,7 @@ Resources:
       TargetType: ip
       VpcId:
         Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
-      HealthCheckPath: /health
+      HealthCheckPath: /healthz
       HealthCheckPort: "5000"
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 2
@@ -979,7 +979,7 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: 65
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 30
 
   ScalingPolicyMemory:
@@ -992,8 +992,60 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageMemoryUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 30
+
+  # ── Scheduled Scaling ──────────────────────────────────────────────────────────
+  ScaleDownNightAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 1
+        MaxCapacity: 60
+      Schedule: "cron(0 20 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
+
+  ScaleUpMorningAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 3
+        MaxCapacity: 60
+      Schedule: "cron(0 8 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
+
+  ScalingPolicyRequests:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-dp-${DataPlaneRegion}-${EnvironmentName}-requests"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${DataPlaneALB.FullLoadBalancerName}/${DataPlaneTargetGroup.TargetGroupFullName}"
+        TargetValue: 500.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 30
+
+  AlarmScaleOut:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-dp-${DataPlaneRegion}-${EnvironmentName}-scale-out"
+      MetricName: RunningTaskCount
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref MaxCount
+      ComparisonOperator: GreaterThanOrEqualToThreshold
 
 Outputs:
 
