@@ -2,6 +2,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import type { Express, Request, Response, NextFunction } from "express";
 import { makeRateLimitStore } from "./cache";
+import { logger } from "./logger";
 
 export function applySecurityMiddleware(app: Express) {
   app.set("trust proxy", 1);
@@ -164,7 +165,7 @@ export function securityAuditLogger(req: Request, _res: Response, next: NextFunc
 
   for (const pattern of suspiciousPatterns) {
     if (pattern.test(toCheck)) {
-      console.warn(`[Security] Suspicious request from ${req.ip} to ${req.method} ${req.path}`);
+      logger.warn("Suspicious request detected", { ip: req.ip, method: req.method, path: req.path });
       break;
     }
   }
