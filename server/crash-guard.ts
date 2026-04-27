@@ -136,14 +136,19 @@ export function startMemoryMonitor(intervalMs = 30_000): void {
 
   _memMonitorHandle = setInterval(() => {
     const mem = process.memoryUsage();
+    const v8 = require("v8");
+    const heapStats = v8.getHeapStatistics();
     const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
     const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024);
+    const heapSizeLimitMB = Math.round(heapStats.heap_size_limit / 1024 / 1024);
     const rssMB = Math.round(mem.rss / 1024 / 1024);
-    const ratio = mem.heapUsed / mem.heapTotal;
+    // Use heap_size_limit (V8 max heap) rather than heapTotal (committed pages)
+    // to avoid false positives when V8 keeps committed pages tight.
+    const ratio = mem.heapUsed / heapStats.heap_size_limit;
 
     if (ratio >= MEMORY_CRITICAL_RATIO) {
       console.error(
-        `[CrashGuard][Memory] CRITICAL: heap ${heapUsedMB}/${heapTotalMB}MB (${Math.round(ratio * 100)}%), RSS=${rssMB}MB` +
+        `[CrashGuard][Memory] CRITICAL: heap ${heapUsedMB}/${heapTotalMB}MB (limit=${heapSizeLimitMB}MB, ${Math.round(ratio * 100)}%), RSS=${rssMB}MB` +
         ` — forcing global.gc() if available`
       );
       if (typeof (global as any).gc === "function") {
@@ -152,7 +157,7 @@ export function startMemoryMonitor(intervalMs = 30_000): void {
       }
     } else if (ratio >= MEMORY_WARN_RATIO) {
       console.warn(
-        `[CrashGuard][Memory] WARNING: heap ${heapUsedMB}/${heapTotalMB}MB (${Math.round(ratio * 100)}%), RSS=${rssMB}MB`
+        `[CrashGuard][Memory] WARNING: heap ${heapUsedMB}/${heapTotalMB}MB (limit=${heapSizeLimitMB}MB, ${Math.round(ratio * 100)}%), RSS=${rssMB}MB`
       );
     }
 

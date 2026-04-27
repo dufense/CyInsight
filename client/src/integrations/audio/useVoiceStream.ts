@@ -30,11 +30,15 @@ export function useVoiceStream(callbacks: StreamCallbacks = {}) {
         fileReader.readAsDataURL(audioBlob);
       });
 
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ audio: base64Audio }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       if (!response.ok) throw new Error("Voice request failed");
 
       const streamReader = response.body?.getReader();

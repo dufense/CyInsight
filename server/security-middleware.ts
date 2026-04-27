@@ -2,6 +2,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import type { Express, Request, Response, NextFunction } from "express";
 import { makeRateLimitStore } from "./cache";
+import { logger } from "./logger";
 
 export function applySecurityMiddleware(app: Express) {
   app.set("trust proxy", 1);
@@ -129,6 +130,24 @@ export function applySecurityMiddleware(app: Express) {
   }
 }
 
+const SENSITIVE_FIELDS = ["password", "token", "mfaToken", "secret", "apiKey", "code", "mfaSecret", "passwordHash", "refreshToken", "sessionId"];
+
+function redactSensitive(obj: any): any {
+  if (!obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(redactSensitive);
+  const result: any = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (SENSITIVE_FIELDS.some(f => key.toLowerCase().includes(f.toLowerCase()))) {
+      result[key] = "[REDACTED]";
+    } else if (typeof value === "object" && value !== null) {
+      result[key] = redactSensitive(value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 export function securityAuditLogger(req: Request, _res: Response, next: NextFunction) {
   const suspiciousPatterns = [
     /(\bOR\b|\bAND\b)\s+[\d'"]+=\s*[\d'"]+/i,
@@ -137,15 +156,16 @@ export function securityAuditLogger(req: Request, _res: Response, next: NextFunc
     /\.\.\//,
     /\x00/,
   ];
+  const bodyForLog = typeof req.body === "string" ? req.body : JSON.stringify(redactSensitive(req.body) || {});
   const toCheck = [
     req.url,
     JSON.stringify(req.query),
-    typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}),
+    bodyForLog,
   ].join(" ");
 
   for (const pattern of suspiciousPatterns) {
     if (pattern.test(toCheck)) {
-      console.warn(`[Security] Suspicious request from ${req.ip} to ${req.method} ${req.path}`);
+      logger.warn("Suspicious request detected", { ip: req.ip, method: req.method, path: req.path });
       break;
     }
   }

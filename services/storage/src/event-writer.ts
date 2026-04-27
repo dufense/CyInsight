@@ -70,18 +70,21 @@ const BATCH_SIZE = 500;
 async function tryClickHouseDualWrite(events: EventRecord[], insertedCount: number): Promise<void> {
   if (insertedCount === 0) return;
   let chClient: { insertEvents: (rows: unknown[]) => Promise<void> } | null = null;
+  let formatChDateTime64: ((d: Date | string | null | undefined) => string) | null = null;
   try {
     // Use a resolved absolute path to avoid relative-path ambiguity when this
     // module is loaded from different working directories.
     const chModule = await import("../../../server/clickhouse-client") as {
       getClickHouseClient: () => { insertEvents: (rows: unknown[]) => Promise<void> } | null;
+      formatChDateTime64: (d: Date | string | null | undefined) => string;
     };
     chClient = chModule.getClickHouseClient();
+    formatChDateTime64 = chModule.formatChDateTime64;
   } catch {
     // Module not found (e.g. standalone storage service build) — skip silently.
     return;
   }
-  if (!chClient) return;
+  if (!chClient || !formatChDateTime64) return;
 
   const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
   const IPV6_RE = /^[0-9a-fA-F:]+$/;
@@ -101,7 +104,7 @@ async function tryClickHouseDualWrite(events: EventRecord[], insertedCount: numb
     mitre_tactic:    e.mitreTactic ?? "",
     mitre_technique: e.mitreTechnique ?? "",
     raw_event:       e.rawPayload ? JSON.stringify(e.rawPayload) : "",
-    ingested_at:     e.occurredAt ?? new Date().toISOString(),
+    ingested_at:     formatChDateTime64(e.occurredAt ?? new Date()),
   }));
 
   chClient.insertEvents(chPayload).catch((err: Error) => {

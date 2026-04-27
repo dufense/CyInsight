@@ -914,7 +914,7 @@ Resources:
       TargetType: ip
       VpcId:
         Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
-      HealthCheckPath: /health
+      HealthCheckPath: /healthz
       HealthCheckPort: "5000"
       HealthCheckProtocol: HTTP
       HealthCheckIntervalSeconds: 30
@@ -1014,7 +1014,7 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 60
 
   ScalingPolicyMemory:
@@ -1027,8 +1027,60 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageMemoryUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 60
+
+  # ── Scheduled Scaling ──────────────────────────────────────────────────────────
+  ScaleDownNightAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 1
+        MaxCapacity: 30
+      Schedule: "cron(0 20 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
+
+  ScaleUpMorningAction:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Properties:
+      ScalableTargetAction:
+        MinCapacity: 3
+        MaxCapacity: 30
+      Schedule: "cron(0 8 * * ? *)"
+      ScalableTargetId: !Ref AutoScalingTarget
+      TimeZone: "Asia/Kolkata"
+
+  ScalingPolicyRequests:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "ccc-mgmt-${EnvironmentName}-requests"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${ALB.FullLoadBalancerName}/${ALBTargetGroup.TargetGroupFullName}"
+        TargetValue: 500.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 30
+
+  AlarmScaleOut:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ccc-${EnvironmentName}-scale-out"
+      MetricName: RunningTaskCount
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref MaxCount
+      ComparisonOperator: GreaterThanOrEqualToThreshold
 
 Outputs:
 
