@@ -600,6 +600,20 @@ Resources:
                   - elasticfilesystem:ClientMount
                   - elasticfilesystem:ClientWrite
                 Resource: !GetAtt ClickHouseEFS.Arn
+        - PolicyName: ClickHouseS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/clickhouse/*"
 
   ClickHouseTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -636,6 +650,49 @@ Resources:
               Value: default
             - Name: CLICKHOUSE_PASSWORD
               Value: !Ref DBPassword
+            - Name: CH_S3_BUCKET
+              Value: !Ref DataBucket
+            - Name: CH_S3_REGION
+              Value: !Ref AWS::Region
+          Command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /etc/clickhouse-server/config.d /var/lib/clickhouse/metadata/s3_warm /var/lib/clickhouse/caches/s3_warm
+              cat > /etc/clickhouse-server/config.d/storage.xml << XMLEOF
+              <clickhouse>
+                <storage_configuration>
+                  <disks>
+                    <s3_warm>
+                      <type>s3</type>
+                      <endpoint>https://s3.${CH_S3_REGION}.amazonaws.com/${CH_S3_BUCKET}/clickhouse/warm/</endpoint>
+                      <region>${CH_S3_REGION}</region>
+                      <use_environment_credentials>true</use_environment_credentials>
+                      <metadata_path>/var/lib/clickhouse/metadata/s3_warm/</metadata_path>
+                      <cache_path>/var/lib/clickhouse/caches/s3_warm/</cache_path>
+                      <cache_enabled>true</cache_enabled>
+                      <cache_max_size>5368709120</cache_max_size>
+                    </s3_warm>
+                  </disks>
+                  <policies>
+                    <ccc_tiered>
+                      <volumes>
+                        <hot>
+                          <disk>default</disk>
+                          <max_data_part_size_bytes>10737418240</max_data_part_size_bytes>
+                        </hot>
+                        <warm>
+                          <disk>s3_warm</disk>
+                          <move_factor>0.2</move_factor>
+                          <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
+                        </warm>
+                      </volumes>
+                    </ccc_tiered>
+                  </policies>
+                </storage_configuration>
+              </clickhouse>
+              XMLEOF
+              exec /entrypoint.sh
           MountPoints:
             - SourceVolume: clickhouse-data
               ContainerPath: /var/lib/clickhouse
@@ -701,6 +758,18 @@ Resources:
             Status: Enabled
             Transitions:
               - TransitionInDays: 365
+                StorageClass: GLACIER
+          - Id: CHWarmToIA
+            Status: Enabled
+            Prefix: clickhouse/warm/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+          - Id: CHColdToGlacier
+            Status: Enabled
+            Prefix: clickhouse/cold/
+            Transitions:
+              - TransitionInDays: 90
                 StorageClass: GLACIER
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true

@@ -45962,8 +45962,57 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         return { pgTotal: parseInt(cntPg.rows[0].count, 10), pgRows: dataPg.rows };
       };
 
-      // ── OFFLINE mode OR BOTH mode spanning cold tier ──
-      if (isOfflineOnly || (isBoth && spansCold)) {
+      // ── ClickHouse dispatch for ALL modes (live, offline, both) ────────────
+      // ClickHouse with S3 tiering can handle the full date range — hot parts
+      // are read from EFS, warm parts from S3 automatically. For live mode we
+      // still restrict to the hot window; for offline/both we allow the full
+      // range so historical investigations query CH instead of PG.
+      const chClient = getClickHouseClient();
+      if (chClient) {
+        try {
+          const chConditions: string[] = [`tenant_id = ${tId}`];
+          // Live mode: restrict to hot window (0-90 days)
+          // Offline/Both mode: no hot restriction — CH reads from S3 for old parts
+          if (isLiveOnly) {
+            const hotCutoffStr = formatChDateTime64(hotCutoff);
+            chConditions.push(`occurred_at >= '${hotCutoffStr}'`);
+          }
+          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
+          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
+          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
+          if (search) {
+            const sch = search.replace(/'/g, "''");
+            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
+          }
+          if (entityFilter) {
+            const ef = entityFilter.replace(/'/g, "''");
+            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
+          }
+          const chWhere = chConditions.join(" AND ");
+          const [cntRows, dataRows] = await Promise.all([
+            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
+            chClient.queryRows<Record<string, unknown>>(
+              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
+                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
+                      ai_reasoning, parse_confidence, incident_id
+               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
+            ),
+          ]);
+          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
+          rows = dataRows;
+          tier = isOfflineOnly ? "cold" : isBoth ? "hot+cold" : "hot";
+        } catch (chErr: any) {
+          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
+        }
+      }
+
+      // ── Offline/Both mode: async cache when CH unavailable ─────────────────
+      // When ClickHouse is not configured or failed, we fall back to the legacy
+      // async pattern: Athena first (if configured), then PG full scan.
+      // The async cache lets the UI poll for results.
+      if ((isOfflineOnly || (isBoth && spansCold)) && rows.length === 0 && total === 0) {
         const athenaClient = await getAthenaClient(pool);
         if (athenaClient) {
           try {
@@ -46038,47 +46087,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         });
       }
 
-      // ── LIVE mode: dispatch to ClickHouse if available ──
-      const chClient = getClickHouseClient();
-      if (isLiveOnly && chClient) {
-        try {
-          const hotCutoffStr = formatChDateTime64(hotCutoff);
-          const chConditions: string[] = [
-            `tenant_id = ${tId}`,
-            `occurred_at >= '${hotCutoffStr}'`,
-          ];
-          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
-          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
-          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
-          if (search) {
-            const sch = search.replace(/'/g, "''");
-            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
-          }
-          if (entityFilter) {
-            const ef = entityFilter.replace(/'/g, "''");
-            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
-          }
-          const chWhere = chConditions.join(" AND ");
-          const [cntRows, dataRows] = await Promise.all([
-            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
-            chClient.queryRows<Record<string, unknown>>(
-              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
-                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
-                      ai_reasoning, parse_confidence, incident_id
-               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
-            ),
-          ]);
-          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
-          rows = dataRows;
-          tier = "hot";
-        } catch (chErr: any) {
-          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
-        }
-      }
-
-      // ── PG fallback for live mode (without ClickHouse) ──
+      // ── Live mode PG fallback (when CH unavailable) ────────────────────────
       if (rows.length === 0 && total === 0) {
         const { pgTotal, pgRows } = await runPgHotQuery(true); // hotOnly=true: restrict to 90-day window
         total = pgTotal;
