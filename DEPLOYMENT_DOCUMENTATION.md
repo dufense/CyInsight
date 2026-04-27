@@ -550,5 +550,103 @@ Six retry/recovery layers were added to eliminate data loss during transient out
 
 ---
 
+## 14. Cold-Tier Forensics (Athena) Setup
+
+### 14.1 Overview
+The Log Investigation module supports querying security events older than 90 days via AWS Athena against the S3 data lake. This requires Athena credentials stored in the `platform_integrations` table.
+
+### 14.2 Required Credentials
+
+| Integration Key | Value | Example |
+|-----------------|-------|---------|
+| `FORENSICS_AWS_ACCESS_KEY` | IAM access key with Athena + S3 read access | `AKIA...` |
+| `FORENSICS_AWS_SECRET_KEY` | Matching secret key | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
+| `FORENSICS_AWS_REGION` | AWS region where Athena is deployed | `us-east-1` |
+| `FORENSICS_ATHENA_DATABASE` | Glue catalog database name | `ccc_security_events` |
+| `FORENSICS_ATHENA_RESULTS_BUCKET` | S3 bucket for Athena query results | `s3://ccc-athena-results-production` |
+| `FORENSICS_ATHENA_WORKGROUP` | Athena workgroup (optional) | `ccc-forensics-production` |
+
+### 14.3 Insert / Update Credentials
+
+Run the following SQL against the application PostgreSQL database (replace values with your actual credentials):
+
+```sql
+-- Insert or update Athena credentials
+INSERT INTO platform_integrations (name, api_key, enabled, created_at, updated_at)
+VALUES
+  ('FORENSICS_AWS_ACCESS_KEY',       'AKIA...', true, NOW(), NOW()),
+  ('FORENSICS_AWS_SECRET_KEY',       'wJalrXU...', true, NOW(), NOW()),
+  ('FORENSICS_AWS_REGION',           'us-east-1', true, NOW(), NOW()),
+  ('FORENSICS_ATHENA_DATABASE',      'ccc_security_events', true, NOW(), NOW()),
+  ('FORENSICS_ATHENA_RESULTS_BUCKET','s3://ccc-athena-results-production', true, NOW(), NOW()),
+  ('FORENSICS_ATHENA_WORKGROUP',     'ccc-forensics-production', true, NOW(), NOW())
+ON CONFLICT (name) DO UPDATE SET
+  api_key = EXCLUDED.api_key,
+  enabled = true,
+  updated_at = NOW();
+```
+
+### 14.4 Verify Configuration
+
+1. **Restart the ECS tasks** so the credential cache is cleared (credentials are loaded lazily but cached for the lifetime of the process).
+2. Open Log Investigation → switch to the **Cold Tier** tab.
+3. Run a sample query. If credentials are missing, the UI will show:
+   > "Cold-tier queries require Athena credentials (FORENSICS_AWS_* in platform_integrations). Use POST /api/forensics/query for full forensic access."
+
+### 14.5 IAM Policy (Minimal)
+
+The IAM user/role needs at minimum:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:StopQueryExecution"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ccc-security-events-*",
+        "arn:aws:s3:::ccc-security-events-*/*",
+        "arn:aws:s3:::ccc-athena-results-*",
+        "arn:aws:s3:::ccc-athena-results-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetDatabase"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### 14.6 Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "Cold-tier queries require Athena credentials" | Missing or disabled integration keys | Insert keys via SQL above and restart ECS tasks |
+| `ThrottlingException` | Too many concurrent Athena queries | Reduce `maxConcurrentQueries` or add Athena workgroup limits |
+| Query timeout (30s+) | Large S3 scan or cold start | Increase `timeoutMs` in query options or add partition filters (`event_date`) |
+| `AccessDenied` on S3 | IAM policy missing S3 permissions | Attach the minimal IAM policy above |
+
+---
+
 *Document generated: April 20, 2026*
 *Maintainer: DevOps / Platform Team*
