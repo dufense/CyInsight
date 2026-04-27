@@ -16,6 +16,8 @@ import {
   globalErrorHandler,
   drainConnections,
   clearAllIntervals,
+  safeSetInterval,
+  safeSetTimeout,
 } from "./crash-guard";
 
 import { pool } from "./db";
@@ -23,27 +25,12 @@ import pg from "pg";
 import { ensureQuotaTable } from "./quota-engine";
 import { initClickHouseSchema } from "./clickhouse-client";
 
-// ── Global interval registry ────────────────────────────────────────────────────
-const _globalIntervals: NodeJS.Timeout[] = [];
-
-function trackedSetInterval(fn: () => void | Promise<void>, ms: number): NodeJS.Timeout {
-  const handle = setInterval(fn, ms);
-  _globalIntervals.push(handle);
-  return handle;
-}
-
-function trackedSetTimeout(fn: () => void | Promise<void>, ms: number): NodeJS.Timeout {
-  const handle = setTimeout(fn, ms);
-  _globalIntervals.push(handle);
-  return handle;
-}
-
 // ── TAXII Poll Scheduler ───────────────────────────────────────────────────────
 async function startTaxiiPollScheduler(): Promise<void> {
   const { ensureTaxiiTables, loadTaxiiServerConfigs, pollTaxiiServer } = await import("./taxii-client");
   await ensureTaxiiTables();
 
-  trackedSetTimeout(async () => {
+  safeSetTimeout(async () => {
     try {
       const configs = await loadTaxiiServerConfigs();
       for (const cfg of configs) {
@@ -54,9 +41,10 @@ async function startTaxiiPollScheduler(): Promise<void> {
     } catch (e: any) {
       console.error("[TAXII] Startup poll error:", e.message);
     }
-  }, 30000);
+  }, 30000, "taxii-startup-poll");
 
-  trackedSetInterval(async () => {
+  // Periodic poll every 30 minutes — respects each server's pollIntervalHours
+  safeSetInterval(async () => {
     try {
       const configs = await loadTaxiiServerConfigs();
       const now = Date.now();
@@ -72,7 +60,7 @@ async function startTaxiiPollScheduler(): Promise<void> {
     } catch (e: any) {
       console.error("[TAXII] Scheduled poll error:", e.message);
     }
-  }, 30 * 60 * 1000);
+  }, 30 * 60 * 1000, "taxii-poll");
 }
 
 // ── OpenCTI Sync Scheduler ────────────────────────────────────────────────────
@@ -108,13 +96,13 @@ async function startOpenCTISyncScheduler(): Promise<void> {
   };
 
   // Initial stream + sync 60s after startup
-  trackedSetTimeout(async () => {
+  safeSetTimeout(async () => {
     await autoStartStream();
     await runSync();
-  }, 60000);
+  }, 60000, "opencti-startup-sync");
 
   // Re-sync every 6 hours (stream lifecycle is managed by opencti-connector reconnect)
-  trackedSetInterval(runSync, 6 * 60 * 60 * 1000);
+  safeSetInterval(runSync, 6 * 60 * 60 * 1000, "opencti-sync");
 }
 
 function isKafkaPrimaryWorker(): boolean {
@@ -416,11 +404,6 @@ httpServer.headersTimeout = 66_000;
 async function gracefulShutdown(signal: string) {
   console.log(`[Shutdown] Received ${signal} — starting graceful shutdown...`);
 
-  for (const handle of _globalIntervals) {
-    clearInterval(handle);
-    clearTimeout(handle);
-  }
-  _globalIntervals.length = 0;
   clearAllIntervals();
 
   await Promise.race([
@@ -625,7 +608,7 @@ let serverReady = false;
               }
             };
             await runOnce();
-            trackedSetInterval(runOnce, 30_000);
+            safeSetInterval(runOnce, 30_000, "ch-sweeper");
           }).catch(() => { /* startup race — ignore */ });
 
           // Task #207: one-shot backfill of `threat`/`action`/`recipient`/
@@ -650,7 +633,7 @@ let serverReady = false;
               await tryBackfill();
               // Light retry cadence — once the migration marker is written this
               // becomes a single SELECT on _migrations per tick.
-              trackedSetInterval(tryBackfill, 5 * 60_000);
+              safeSetInterval(tryBackfill, 5 * 60_000, "ch-threat-flow-backfill");
             })
             .catch(() => { /* startup race — ignore */ });
         }
@@ -714,7 +697,7 @@ let serverReady = false;
           };
           // Run immediately, then every 60s.
           await retryDlq();
-          trackedSetInterval(retryDlq, 60_000);
+          safeSetInterval(retryDlq, 60_000, "dlq-auto-retry");
         }).catch(() => { /* startup race — ignore */ });
 
         const { createPerformanceIndexes, warmUpPool } = await import("./db");

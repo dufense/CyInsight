@@ -238,7 +238,7 @@ export function circuitBreakerMiddleware(req: Request, res: Response, next: Next
 // ─── 6. Pool saturation guard ──────────────────────────────────────────────────
 
 export function startPoolSaturationMonitor(intervalMs = 15_000): void {
-  setInterval(() => {
+  safeSetInterval(() => {
     const waiting = pool.waitingCount;
     const total = pool.totalCount;
     const idle = pool.idleCount;
@@ -254,7 +254,7 @@ export function startPoolSaturationMonitor(intervalMs = 15_000): void {
         `[CrashGuard][Pool] CRITICAL: ${waiting} requests waiting for DB connection — consider increasing DB_POOL_MAX`
       );
     }
-  }, intervalMs).unref();
+  }, intervalMs, "pool-saturation");
 }
 
 // ─── 7. Request ID middleware ───────────────────────────────────────────────────
