@@ -33,6 +33,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/migration-data ./migration-data
+COPY --from=builder /app/sigma-rules ./sigma-rules
 RUN rm -f /app/migration-data/.migrated
 COPY rds-ca-bundle.pem /etc/ssl/certs/rds-ca-bundle.pem
 
