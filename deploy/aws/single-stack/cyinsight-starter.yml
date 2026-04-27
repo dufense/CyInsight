@@ -1028,8 +1028,8 @@ Resources:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     DependsOn: ECSService
     Properties:
-      MinCapacity: 2
-      MaxCapacity: 6
+      MinCapacity: 1
+      MaxCapacity: 10
       ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
       ScalableDimension: ecs:service:DesiredCount
       ServiceNamespace: ecs
@@ -1044,8 +1044,35 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: 70
-        ScaleInCooldown: 300
+        ScaleInCooldown: 60
         ScaleOutCooldown: 60
+
+  ScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "cyinsight-memory-scaling-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 75
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+
+  ScalingPolicyRequests:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "cyinsight-requests-scaling-${EnvironmentName}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${ALB.FullLoadBalancerName}/${ALBTargetGroup.TargetGroupFullName}"
+        TargetValue: 500.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 30
 
   # ============================================================================
   # CloudWatch Alarms
@@ -1084,6 +1111,23 @@ Resources:
       EvaluationPeriods: 2
       Threshold: 80
       ComparisonOperator: GreaterThanThreshold
+
+  AlarmScaleOut:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-scale-out-${EnvironmentName}"
+      MetricName: RunningTaskCount
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
 
 Outputs:
 
