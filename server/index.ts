@@ -16,6 +16,7 @@ import {
   globalErrorHandler,
   drainConnections,
   clearAllIntervals,
+  safeSetInterval,
 } from "./crash-guard";
 
 import { pool } from "./db";
@@ -42,7 +43,7 @@ async function startTaxiiPollScheduler(): Promise<void> {
   }, 30000); // 30s after startup
 
   // Periodic poll every 30 minutes — respects each server's pollIntervalHours
-  setInterval(async () => {
+  safeSetInterval(async () => {
     try {
       const configs = await loadTaxiiServerConfigs();
       const now = Date.now();
@@ -58,7 +59,7 @@ async function startTaxiiPollScheduler(): Promise<void> {
     } catch (e: any) {
       console.error("[TAXII] Scheduled poll error:", e.message);
     }
-  }, 30 * 60 * 1000);
+  }, 30 * 60 * 1000, "taxii-poll");
 }
 
 // ── OpenCTI Sync Scheduler ────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ async function startOpenCTISyncScheduler(): Promise<void> {
   }, 60000);
 
   // Re-sync every 6 hours (stream lifecycle is managed by opencti-connector reconnect)
-  setInterval(runSync, 6 * 60 * 60 * 1000);
+  safeSetInterval(runSync, 6 * 60 * 60 * 1000, "opencti-sync");
 }
 
 function isKafkaPrimaryWorker(): boolean {
@@ -579,7 +580,7 @@ let serverReady = false;
               }
             };
             await runOnce();
-            setInterval(runOnce, 30_000);
+            safeSetInterval(runOnce, 30_000, "ch-sweeper");
           }).catch(() => { /* startup race — ignore */ });
 
           // Task #207: one-shot backfill of `threat`/`action`/`recipient`/
@@ -604,7 +605,7 @@ let serverReady = false;
               await tryBackfill();
               // Light retry cadence — once the migration marker is written this
               // becomes a single SELECT on _migrations per tick.
-              setInterval(tryBackfill, 5 * 60_000);
+              safeSetInterval(tryBackfill, 5 * 60_000, "ch-threat-flow-backfill");
             })
             .catch(() => { /* startup race — ignore */ });
         }
@@ -668,7 +669,7 @@ let serverReady = false;
           };
           // Run immediately, then every 60s.
           await retryDlq();
-          setInterval(retryDlq, 60_000);
+          safeSetInterval(retryDlq, 60_000, "dlq-auto-retry");
         }).catch(() => { /* startup race — ignore */ });
 
         const { createPerformanceIndexes, warmUpPool } = await import("./db");

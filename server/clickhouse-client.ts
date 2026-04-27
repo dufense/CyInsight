@@ -252,6 +252,7 @@ export class ClickHouseClient {
   private password: string;
   private readonly database: string;
   private readonly timeoutMs: number;
+  private readonly agent: http.Agent | https.Agent;
 
   constructor(cfg: ClickHouseConfig) {
     this.url      = cfg.url;
@@ -259,6 +260,9 @@ export class ClickHouseClient {
     this.password = cfg.password;
     this.database = cfg.database ?? "ccc";
     this.timeoutMs = cfg.timeoutMs ?? 30_000;
+    const parsed = new URL(this.url);
+    const agentOpts = { keepAlive: true, maxSockets: 10, maxFreeSockets: 5, timeout: 30_000 };
+    this.agent = parsed.protocol === "https:" ? new https.Agent(agentOpts) : new http.Agent(agentOpts);
   }
 
   /**
@@ -304,7 +308,7 @@ export class ClickHouseClient {
     const headers = buildAuthHeaders(this.user, this.password);
 
     return new Promise<string>((resolve, reject) => {
-      const req = transport.get(requestUrl, { headers, timeout: this.timeoutMs }, (res) => {
+      const req = transport.get(requestUrl, { headers, timeout: this.timeoutMs, agent: this.agent }, (res) => {
         let body = "";
         res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
         res.on("end", () => {
@@ -352,6 +356,7 @@ export class ClickHouseClient {
           method: "POST",
           headers: { ...headers, "Content-Length": Buffer.byteLength(sql) },
           timeout: this.timeoutMs,
+          agent: this.agent,
         },
         (res) => {
           let body = "";
@@ -413,6 +418,7 @@ export class ClickHouseClient {
           method:   "POST",
           headers:  { ...headers, "Content-Length": Buffer.byteLength(body) },
           timeout:  this.timeoutMs,
+          agent:    this.agent,
         },
         (res) => {
           let respBody = "";

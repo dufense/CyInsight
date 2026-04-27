@@ -3494,6 +3494,7 @@ export class DatabaseStorage implements IStorage {
 
   async deleteTenant(id: number): Promise<void> {
     await db.update(tenants).set({ parentId: null }).where(eq(tenants.parentId, id));
+  }
 
   async getTenantUsersByTenant(tenantId: number): Promise<TenantUser[]> {
     return db.select().from(tenantUsers).where(eq(tenantUsers.tenantId, tenantId)).orderBy(tenantUsers.createdAt);

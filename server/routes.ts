@@ -6,6 +6,7 @@ import { pool, poolRead, logPoolStats, db, dbRead } from "./db";
 import { checkAndConsumeQuota, getTenantQuotaConfig, getAllTenantQuotaStatus, getReplicaLag, invalidateTenantQuotaCache, QUOTA_TIER_DEFAULTS } from "./quota-engine";
 import { eq, and, desc, or, inArray, sql } from "drizzle-orm";
 import { hasMarker, setMarker } from "./migration-marker";
+import { safeSetInterval } from "./crash-guard";
 import { securityEventBus, type LiveSecurityEvent } from "./event-bus";
 import { buildEntityInventory, getEntityProfile, getApplicationProfile } from "./entity-engine";
 import { computeHostRiskScore, computeUserRiskScore, computeEmailRiskScore, computeApplicationRiskScore, computeDomainRiskScore, searchEntities } from "./risk-scoring";
@@ -666,10 +667,19 @@ interface LogQueryCacheEntry {
   rows?: Record<string, unknown>[];
   total?: number;
   totalPages?: number;
+  createdAt?: number;
 }
 type LogQueryCache = Record<string, LogQueryCacheEntry>;
 const _logQueryCache: LogQueryCache = {};
 const getLogQueryCache = (): LogQueryCache => _logQueryCache;
+
+// Periodic cleanup of stale log-query cache entries (30-min TTL)
+safeSetInterval(() => {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [key, entry] of Object.entries(_logQueryCache)) {
+    if ((entry.createdAt ?? 0) < cutoff) delete _logQueryCache[key];
+  }
+}, 5 * 60_000, "log-query-cache-cleanup");
 
 export async function registerRoutes(
   httpServer: Server,
@@ -25373,7 +25383,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   async function runAssetEnrichment(tenantId: number): Promise<{ enriched: number; total: number; toolsDetected?: string[] }> {
     const enrichClient = await pool.connect();
     try {
-      await enrichClient.query('SET statement_timeout = 45000');
+      await enrichClient.query('SET statement_timeout = 120000');
 
       const assetsRes = await enrichClient.query(`SELECT id, hostname, ip_address, user_name, endpoint_group, operating_system, last_logged_in_user, software_inventory FROM assets WHERE tenant_id = $1`, [tenantId]);
       const assets = assetsRes.rows;
@@ -25704,6 +25714,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     const toolNames = detectedToolsForTenant.map(t => t.softwareName);
     return { enriched, total, toolsDetected: [...new Set(toolNames)] };
     } finally {
+      await enrichClient.query('SET statement_timeout = 0').catch(() => {});
       enrichClient.release();
     }
   }
@@ -45942,6 +45953,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
               hotRows: isBoth ? hotRows : [],
               hotTotal: isBoth ? hotTotal : 0,
               sessionId: querySessionId ?? null,
+              createdAt: Date.now(),
             };
 
             const hotPageRows = hotRows.slice(0, pageSize);
@@ -45970,6 +45982,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
           tier: isBoth ? "hot+cold" : "cold",
           sourceMode, tenantId: tId, userId: access.userId, isAthena: false,
           sessionId: querySessionId ?? null,
+          createdAt: Date.now(),
         };
         return res.json({
           rows: [], total: 0, page, pageSize, totalPages: 0,

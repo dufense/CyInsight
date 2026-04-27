@@ -9,7 +9,7 @@ function getRedis(): Redis | null {
   const url = process.env.REDIS_URL || process.env.REDIS_TLS_URL;
   if (!url) return null;
   try {
-    redisClient = new Redis(url, { lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 1 });
+    redisClient = new Redis(url, { lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 1, commandTimeout: 5_000 });
     redisClient.on("ready", () => { redisAvailable = true; });
     redisClient.on("error", () => { redisAvailable = false; });
     redisClient.connect().catch(() => { redisAvailable = false; });

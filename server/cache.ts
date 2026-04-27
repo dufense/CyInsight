@@ -15,6 +15,7 @@ import LRU from "lru-cache";
 import Redis from "ioredis";
 import { RedisStore } from "rate-limit-redis";
 import type { Store } from "express-rate-limit";
+import { safeSetInterval } from "./crash-guard";
 
 const CACHE_TTLS_MS = {
   dashboard: 120_000,
@@ -51,7 +52,7 @@ if (REDIS_URL) {
       maxRetriesPerRequest:  2,
       enableOfflineQueue:    false,
       connectTimeout:        3_000,
-      commandTimeout:        200,
+      commandTimeout:        5_000,
       retryStrategy: (times) => Math.min(times * 500, 10_000),
     });
 
@@ -314,6 +315,14 @@ export function makeRateLimitStore(windowMs: number, limiterPrefix: string): Sto
   });
 
   const rlFallbackMap = new Map<string, { count: number; resetAt: number }>();
+
+  // Periodic cleanup of stale fallback entries to prevent unbounded growth
+  safeSetInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rlFallbackMap) {
+      if (entry.resetAt <= now) rlFallbackMap.delete(key);
+    }
+  }, 5 * 60_000, `rate-limit-cleanup:${limiterPrefix}`);
 
   // Throttle fallback warnings to at most one per minute per limiter instance
   let lastFallbackWarnAt = 0;
