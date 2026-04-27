@@ -45114,6 +45114,26 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
     }
   });
 
+  /**
+   * GET /api/log-sources/:tenantId/:id/fingerprint
+   * Returns the AI-generated device fingerprint for a specific log source.
+   */
+  app.get('/api/log-sources/:tenantId/:id/fingerprint', isAuthenticated, async (req, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      const id = parseInt(req.params.id);
+      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
+      await assertTenantAccess(req, tenantId);
+      const src = await storage.getLogSource(id, tenantId);
+      if (!src) return res.status(404).json({ message: 'Log source not found' });
+      if (!src.fingerprintId) return res.json(null);
+      const fingerprint = await storage.getDeviceFingerprintById(src.fingerprintId);
+      res.json(fingerprint ?? null);
+    } catch (err: any) {
+      res.status(err.status ?? 500).json({ message: err.message });
+    }
+  });
+
   // ─── AI Log Parser endpoint (#157) ───────────────────────────────────────────
   app.post('/api/log-parse/:tenantId', isAuthenticated, async (req, res) => {
     try {

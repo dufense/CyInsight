@@ -230,6 +230,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: deviceTypesData, isLoading: dtLoading, isError: dtError, refetch: refetchDt } = useQuery<DeviceTypesData>({
@@ -240,6 +241,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: complianceData, isLoading: compLoading, isError: compError, refetch: refetchComp } = useQuery<ComplianceScoreData>({
@@ -250,6 +252,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: eolData, isLoading: eolLoading, isError: eolCovError, refetch: refetchEolCov } = useQuery<EolData>({
@@ -260,6 +263,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: compDashData, isLoading: compDashLoading, isError: compDashError, refetch: refetchCompDash } = useQuery<ComplianceDashboardData>({
@@ -270,6 +274,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: secIntegrations } = useQuery<SecurityIntegration[]>({
@@ -280,6 +285,7 @@ export default function CoverageTab({ tenantId }: { tenantId: number }) {
       return res.json();
     },
     retry: 1,
+    staleTime: 60_000,
   });
 
   const { data: coveredDevicesData, isLoading: coveredLoading } = useQuery<CoveredDevicesData>({

@@ -374,11 +374,7 @@ function CisCriticalityPanel({ tenantId }: { tenantId: number }) {
 }
 
 export default function OverviewTab({ tenantId, onNavigate }: { tenantId: number; summary?: any; onNavigate?: (tab: string) => void }) {
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 30000);
-    return () => clearInterval(t);
-  }, []);
+  const [now] = useState(new Date());
 
   const base = `/api/asset-inventory/${tenantId}`;
 

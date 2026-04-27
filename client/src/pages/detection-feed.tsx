@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useTenant } from "@/lib/tenant-context";
@@ -185,9 +185,7 @@ const MITRE_INFERRED_CATEGORIES = new Set([
 export default function DetectionFeedPage() {
   const { currentTenant } = useTenant();
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [countdown, setCountdown] = useState(30);
 
   const statsQuery = useQuery<EventsStatsResponse>({
     queryKey: ["/api/events", currentTenant?.id, "stats", "detection-feed"],
@@ -233,24 +231,9 @@ export default function DetectionFeedPage() {
       statsQuery.refetch(),
       eventsQuery.refetch(),
     ]).finally(() => {
-      setLastRefresh(new Date());
       setIsRefreshing(false);
-      setCountdown(30);
     });
   }, [statsQuery, eventsQuery]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          refresh();
-          return 30;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [refresh]);
 
   const allEvents = eventsQuery.data?.events ?? [];
 
@@ -324,7 +307,7 @@ export default function DetectionFeedPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <p className="text-xs text-muted-foreground">
-              Last updated: {lastRefresh.toLocaleTimeString()}
+              Auto-refresh every 30s
               {statsQuery.isFetching && <span className="ml-2 text-primary animate-pulse">syncing...</span>}
             </p>
             <DataSourceBadge
@@ -342,7 +325,7 @@ export default function DetectionFeedPage() {
             data-testid="button-refresh-feed"
           >
             <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${isRefreshing ? "animate-spin" : ""}`} />
-            Refresh ({countdown}s)
+            Refresh
           </Button>
         </div>
 
