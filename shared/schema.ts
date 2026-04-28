@@ -3124,6 +3124,9 @@ export const aiDetectionRules = pgTable("ai_detection_rules", {
   tags: text("tags").array().default([]),
   severity: text("severity").default("medium"),
   generatedBy: text("generated_by").default("ai"),
+  promotedToSigmaAt: timestamp("promoted_to_sigma_at"),
+  promotedToSigmaRuleId: text("promoted_to_sigma_rule_id"),
+  autoEnableReason: text("auto_enable_reason"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -3131,6 +3134,37 @@ export const aiDetectionRules = pgTable("ai_detection_rules", {
 export const insertAiDetectionRuleSchema = createInsertSchema(aiDetectionRules).omit({ id: true, createdAt: true });
 export type AiDetectionRule = typeof aiDetectionRules.$inferSelect;
 export type InsertAiDetectionRule = z.infer<typeof insertAiDetectionRuleSchema>;
+
+// ── Tenant Detection Settings — Auto-Enable Configuration ────────────────────
+export const tenantDetectionSettings = pgTable("tenant_detection_settings", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").references(() => tenants.id, { onDelete: "cascade" }).notNull().unique(),
+  autoEnableSigmaRules: boolean("auto_enable_sigma_rules").default(false),
+  minAiConfidence: integer("min_ai_confidence").default(80),
+  maxFalsePositiveRate: text("max_false_positive_rate").default("low"),
+  minBacktestMatchedEvents: integer("min_backtest_matched_events").default(1),
+  minQualityGrade: text("min_quality_grade").default("B"),
+  autoEnableFromIncidents: boolean("auto_enable_from_incidents").default(true),
+  autoEnableFromGaps: boolean("auto_enable_from_gaps").default(false),
+  gapGenerationBatchSize: integer("gap_generation_batch_size").default(3),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertTenantDetectionSettingsSchema = createInsertSchema(tenantDetectionSettings).omit({ id: true, createdAt: true });
+export type TenantDetectionSetting = typeof tenantDetectionSettings.$inferSelect;
+
+// ── Auto-Enable Audit Log ────────────────────────────────────────────────────
+export const autoEnableAuditLog = pgTable("auto_enable_audit_log", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").references(() => tenants.id, { onDelete: "cascade" }).notNull(),
+  aiRuleId: integer("ai_rule_id").references(() => aiDetectionRules.id).notNull(),
+  sigmaRuleId: text("sigma_rule_id"),
+  action: text("action").notNull(),
+  reason: text("reason"),
+  triggeredBy: text("triggered_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
 
 // ── Enterprise Data Infrastructure — DB Connectors (#86) ─────────────────────
 export const dbConnectorTypeEnum = pgEnum("db_connector_type", [

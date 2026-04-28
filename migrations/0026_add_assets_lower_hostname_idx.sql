@@ -5,6 +5,6 @@
 -- for tenants with many endpoints.
 --
 -- CONCURRENTLY avoids locking the table during creation.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_assets_tenant_lower_hostname
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_lower_hostname
   ON assets (tenant_id, LOWER(hostname))
   WHERE hostname IS NOT NULL AND hostname != '';

@@ -1,0 +1,18 @@
+FROM clickhouse/clickhouse-server:24.8
+
+USER root
+RUN apt-get update && apt-get install -y gettext-base curl && rm -rf /var/lib/apt/lists/*
+
+COPY clickhouse-entrypoint.sh /clickhouse-entrypoint.sh
+RUN chmod +x /clickhouse-entrypoint.sh
+
+# Pre-create directories and ensure clickhouse user can write to them
+RUN mkdir -p /var/lib/clickhouse/metadata/s3_warm \
+    && mkdir -p /etc/clickhouse-server/config.d \
+    && chown -R clickhouse:clickhouse /var/lib/clickhouse /etc/clickhouse-server/config.d \
+    && chmod 755 /etc/clickhouse-server/config.d
+
+# IMPORTANT: Do NOT set CMD. The base /entrypoint.sh expects NO arguments
+# to run the full server setup. If we pass "clickhouse-server" as CMD,
+# the base entrypoint treats it as a custom command and skips config setup.
+ENTRYPOINT ["/clickhouse-entrypoint.sh"]

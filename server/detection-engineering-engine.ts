@@ -1,7 +1,17 @@
 import { db, pool } from "./db";
-import { aiDetectionRules, securityEvents, behaviorAnomalies } from "@shared/schema";
+import { aiDetectionRules, securityEvents, behaviorAnomalies, tenantDetectionSettings, autoEnableAuditLog } from "@shared/schema";
 import { eq, and, desc, gte } from "drizzle-orm";
 import { createAIClient, getDefaultModel } from "./ai-provider";
+import fs from "fs";
+import path from "path";
+import yaml from "js-yaml";
+import {
+  SIGMA_RULES_DIR,
+  parseRule,
+  syncRuleToDb,
+  loadSigmaRules,
+  type SigmaRule,
+} from "./sigma-engine";
 
 const RULE_TYPES = ["sigma", "yara", "kql", "spl", "eql"] as const;
 
@@ -255,7 +265,7 @@ export async function generateRuleFromIncident(
   const dstIp = incident.destination_ip || null;
 
   // Build correlated events query with same logic as war-room timeline
-  const corrParams: (string | null | Date)[] = [tenantId, timeStart, timeEnd, srcIp ? `%${srcIp}%` : null, dstIp ? `%${dstIp}%` : null];
+  const corrParams: (string | number | null | Date)[] = [tenantId, timeStart, timeEnd, srcIp ? `%${srcIp}%` : null, dstIp ? `%${dstIp}%` : null];
   const corrClauses: string[] = [];
   if (srcIp) corrClauses.push(`(attacker ILIKE $4 OR target ILIKE $4)`);
   if (dstIp) corrClauses.push(`(attacker ILIKE $5 OR target ILIKE $5)`);
@@ -296,7 +306,7 @@ export async function generateRuleFromIncident(
   }
 
   // Backtest: use the same correlation predicates over the past 30 days to estimate rule coverage
-  const backtestParams: (string | null)[] = [tenantId, srcIp ? `%${srcIp}%` : null, dstIp ? `%${dstIp}%` : null];
+  const backtestParams: (string | number | null)[] = [tenantId, srcIp ? `%${srcIp}%` : null, dstIp ? `%${dstIp}%` : null];
   const backtestClauses: string[] = [];
   if (srcIp) backtestClauses.push(`(attacker ILIKE $2 OR target ILIKE $2)`);
   if (dstIp) backtestClauses.push(`(attacker ILIKE $3 OR target ILIKE $3)`);
@@ -427,6 +437,235 @@ Return JSON only:
 
   const [rule] = await db.insert(aiDetectionRules).values(insertValues).returning();
 
+  // [NEW] Auto-enable evaluation for incident-driven rules
+  try {
+    const settings = await getTenantDetectionSettings(tenantId);
+    const { passed, reason } = await evaluateAutoEnableGates(rule, tenantId);
+    if (passed && settings.autoEnableFromIncidents) {
+      await promoteAiRuleToSigma(rule, "auto:incident");
+      console.log(`[AutoEnable] Incident ${incidentId} rule auto-enabled: ${rule.name}`);
+    } else {
+      console.log(`[AutoEnable] Incident ${incidentId} rule stayed draft: ${reason}`);
+    }
+  } catch (autoErr: any) {
+    console.error(`[AutoEnable] Failed to evaluate/promote incident ${incidentId} rule:`, autoErr.message);
+  }
+
   _incidentRuleGenerating.delete(lockKey);
   return rule;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Sigma Rule Auto-Enable Engine (NEW)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Tenant Detection Settings ─────────────────────────────────────────────────
+export async function getTenantDetectionSettings(tenantId: number): Promise<any> {
+  const res = await pool.query(
+    `SELECT * FROM tenant_detection_settings WHERE tenant_id = $1`,
+    [tenantId]
+  );
+  if (res.rows.length > 0) return res.rows[0];
+  // Insert defaults
+  await pool.query(
+    `INSERT INTO tenant_detection_settings (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId]
+  );
+  const fresh = await pool.query(
+    `SELECT * FROM tenant_detection_settings WHERE tenant_id = $1`,
+    [tenantId]
+  );
+  return fresh.rows[0];
+}
+
+// ── Auto-Enable Gate Evaluation ───────────────────────────────────────────────
+const FP_ORDER: Record<string, number> = { low: 1, medium: 2, high: 3 };
+
+export async function evaluateAutoEnableGates(
+  aiRule: typeof aiDetectionRules.$inferSelect,
+  tenantId: number
+): Promise<{ passed: boolean; reason: string }> {
+  const settings = await getTenantDetectionSettings(tenantId);
+
+  if (!settings.auto_enable_sigma_rules) {
+    return { passed: false, reason: "Auto-enable disabled for tenant" };
+  }
+
+  if (aiRule.ruleType !== "sigma") {
+    return { passed: false, reason: "Not a Sigma rule" };
+  }
+
+  if ((aiRule.aiConfidence ?? 0) < settings.min_ai_confidence) {
+    return { passed: false, reason: `AI confidence ${aiRule.aiConfidence} < threshold ${settings.min_ai_confidence}` };
+  }
+
+  const fpRate = aiRule.falsePositiveRate || "medium";
+  if ((FP_ORDER[fpRate] ?? 2) > (FP_ORDER[settings.max_false_positive_rate] ?? 1)) {
+    return { passed: false, reason: `FP rate ${fpRate} exceeds threshold ${settings.max_false_positive_rate}` };
+  }
+
+  const backtest = (aiRule.testResults as any)?.backtest;
+  const matchedEvents = backtest?.matchedEvents ?? 0;
+  if (matchedEvents < settings.min_backtest_matched_events) {
+    return { passed: false, reason: `Backtest matches ${matchedEvents} < threshold ${settings.min_backtest_matched_events}` };
+  }
+
+  return { passed: true, reason: "All gates passed" };
+}
+
+// ── Promote AI Rule to Sigma Runtime ──────────────────────────────────────────
+export async function promoteAiRuleToSigma(
+  aiRule: typeof aiDetectionRules.$inferSelect,
+  promotedBy: string = "auto"
+): Promise<SigmaRule> {
+  if (aiRule.ruleType !== "sigma") {
+    throw new Error("Only Sigma rules can be promoted to runtime");
+  }
+
+  // Parse the YAML to extract an ID
+  let parsed: any = {};
+  try {
+    parsed = yaml.load(aiRule.ruleContent) as any;
+  } catch { /* use empty */ }
+
+  // Ensure stable rule ID
+  const ruleId = parsed?.id || `ai-${aiRule.id}-${crypto.randomUUID().slice(0, 8)}`;
+
+  // Ensure the YAML has the stable ID
+  let yamlWithId = aiRule.ruleContent;
+  if (!parsed?.id) {
+    yamlWithId = `id: ${ruleId}\n` + yamlWithId;
+  } else {
+    yamlWithId = yamlWithId.replace(/^id:.*$/m, `id: ${ruleId}`);
+  }
+
+  // Write to filesystem (tenant-scoped subdirectory)
+  const tenantDir = path.join(SIGMA_RULES_DIR, "custom", `tenant-${aiRule.tenantId}`);
+  if (!fs.existsSync(tenantDir)) fs.mkdirSync(tenantDir, { recursive: true });
+
+  const filePath = path.join(tenantDir, `${ruleId}.yml`);
+  fs.writeFileSync(filePath, yamlWithId, "utf-8");
+
+  // Reload all rules so the new one is picked up
+  loadSigmaRules();
+
+  // Find the newly loaded rule
+  const { getSigmaRule } = await import("./sigma-engine");
+  const sigmaRule = getSigmaRule(ruleId);
+  if (!sigmaRule) {
+    throw new Error(`Failed to load promoted rule ${ruleId} into memory`);
+  }
+
+  // Sync to DB (for stats, grading, etc.)
+  await syncRuleToDb(sigmaRule);
+
+  // Update ai_detection_rules status and tracking
+  await db.update(aiDetectionRules)
+    .set({
+      status: "active",
+      promotedToSigmaAt: new Date(),
+      promotedToSigmaRuleId: ruleId,
+      autoEnableReason: promotedBy,
+      updatedAt: new Date(),
+    })
+    .where(eq(aiDetectionRules.id, aiRule.id));
+
+  // Audit log
+  await logAutoEnableAudit({
+    tenantId: aiRule.tenantId,
+    aiRuleId: aiRule.id,
+    sigmaRuleId: ruleId,
+    action: promotedBy.startsWith("auto") ? "auto_enabled" : "manual_enabled",
+    reason: "Gate evaluation passed",
+    triggeredBy: promotedBy.startsWith("auto:incident")
+      ? "incident"
+      : promotedBy.startsWith("auto:gap")
+        ? "gap"
+        : "manual",
+  });
+
+  console.log(`[AutoEnable] Rule "${aiRule.name}" (${ruleId}) promoted to Sigma runtime. By: ${promotedBy}`);
+  return sigmaRule;
+}
+
+// ── Audit Log Helper ──────────────────────────────────────────────────────────
+async function logAutoEnableAudit(opts: {
+  tenantId: number;
+  aiRuleId: number;
+  sigmaRuleId?: string;
+  action: string;
+  reason?: string;
+  triggeredBy?: string;
+}): Promise<void> {
+  try {
+    await db.insert(autoEnableAuditLog).values({
+      tenantId: opts.tenantId,
+      aiRuleId: opts.aiRuleId,
+      sigmaRuleId: opts.sigmaRuleId,
+      action: opts.action,
+      reason: opts.reason,
+      triggeredBy: opts.triggeredBy,
+    });
+  } catch (e: any) {
+    console.error("[AutoEnableAudit] Failed to log:", e.message);
+  }
+}
+
+// ── Background Gap-Driven Rule Generation ─────────────────────────────────────
+export async function autoGenerateRulesForGaps(tenantId: number): Promise<number> {
+  const settings = await getTenantDetectionSettings(tenantId);
+  if (!settings.auto_enable_from_gaps) return 0;
+
+  // Get coverage gaps from existing coverage endpoint logic
+  const gapsRes = await pool.query(
+    `WITH rule_coverage AS (
+       SELECT unnest(mitre_attack_ids) as technique_id, COUNT(*) as rule_count
+       FROM sigma_rules WHERE is_enabled = true GROUP BY technique_id
+     ),
+     incident_coverage AS (
+       SELECT mitre_technique_id as technique_id, COUNT(*) as incident_count
+       FROM incidents
+       WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '90 days'
+       GROUP BY mitre_technique_id
+     )
+     SELECT
+       COALESCE(rc.technique_id, ic.technique_id) as technique_id,
+       COALESCE(ic.incident_count, 0) as incident_count,
+       COALESCE(rc.rule_count, 0) as rule_count
+     FROM rule_coverage rc
+     FULL OUTER JOIN incident_coverage ic ON rc.technique_id = ic.technique_id
+     WHERE COALESCE(rc.rule_count, 0) = 0
+     ORDER BY COALESCE(ic.incident_count, 0) DESC
+     LIMIT $2`,
+    [tenantId, settings.gap_generation_batch_size]
+  );
+
+  let generated = 0;
+  for (const gap of gapsRes.rows) {
+    try {
+      const rule = await generateDetectionRule(tenantId, "sigma", {
+        technique: gap.technique_id,
+        threatDescription: `Auto-generated for MITRE gap: ${gap.technique_id}`,
+      });
+
+      const { passed } = await evaluateAutoEnableGates(rule, tenantId);
+      if (passed) {
+        await promoteAiRuleToSigma(rule, "auto:gap");
+        generated++;
+      } else {
+        await logAutoEnableAudit({
+          tenantId,
+          aiRuleId: rule.id,
+          action: "auto_rejected",
+          reason: "Did not pass auto-enable gates",
+          triggeredBy: "gap",
+        });
+      }
+    } catch (err: any) {
+      console.error(`[GapGen] Failed for ${gap.technique_id}:`, err.message);
+    }
+  }
+
+  return generated;
 }

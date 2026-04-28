@@ -14,8 +14,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import {
   Shield, AlertTriangle, CheckCircle2, XCircle, Target, ChevronDown,
   ChevronRight, Download, Brain, BookOpen, Loader2, ExternalLink,
-  FileSearch, Crosshair, TrendingUp, Lock
+  FileSearch, Crosshair, TrendingUp, Lock, Sparkles
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 import { MITRE_TACTICS, getTacticColor, ALL_TECHNIQUES, TOTAL_TECHNIQUE_COUNT, type MitreTechnique } from "@/lib/mitre-attack-data";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
@@ -116,6 +117,7 @@ function TechniqueDetailSheet({
   onClose: () => void;
 }) {
   const [recFetched, setRecFetched] = useState(false);
+  const { toast } = useToast();
 
   const status = getCoverageStatus(entry);
 
@@ -262,20 +264,43 @@ function TechniqueDetailSheet({
                 <p className="text-xs leading-relaxed whitespace-pre-wrap text-foreground/80">{recommendMutation.data.recommendation}</p>
               </div>
             ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full gap-2 h-8 text-xs"
-                disabled={recommendMutation.isPending}
-                onClick={() => { if (!recFetched) { setRecFetched(true); recommendMutation.mutate(); } }}
-                data-testid="button-ai-recommend"
-              >
-                {recommendMutation.isPending ? (
-                  <><Loader2 className="w-3.5 h-3.5 animate-spin" />Analyzing technique…</>
-                ) : (
-                  <><Brain className="w-3.5 h-3.5" />Generate AI Recommendation</>
+              <div className="space-y-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full gap-2 h-8 text-xs"
+                  disabled={recommendMutation.isPending}
+                  onClick={() => { if (!recFetched) { setRecFetched(true); recommendMutation.mutate(); } }}
+                  data-testid="button-ai-recommend"
+                >
+                  {recommendMutation.isPending ? (
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin" />Analyzing technique…</>
+                  ) : (
+                    <><Brain className="w-3.5 h-3.5" />Generate AI Recommendation</>
+                  )}
+                </Button>
+                {status === "none" && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="w-full gap-2 h-8 text-xs bg-purple-600 hover:bg-purple-700"
+                    onClick={() => {
+                      apiRequest("POST", `/api/detection-rules/${tenantId}/generate`, {
+                        ruleType: "sigma",
+                        technique: technique.id,
+                        threatDescription: `Auto-generated for MITRE gap: ${technique.id} ${technique.name}`,
+                      }).then(() => {
+                        toast({ title: "Rule generated", description: "Check Detection Engineering for status" });
+                      }).catch((e: any) => {
+                        toast({ title: "Generation failed", description: e.message, variant: "destructive" });
+                      });
+                    }}
+                    data-testid="button-generate-gap-rule"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />Generate & Auto-Enable Rule
+                  </Button>
                 )}
-              </Button>
+              </div>
             )}
             {recommendMutation.error && (
               <p className="text-xs text-red-400 mt-1.5">Failed to generate recommendation. Try again.</p>

@@ -37195,15 +37195,37 @@ Apply the requested change and return JSON:
         return res.status(409).json({ message: "A Sigma rule with this title already exists in the library", existingId: dupCheck.rows[0].id });
       }
 
-      const ruleId = `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // [FIXED] Write to filesystem so the matching engine can load it
+      const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
+      const parsedYaml = yaml.load(ruleYaml) as any;
+      const ruleId = parsedYaml?.id || `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const yamlWithId = ruleYaml.replace(/^id:.*$/m, `id: ${ruleId}`);
+
+      const fs = await import("fs");
+      const path = await import("path");
+      const { SIGMA_RULES_DIR, loadSigmaRules, syncRuleToDb, getSigmaRule } = await import("./sigma-engine");
+      const tenantDir = path.join(SIGMA_RULES_DIR, "custom", `tenant-${tenantId}`);
+      if (!fs.existsSync(tenantDir)) fs.mkdirSync(tenantDir, { recursive: true });
+      const filePath = path.join(tenantDir, `${ruleId}.yml`);
+      fs.writeFileSync(filePath, yamlWithId, "utf-8");
+
+      // Reload rules into memory
+      loadSigmaRules();
+      const sigmaRule = getSigmaRule(ruleId);
+      if (sigmaRule) await syncRuleToDb(sigmaRule);
+
+      // Also insert into sigma_rules DB for UI listing
       const result = await pool.query(
         `INSERT INTO sigma_rules (rule_id, title, description, status, level, rule_yaml, mitre_tags, is_enabled, created_at, updated_at)
          VALUES ($1, $2, $3, 'experimental', $4, $5, $6, true, NOW(), NOW())
+         ON CONFLICT (rule_id) DO UPDATE SET
+           title = EXCLUDED.title, description = EXCLUDED.description, level = EXCLUDED.level,
+           rule_yaml = EXCLUDED.rule_yaml, mitre_tags = EXCLUDED.mitre_tags, is_enabled = true, updated_at = NOW()
          RETURNING id, rule_id, title`,
-        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", ruleYaml, JSON.stringify(mitreTags || [])]
+        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", yamlWithId, JSON.stringify(mitreTags || [])]
       );
 
-      res.status(201).json({ success: true, rule: result.rows[0] });
+      res.status(201).json({ success: true, rule: result.rows[0], runtimeLoaded: !!sigmaRule });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message });
     }
@@ -37517,9 +37539,27 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
       if (!["draft", "testing", "active", "archived"].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
       }
+
+      // [NEW] When activating a Sigma rule, promote it to runtime
+      let promoted = false;
+      if (status === "active") {
+        const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
+        const [rule] = await db.select().from(aiDetectionRules)
+          .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
+        if (rule && rule.ruleType === "sigma") {
+          try {
+            await promoteAiRuleToSigma(rule, req.user?.id || "manual");
+            promoted = true;
+          } catch (promoteErr: any) {
+            console.error(`[DetectionRules] Manual promotion failed for rule ${ruleId}:`, promoteErr.message);
+            return res.status(500).json({ message: `Failed to promote rule: ${promoteErr.message}` });
+          }
+        }
+      }
+
       await db.update(aiDetectionRules).set({ status })
         .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
-      res.json({ success: true });
+      res.json({ success: true, promoted });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -37579,6 +37619,82 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
         [tenantId, incidentId]
       );
       res.json({ rules: rulesRes.rows });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ── Tenant Detection Settings (Auto-Enable Configuration) ───────────────────
+  app.get("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
+      const settings = await getTenantDetectionSettings(tenantId);
+      res.json(settings);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.patch("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      assertMSSRole(await assertTenantAccess(req, tenantId));
+
+      const allowedFields = [
+        "auto_enable_sigma_rules",
+        "min_ai_confidence",
+        "max_false_positive_rate",
+        "min_backtest_matched_events",
+        "min_quality_grade",
+        "auto_enable_from_incidents",
+        "auto_enable_from_gaps",
+        "gap_generation_batch_size",
+      ];
+
+      const updates: Record<string, any> = {};
+      for (const key of allowedFields) {
+        if (req.body[key] !== undefined) updates[key] = req.body[key];
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ message: "No valid fields to update" });
+      }
+
+      const setClause = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(", ");
+      await pool.query(
+        `UPDATE tenant_detection_settings SET ${setClause}, updated_at = NOW() WHERE tenant_id = $1`,
+        [tenantId, ...Object.values(updates)]
+      );
+
+      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
+      const settings = await getTenantDetectionSettings(tenantId);
+      res.json({ success: true, settings });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message });
+    }
+  });
+
+  // ── Auto-Enable Audit Log ───────────────────────────────────────────────────
+  app.get("/api/auto-enable-audit/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const result = await pool.query(
+        `SELECT a.*, r.name as rule_name
+         FROM auto_enable_audit_log a
+         LEFT JOIN ai_detection_rules r ON r.id = a.ai_rule_id
+         WHERE a.tenant_id = $1
+         ORDER BY a.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [tenantId, limit, offset]
+      );
+      res.json({ audits: result.rows });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

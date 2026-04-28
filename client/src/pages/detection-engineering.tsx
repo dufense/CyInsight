@@ -16,7 +16,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { useToast } from "@/hooks/use-toast";
 import {
   Code2, Bot, Plus, Play, Archive, CheckCircle2, AlertTriangle,
-  Loader2, Zap, Shield, Search, Copy, ChevronDown, ChevronRight, FileCode
+  Loader2, Zap, Shield, Search, Copy, ChevronDown, ChevronRight, FileCode,
+  Settings, Sparkles
 } from "lucide-react";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -45,6 +46,7 @@ export default function DetectionEngineeringPage() {
   const [showGenerate, setShowGenerate] = useState(false);
   const [genForm, setGenForm] = useState({ ruleType: "sigma", technique: "", threatDescription: "" });
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const tenantId = currentTenant?.id;
 
@@ -112,6 +114,22 @@ export default function DetectionEngineeringPage() {
     },
   });
 
+  // [NEW] Tenant detection settings
+  const settingsQuery = useQuery<any>({
+    queryKey: ["/api/tenant-detection-settings", tenantId],
+    queryFn: () => apiRequest("GET", `/api/tenant-detection-settings/${tenantId}`).then(r => r.json()),
+    enabled: !!tenantId,
+  });
+
+  const settingsMutation = useMutation({
+    mutationFn: (data: any) => apiRequest("PATCH", `/api/tenant-detection-settings/${tenantId}`, data).then(r => r.json()),
+    onSuccess: () => {
+      toast({ title: "Settings saved" });
+      queryClient.invalidateQueries({ queryKey: ["/api/tenant-detection-settings", tenantId] });
+    },
+    onError: (e: any) => toast({ title: "Save failed", description: e.message, variant: "destructive" }),
+  });
+
   const copyRule = (rule: any) => {
     navigator.clipboard.writeText(rule.ruleContent);
     setCopiedId(rule.id);
@@ -157,7 +175,90 @@ export default function DetectionEngineeringPage() {
           <Button size="sm" variant="outline" onClick={() => fromAnomaliesMutation.mutate("sigma")} disabled={fromAnomaliesMutation.isPending} data-testid="button-generate-from-anomalies">
             {fromAnomaliesMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <Bot className="w-3.5 h-3.5 mr-1.5" />}From Anomalies
           </Button>
+          <Button size="sm" variant="ghost" onClick={() => setShowSettings(!showSettings)}>
+            <Settings className="w-3.5 h-3.5 mr-1.5" />Auto-Enable Settings
+          </Button>
         </div>
+
+        {/* [NEW] Auto-Enable Settings Panel */}
+        {showSettings && (
+          <Card className="border-dashed">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2"><Sparkles className="w-4 h-4 text-primary" />Auto-Enable Configuration</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {settingsQuery.isLoading ? (
+                <Skeleton className="h-20 w-full" />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Auto-Enable Sigma Rules</Label>
+                      <input
+                        type="checkbox"
+                        checked={settingsQuery.data?.auto_enable_sigma_rules || false}
+                        onChange={e => settingsMutation.mutate({ auto_enable_sigma_rules: e.target.checked })}
+                        className="w-4 h-4"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">From Incidents</Label>
+                      <input
+                        type="checkbox"
+                        checked={settingsQuery.data?.auto_enable_from_incidents || false}
+                        onChange={e => settingsMutation.mutate({ auto_enable_from_incidents: e.target.checked })}
+                        className="w-4 h-4"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">From Gap Analysis</Label>
+                      <input
+                        type="checkbox"
+                        checked={settingsQuery.data?.auto_enable_from_gaps || false}
+                        onChange={e => settingsMutation.mutate({ auto_enable_from_gaps: e.target.checked })}
+                        className="w-4 h-4"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <Label className="text-xs">Min AI Confidence ({settingsQuery.data?.min_ai_confidence || 80})</Label>
+                      <input
+                        type="range" min="0" max="100" step="5"
+                        value={settingsQuery.data?.min_ai_confidence || 80}
+                        onChange={e => settingsMutation.mutate({ min_ai_confidence: parseInt(e.target.value) })}
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Max FP Rate</Label>
+                      <Select
+                        value={settingsQuery.data?.max_false_positive_rate || "low"}
+                        onValueChange={v => settingsMutation.mutate({ max_false_positive_rate: v })}
+                      >
+                        <SelectTrigger className="text-xs h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="low">Low</SelectItem>
+                          <SelectItem value="medium">Medium</SelectItem>
+                          <SelectItem value="high">High</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="text-xs">Min Backtest Matches</Label>
+                      <Input
+                        type="number" min="0" max="100"
+                        value={settingsQuery.data?.min_backtest_matched_events || 1}
+                        onChange={e => settingsMutation.mutate({ min_backtest_matched_events: parseInt(e.target.value) })}
+                        className="text-xs h-8"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Filters */}
         <div className="flex items-center gap-2 flex-wrap">
@@ -206,6 +307,11 @@ export default function DetectionEngineeringPage() {
                       <Badge variant="outline" className="text-[9px] font-mono">{rule.ruleType?.toUpperCase()}</Badge>
                       <Badge variant="outline" className={`text-[9px] ${STATUS_COLORS[rule.status] || ""}`}>{rule.status}</Badge>
                       {rule.severity && <Badge variant="outline" className={`text-[9px] ${SEVERITY_COLORS[rule.severity] || ""}`}>{rule.severity}</Badge>}
+                      {rule.promoted_to_sigma_rule_id && (
+                        <Badge variant="outline" className="text-[9px] bg-purple-500/10 text-purple-500 border-purple-500/30">
+                          <Sparkles className="w-2.5 h-2.5 mr-0.5" />Runtime
+                        </Badge>
+                      )}
                     </div>
                     <p className="text-xs text-muted-foreground line-clamp-1">{rule.description}</p>
                   </div>
@@ -248,6 +354,19 @@ export default function DetectionEngineeringPage() {
                       <div>TP Rate: <span className="text-foreground font-medium">{rule.truePositiveRate || "—"}</span></div>
                       <div>Generated: <span className="text-foreground font-medium">{rule.createdAt ? new Date(rule.createdAt).toLocaleDateString() : "—"}</span></div>
                     </div>
+                    {rule.testResults?.backtest && (
+                      <div className="text-[10px] text-muted-foreground bg-background rounded p-2 border">
+                        <span className="font-medium">Backtest (30d):</span> {rule.testResults.backtest.matchedEvents} events across {rule.testResults.backtest.matchedDays} days
+                        {rule.testResults.backtest.estimatedCoverage && ` · Coverage: ${rule.testResults.backtest.estimatedCoverage}`}
+                      </div>
+                    )}
+                    {rule.auto_enable_reason && (
+                      <div className="text-[10px] text-purple-600 bg-purple-50 dark:bg-purple-950/20 rounded p-2 border border-purple-200 dark:border-purple-800">
+                        <Sparkles className="w-3 h-3 inline mr-1" />
+                        {rule.auto_enable_reason.startsWith("auto:") ? "Auto-enabled" : "Enabled"}: {rule.auto_enable_reason}
+                        {rule.promoted_to_sigma_rule_id && ` · Sigma ID: ${rule.promoted_to_sigma_rule_id}`}
+                      </div>
+                    )}
                   </div>
                 )}
               </Card>

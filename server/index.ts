@@ -513,7 +513,13 @@ let serverReady = false;
   if (process.env.NODE_ENV === "production") {
     (async () => {
       try {
-        await runMigrations();
+        // Run migrations in a nested try-catch so a migration failure doesn't
+        // block route registration (which would make the API return 404s).
+        try {
+          await runMigrations();
+        } catch (migrationErr) {
+          console.error("[Migrations] Failed (non-fatal):", migrationErr);
+        }
         // Ensure tenant_quotas table exists (idempotent — safe to run every startup)
         await ensureQuotaTable();
 

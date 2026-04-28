@@ -56,6 +56,7 @@ export function startAIAgentScheduler(): void {
   scheduleInterval(runClientNotifications, 10 * 60_000,   11 * 60_000);
   scheduleInterval(runProactiveInsights, 20 * 60_000,     12 * 60_000);
   scheduleInterval(runDailySummaries, 60 * 60_000,        13 * 60_000);
+  scheduleInterval(runGapDrivenRuleGeneration, 6 * 60 * 60_000, 14 * 60_000);
 
   setTimeout(async () => {
     console.log("[AIWorkforce] Running startup sweep (delayed 4 min)...");
@@ -652,5 +653,44 @@ async function processInProgressTickets(): Promise<void> {
     console.error("[AIWorkforce][TicketResolution] Scan error:", err.message);
   } finally {
     resolutionsRunning = false;
+  }
+}
+
+
+// ── Gap-Driven Sigma Rule Generation ──────────────────────────────────────────
+let gapGenerationRunning = false;
+
+async function runGapDrivenRuleGeneration(): Promise<void> {
+  if (gapGenerationRunning) return;
+  gapGenerationRunning = true;
+  try {
+    console.log("[AIWorkforce][GapRules] Starting gap-driven rule generation sweep...");
+    const { autoGenerateRulesForGaps } = await import("./detection-engineering-engine");
+    const tenantsRes = await schedulerQuery(`SELECT id FROM tenants WHERE is_active = true`);
+
+    let totalGenerated = 0;
+    for (const tenant of tenantsRes.rows) {
+      try {
+        const count = await autoGenerateRulesForGaps(tenant.id);
+        if (count > 0) {
+          console.log(`[AIWorkforce][GapRules] Tenant ${tenant.id}: auto-enabled ${count} rule(s)`);
+          totalGenerated += count;
+        }
+      } catch (tenantErr: any) {
+        console.error(`[AIWorkforce][GapRules] Tenant ${tenant.id} failed:`, tenantErr.message);
+      }
+      // Small delay between tenants to avoid rate limiting
+      await new Promise(r => setTimeout(r, 2_000));
+    }
+
+    if (totalGenerated > 0) {
+      console.log(`[AIWorkforce][GapRules] Sweep complete. Total rules auto-enabled: ${totalGenerated}`);
+    } else {
+      console.log("[AIWorkforce][GapRules] Sweep complete. No gaps met auto-enable criteria.");
+    }
+  } catch (err: any) {
+    console.error("[AIWorkforce][GapRules] Sweep error:", err.message);
+  } finally {
+    gapGenerationRunning = false;
   }
 }

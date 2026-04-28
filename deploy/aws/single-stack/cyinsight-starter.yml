@@ -629,14 +629,14 @@ Resources:
       Volumes:
         - Name: clickhouse-data
           EFSVolumeConfiguration:
-            FileSystemId: !Ref ClickHouseEFS
+            FilesystemId: !Ref ClickHouseEFS
             TransitEncryption: ENABLED
             AuthorizationConfig:
               AccessPointId: !Ref ClickHouseEFSAccessPoint
               IAM: ENABLED
       ContainerDefinitions:
         - Name: clickhouse
-          Image: clickhouse/clickhouse-server:24.8
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cyinsight:clickhouse-24.8-v6"
           Essential: true
           PortMappings:
             - ContainerPort: 8123
@@ -654,45 +654,7 @@ Resources:
               Value: !Ref DataBucket
             - Name: CH_S3_REGION
               Value: !Ref AWS::Region
-          Command:
-            - /bin/sh
-            - -c
-            - |
-              mkdir -p /etc/clickhouse-server/config.d /var/lib/clickhouse/metadata/s3_warm /var/lib/clickhouse/caches/s3_warm
-              cat > /etc/clickhouse-server/config.d/storage.xml << XMLEOF
-              <clickhouse>
-                <storage_configuration>
-                  <disks>
-                    <s3_warm>
-                      <type>s3</type>
-                      <endpoint>https://s3.${CH_S3_REGION}.amazonaws.com/${CH_S3_BUCKET}/clickhouse/warm/</endpoint>
-                      <region>${CH_S3_REGION}</region>
-                      <use_environment_credentials>true</use_environment_credentials>
-                      <metadata_path>/var/lib/clickhouse/metadata/s3_warm/</metadata_path>
-                      <cache_path>/var/lib/clickhouse/caches/s3_warm/</cache_path>
-                      <cache_enabled>true</cache_enabled>
-                      <cache_max_size>5368709120</cache_max_size>
-                    </s3_warm>
-                  </disks>
-                  <policies>
-                    <ccc_tiered>
-                      <volumes>
-                        <hot>
-                          <disk>default</disk>
-                          <max_data_part_size_bytes>10737418240</max_data_part_size_bytes>
-                        </hot>
-                        <warm>
-                          <disk>s3_warm</disk>
-                          <move_factor>0.2</move_factor>
-                          <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
-                        </warm>
-                      </volumes>
-                    </ccc_tiered>
-                  </policies>
-                </storage_configuration>
-              </clickhouse>
-              XMLEOF
-              exec /entrypoint.sh
+
           MountPoints:
             - SourceVolume: clickhouse-data
               ContainerPath: /var/lib/clickhouse
@@ -734,6 +696,7 @@ Resources:
       DeploymentConfiguration:
         MaximumPercent: 100
         MinimumHealthyPercent: 0
+      HealthCheckGracePeriodSeconds: 180
 
   # ============================================================================
   # S3 Bucket for Data Storage
@@ -1138,7 +1101,7 @@ Resources:
       TargetTrackingScalingPolicyConfiguration:
         PredefinedMetricSpecification:
           PredefinedMetricType: ALBRequestCountPerTarget
-          ResourceLabel: !Sub "${ALB.FullLoadBalancerName}/${ALBTargetGroup.TargetGroupFullName}"
+          ResourceLabel: !Sub "${ALB.LoadBalancerFullName}/${ALBTargetGroup.TargetGroupFullName}"
         TargetValue: 500.0
         ScaleInCooldown: 60
         ScaleOutCooldown: 30

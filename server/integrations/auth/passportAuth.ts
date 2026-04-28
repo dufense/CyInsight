@@ -49,7 +49,7 @@ export function getSession() {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: process.env.NODE_ENV === "production" && process.env.SECURE_COOKIES !== "false",
       sameSite: "lax" as const,
       maxAge: sessionTtlMs,
     },
@@ -281,7 +281,7 @@ export function csrfMiddleware(req: Request, res: Response, next: NextFunction):
   if (CSRF_SAFE_METHODS.has(req.method)) {
     if (!cookies[CSRF_COOKIE_NAME]) {
       const token = generateCsrfToken();
-      res.setHeader("Set-Cookie", `${CSRF_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; ${process.env.NODE_ENV === "production" ? "Secure; " : ""}SameSite=Strict`);
+      res.setHeader("Set-Cookie", `${CSRF_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; ${process.env.NODE_ENV === "production" && process.env.SECURE_COOKIES !== "false" ? "Secure; " : ""}SameSite=Strict`);
     }
     return next();
   }
