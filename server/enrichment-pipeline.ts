@@ -96,6 +96,10 @@ function emitProgress(progress: PipelineProgress) {
     listeners.forEach(listener => {
       try { listener(progress); } catch {}
     });
+    // Auto-prune listeners for completed or failed batches to prevent memory leak
+    if (progress.stage === "complete" || progress.stage === "failed") {
+      pipelineListeners.delete(progress.batchId);
+    }
   }
 }
 

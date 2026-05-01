@@ -88,6 +88,23 @@ export const pool = new Pool({
   ...(sslConfig !== false ? { ssl: sslConfig } : {}),
 });
 
+// Queue-depth guard: fail fast instead of backing up indefinitely.
+// Threshold tightened to POOL_MAX/3 so we reject early when schedulers
+// burst-request connections, preventing cascading timeouts.
+const MAX_QUEUE_DEPTH = Math.ceil(POOL_MAX * 1.5);
+const origConnect = pool.connect.bind(pool);
+pool.connect = function(callback?: any) {
+  if (pool.waitingCount >= MAX_QUEUE_DEPTH) {
+    const err = new Error(`DB pool queue saturated (${pool.waitingCount} waiting, max=${MAX_QUEUE_DEPTH})`);
+    console.error(`[DB Pool] Queue guard rejected connection request (${pool.waitingCount} waiting, max=${MAX_QUEUE_DEPTH})`);
+    if (typeof callback === 'function') {
+      return callback(err);
+    }
+    return Promise.reject(err);
+  }
+  return origConnect(callback);
+};
+
 pool.on("connect", (client) => {
   client.query(`SET TIME ZONE 'UTC'`).catch(() => {});
   // Signal success to circuit breaker on a healthy new connection

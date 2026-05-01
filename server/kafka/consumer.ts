@@ -140,11 +140,22 @@ export class KafkaConsumerGroup {
                 `[KafkaConsumer:${this.config.groupId}] Batch processing error: ${err.message}`
               );
 
+              // Only resolve offsets for messages successfully sent to DLQ.
+              // If DLQ fails, do NOT resolve offset — message will be retried.
+              let dlqSuccessCount = 0;
               for (const msg of chunk) {
-                await this.sendToDLQ(msg.topic, msg, err.message);
+                try {
+                  await this.sendToDLQ(msg.topic, msg, err.message);
+                  dlqSuccessCount++;
+                } catch (dlqErr: any) {
+                  console.error(`[KafkaConsumer:${this.config.groupId}] DLQ failed for offset ${msg.offset}: ${dlqErr.message}`);
+                  break; // Stop resolving offsets; remaining messages will be retried
+                }
               }
-              const lastMsg = chunk[chunk.length - 1];
-              resolveOffset(lastMsg.offset);
+              if (dlqSuccessCount > 0) {
+                const lastResolvedMsg = chunk[dlqSuccessCount - 1];
+                resolveOffset(lastResolvedMsg.offset);
+              }
               await heartbeat();
             }
           }

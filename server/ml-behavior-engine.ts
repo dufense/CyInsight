@@ -520,7 +520,7 @@ async function upsertAnomalyAndGetId(
       `INSERT INTO behavior_anomalies (tenant_id, entity_type, entity_name, anomaly_type, dimensions, confidence_score, marked_expected, escalated_to_incident, occurred_at)
        VALUES ($1, $2, $3, $4, $5, $6, false, false, NOW())
        RETURNING id, marked_expected, escalated_to_incident`,
-      [tenantId, entityType, entityName.toLowerCase(), riskLevel, JSON.stringify(dimPayload), scoreInt]
+      [tenantId, entityType, entityName.toLowerCase().slice(0, 255), riskLevel, JSON.stringify(dimPayload), scoreInt]
     );
     return res.rows[0] || null;
   }

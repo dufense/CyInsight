@@ -239,6 +239,18 @@
       "when": 1776663030287,
       "tag": "0033_add_auto_enable_audit_log",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1777621800000,
+      "tag": "0034_add_security_events_user_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "tag": "0035_add_assets_enrichment_partial_indexes",
+      "breakpoints": true
     }
   ]
 }
