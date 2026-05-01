@@ -37195,15 +37195,37 @@ Apply the requested change and return JSON:
         return res.status(409).json({ message: "A Sigma rule with this title already exists in the library", existingId: dupCheck.rows[0].id });
       }
 
-      const ruleId = `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // [FIXED] Write to filesystem so the matching engine can load it
+      const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
+      const parsedYaml = yaml.load(ruleYaml) as any;
+      const ruleId = parsedYaml?.id || `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const yamlWithId = ruleYaml.replace(/^id:.*$/m, `id: ${ruleId}`);
+
+      const fs = await import("fs");
+      const path = await import("path");
+      const { SIGMA_RULES_DIR, loadSigmaRules, syncRuleToDb, getSigmaRule } = await import("./sigma-engine");
+      const tenantDir = path.join(SIGMA_RULES_DIR, "custom", `tenant-${tenantId}`);
+      if (!fs.existsSync(tenantDir)) fs.mkdirSync(tenantDir, { recursive: true });
+      const filePath = path.join(tenantDir, `${ruleId}.yml`);
+      fs.writeFileSync(filePath, yamlWithId, "utf-8");
+
+      // Reload rules into memory
+      loadSigmaRules();
+      const sigmaRule = getSigmaRule(ruleId);
+      if (sigmaRule) await syncRuleToDb(sigmaRule);
+
+      // Also insert into sigma_rules DB for UI listing
       const result = await pool.query(
         `INSERT INTO sigma_rules (rule_id, title, description, status, level, rule_yaml, mitre_tags, is_enabled, created_at, updated_at)
          VALUES ($1, $2, $3, 'experimental', $4, $5, $6, true, NOW(), NOW())
+         ON CONFLICT (rule_id) DO UPDATE SET
+           title = EXCLUDED.title, description = EXCLUDED.description, level = EXCLUDED.level,
+           rule_yaml = EXCLUDED.rule_yaml, mitre_tags = EXCLUDED.mitre_tags, is_enabled = true, updated_at = NOW()
          RETURNING id, rule_id, title`,
-        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", ruleYaml, JSON.stringify(mitreTags || [])]
+        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", yamlWithId, JSON.stringify(mitreTags || [])]
       );
 
-      res.status(201).json({ success: true, rule: result.rows[0] });
+      res.status(201).json({ success: true, rule: result.rows[0], runtimeLoaded: !!sigmaRule });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message });
     }
@@ -37517,9 +37539,27 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
       if (!["draft", "testing", "active", "archived"].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
       }
+
+      // [NEW] When activating a Sigma rule, promote it to runtime
+      let promoted = false;
+      if (status === "active") {
+        const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
+        const [rule] = await db.select().from(aiDetectionRules)
+          .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
+        if (rule && rule.ruleType === "sigma") {
+          try {
+            await promoteAiRuleToSigma(rule, req.user?.id || "manual");
+            promoted = true;
+          } catch (promoteErr: any) {
+            console.error(`[DetectionRules] Manual promotion failed for rule ${ruleId}:`, promoteErr.message);
+            return res.status(500).json({ message: `Failed to promote rule: ${promoteErr.message}` });
+          }
+        }
+      }
+
       await db.update(aiDetectionRules).set({ status })
         .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
-      res.json({ success: true });
+      res.json({ success: true, promoted });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -37579,6 +37619,82 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
         [tenantId, incidentId]
       );
       res.json({ rules: rulesRes.rows });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ── Tenant Detection Settings (Auto-Enable Configuration) ───────────────────
+  app.get("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
+      const settings = await getTenantDetectionSettings(tenantId);
+      res.json(settings);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.patch("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      assertMSSRole(await assertTenantAccess(req, tenantId));
+
+      const allowedFields = [
+        "auto_enable_sigma_rules",
+        "min_ai_confidence",
+        "max_false_positive_rate",
+        "min_backtest_matched_events",
+        "min_quality_grade",
+        "auto_enable_from_incidents",
+        "auto_enable_from_gaps",
+        "gap_generation_batch_size",
+      ];
+
+      const updates: Record<string, any> = {};
+      for (const key of allowedFields) {
+        if (req.body[key] !== undefined) updates[key] = req.body[key];
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ message: "No valid fields to update" });
+      }
+
+      const setClause = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(", ");
+      await pool.query(
+        `UPDATE tenant_detection_settings SET ${setClause}, updated_at = NOW() WHERE tenant_id = $1`,
+        [tenantId, ...Object.values(updates)]
+      );
+
+      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
+      const settings = await getTenantDetectionSettings(tenantId);
+      res.json({ success: true, settings });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message });
+    }
+  });
+
+  // ── Auto-Enable Audit Log ───────────────────────────────────────────────────
+  app.get("/api/auto-enable-audit/:tenantId", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const result = await pool.query(
+        `SELECT a.*, r.name as rule_name
+         FROM auto_enable_audit_log a
+         LEFT JOIN ai_detection_rules r ON r.id = a.ai_rule_id
+         WHERE a.tenant_id = $1
+         ORDER BY a.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [tenantId, limit, offset]
+      );
+      res.json({ audits: result.rows });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -45114,6 +45230,26 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
     }
   });
 
+  /**
+   * GET /api/log-sources/:tenantId/:id/fingerprint
+   * Returns the AI-generated device fingerprint for a specific log source.
+   */
+  app.get('/api/log-sources/:tenantId/:id/fingerprint', isAuthenticated, async (req, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      const id = parseInt(req.params.id);
+      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
+      await assertTenantAccess(req, tenantId);
+      const src = await storage.getLogSource(id, tenantId);
+      if (!src) return res.status(404).json({ message: 'Log source not found' });
+      if (!src.fingerprintId) return res.json(null);
+      const fingerprint = await storage.getDeviceFingerprintById(src.fingerprintId);
+      res.json(fingerprint ?? null);
+    } catch (err: any) {
+      res.status(err.status ?? 500).json({ message: err.message });
+    }
+  });
+
   // ─── AI Log Parser endpoint (#157) ───────────────────────────────────────────
   app.post('/api/log-parse/:tenantId', isAuthenticated, async (req, res) => {
     try {
@@ -45942,8 +46078,57 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         return { pgTotal: parseInt(cntPg.rows[0].count, 10), pgRows: dataPg.rows };
       };
 
-      // ── OFFLINE mode OR BOTH mode spanning cold tier ──
-      if (isOfflineOnly || (isBoth && spansCold)) {
+      // ── ClickHouse dispatch for ALL modes (live, offline, both) ────────────
+      // ClickHouse with S3 tiering can handle the full date range — hot parts
+      // are read from EFS, warm parts from S3 automatically. For live mode we
+      // still restrict to the hot window; for offline/both we allow the full
+      // range so historical investigations query CH instead of PG.
+      const chClient = getClickHouseClient();
+      if (chClient) {
+        try {
+          const chConditions: string[] = [`tenant_id = ${tId}`];
+          // Live mode: restrict to hot window (0-90 days)
+          // Offline/Both mode: no hot restriction — CH reads from S3 for old parts
+          if (isLiveOnly) {
+            const hotCutoffStr = formatChDateTime64(hotCutoff);
+            chConditions.push(`occurred_at >= '${hotCutoffStr}'`);
+          }
+          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
+          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
+          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
+          if (search) {
+            const sch = search.replace(/'/g, "''");
+            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
+          }
+          if (entityFilter) {
+            const ef = entityFilter.replace(/'/g, "''");
+            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
+          }
+          const chWhere = chConditions.join(" AND ");
+          const [cntRows, dataRows] = await Promise.all([
+            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
+            chClient.queryRows<Record<string, unknown>>(
+              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
+                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
+                      ai_reasoning, parse_confidence, incident_id
+               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
+            ),
+          ]);
+          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
+          rows = dataRows;
+          tier = isOfflineOnly ? "cold" : isBoth ? "hot+cold" : "hot";
+        } catch (chErr: any) {
+          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
+        }
+      }
+
+      // ── Offline/Both mode: async cache when CH unavailable ─────────────────
+      // When ClickHouse is not configured or failed, we fall back to the legacy
+      // async pattern: Athena first (if configured), then PG full scan.
+      // The async cache lets the UI poll for results.
+      if ((isOfflineOnly || (isBoth && spansCold)) && rows.length === 0 && total === 0) {
         const athenaClient = await getAthenaClient(pool);
         if (athenaClient) {
           try {
@@ -46018,47 +46203,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         });
       }
 
-      // ── LIVE mode: dispatch to ClickHouse if available ──
-      const chClient = getClickHouseClient();
-      if (isLiveOnly && chClient) {
-        try {
-          const hotCutoffStr = formatChDateTime64(hotCutoff);
-          const chConditions: string[] = [
-            `tenant_id = ${tId}`,
-            `occurred_at >= '${hotCutoffStr}'`,
-          ];
-          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
-          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
-          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
-          if (search) {
-            const sch = search.replace(/'/g, "''");
-            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
-          }
-          if (entityFilter) {
-            const ef = entityFilter.replace(/'/g, "''");
-            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
-          }
-          const chWhere = chConditions.join(" AND ");
-          const [cntRows, dataRows] = await Promise.all([
-            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
-            chClient.queryRows<Record<string, unknown>>(
-              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
-                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
-                      ai_reasoning, parse_confidence, incident_id
-               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
-            ),
-          ]);
-          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
-          rows = dataRows;
-          tier = "hot";
-        } catch (chErr: any) {
-          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
-        }
-      }
-
-      // ── PG fallback for live mode (without ClickHouse) ──
+      // ── Live mode PG fallback (when CH unavailable) ────────────────────────
       if (rows.length === 0 && total === 0) {
         const { pgTotal, pgRows } = await runPgHotQuery(true); // hotOnly=true: restrict to 90-day window
         total = pgTotal;

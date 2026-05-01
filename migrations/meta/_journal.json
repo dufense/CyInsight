@@ -169,6 +169,88 @@
       "when": 1776653030287,
       "tag": "0023_add_missing_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1776654030287,
+      "tag": "0024_add_users_missing_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1776655030287,
+      "tag": "0025_add_assets_tenant_hostname_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1776656030287,
+      "tag": "0026_add_assets_lower_hostname_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1776657030287,
+      "tag": "0027_add_cleanup_functional_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1776658030287,
+      "tag": "0028_add_missing_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1776659030287,
+      "tag": "0029_add_ch_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1776660030287,
+      "tag": "0030_add_caasm_log_intel_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1776661030287,
+      "tag": "0031_add_tenant_detection_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1776662030287,
+      "tag": "0032_add_ai_rule_promotion_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1776663030287,
+      "tag": "0033_add_auto_enable_audit_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1777621800000,
+      "tag": "0034_add_security_events_user_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "tag": "0035_add_assets_enrichment_partial_indexes",
+      "breakpoints": true
     }
   ]
 }

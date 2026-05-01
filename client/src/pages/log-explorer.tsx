@@ -156,13 +156,31 @@ export default function LogExplorerPage() {
     }
   }, [searchStr]);
 
+  // Build query params for server-side filtering
+  const queryParams = useMemo(() => {
+    const p = new URLSearchParams();
+    p.set("pageSize", "200");
+    const rangeOpt = TIME_RANGES.find((t) => t.value === timeRange);
+    if (rangeOpt && rangeOpt.ms > 0) {
+      p.set("dateFrom", new Date(Date.now() - rangeOpt.ms).toISOString());
+    }
+    if (search) p.set("search", search);
+    if (sourceFilters.length > 0) p.set("logSource", sourceFilters.join(","));
+    if (severityFilters.length > 0) p.set("severity", severityFilters.join(","));
+    if (categoryFilters.length > 0) p.set("eventType", categoryFilters.join(","));
+    if (mitreFilters.length > 0) p.set("mitreTactic", mitreFilters.join(","));
+    if (mitreTechniqueFilters.length > 0) p.set("mitreTechnique", mitreTechniqueFilters.join(","));
+    if (entityFilter) p.set("target", entityFilter);
+    return p.toString();
+  }, [timeRange, search, sourceFilters, severityFilters, categoryFilters, mitreFilters, mitreTechniqueFilters, entityFilter]);
+
   const eventsQuery = useQuery<EventsResponse>({
-    queryKey: ["/api/events", currentTenant?.id, "log-explorer", timeRange],
+    queryKey: ["/api/events", currentTenant?.id, "log-explorer", queryParams],
     queryFn: async () => {
       if (!currentTenant?.id) {
         return { events: [], totalCount: 0, page: 1, pageSize: 200 };
       }
-      const res = await fetch(`/api/events/${currentTenant.id}?pageSize=200`, { credentials: "include" });
+      const res = await fetch(`/api/events/${currentTenant.id}?${queryParams}`, { credentials: "include" });
       if (!res.ok) return { events: [], totalCount: 0, page: 1, pageSize: 200 };
       return res.json();
     },
@@ -187,29 +205,13 @@ export default function LogExplorerPage() {
   }, [eventsQuery.data]);
 
   const filtered: NormalizedEvent[] = useMemo(() => {
-    const rangeOpt = TIME_RANGES.find((t) => t.value === timeRange);
-    const cutoff = rangeOpt && rangeOpt.ms > 0 ? Date.now() - rangeOpt.ms : 0;
+    // Server already filters by: timeRange, search, severity, category,
+    // mitreTactic, mitreTechnique, entity. Only apply source & confidence here.
     return allEvents.filter((ev) => {
-      if (cutoff > 0 && new Date(ev.timestamp).getTime() < cutoff) return false;
-      if (search) {
-        const q = search.toLowerCase();
-        if (
-          !ev.rawLog.toLowerCase().includes(q) &&
-          !ev.source.toLowerCase().includes(q) &&
-          !ev.category.toLowerCase().includes(q) &&
-          !ev.entity.toLowerCase().includes(q)
-        ) return false;
-      }
-      if (sourceFilters.length > 0 && !sourceFilters.includes(ev.source)) return false;
-      if (categoryFilters.length > 0 && !categoryFilters.includes(ev.category)) return false;
-      if (severityFilters.length > 0 && !severityFilters.includes(ev.severity)) return false;
-      if (mitreFilters.length > 0 && !mitreFilters.includes(ev.mitreTactic)) return false;
-      if (mitreTechniqueFilters.length > 0 && !mitreTechniqueFilters.includes(ev.mitreTechnique)) return false;
-      if (entityFilter && !ev.entity.toLowerCase().includes(entityFilter.toLowerCase())) return false;
       if (ev.confidence < minConfidence) return false;
       return true;
     });
-  }, [allEvents, search, timeRange, sourceFilters, categoryFilters, severityFilters, mitreFilters, mitreTechniqueFilters, entityFilter, minConfidence]);
+  }, [allEvents, minConfidence]);
 
   const clearFilters = () => {
     setSearch("");

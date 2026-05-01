@@ -8,6 +8,21 @@ const RATE_LIMIT_MAX_EVENTS = 1000;
 const rateLimitMap = new Map<number, { count: number; windowStart: number }>();
 const rateLimitLocks = new Map<number, Promise<void>>();
 
+// Evict stale rate limit entries every 2 minutes to prevent unbounded memory growth
+setInterval(() => {
+  const now = Date.now();
+  let evicted = 0;
+  for (const [tenantId, entry] of rateLimitMap.entries()) {
+    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+      rateLimitMap.delete(tenantId);
+      evicted++;
+    }
+  }
+  if (evicted > 0) {
+    console.log(`[RateLimit] Evicted ${evicted} stale tenant entries`);
+  }
+}, 120_000);
+
 async function acquireTenantLock(tenantId: number): Promise<() => void> {
   while (rateLimitLocks.has(tenantId)) {
     await rateLimitLocks.get(tenantId);

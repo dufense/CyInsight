@@ -28,6 +28,7 @@ function useAssetQuery(tenantId: number, endpoint: string, opts?: { enabled?: bo
     queryKey: ["/api/asset-inventory", tenantId, endpoint],
     queryFn: () => fetch(`/api/asset-inventory/${tenantId}/${endpoint}`, { credentials: "include" }).then(r => r.json()),
     retry: 1,
+    staleTime: 60_000,
     enabled: (opts?.enabled ?? true) && !!tenantId,
   });
 }

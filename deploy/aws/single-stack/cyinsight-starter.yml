@@ -600,6 +600,20 @@ Resources:
                   - elasticfilesystem:ClientMount
                   - elasticfilesystem:ClientWrite
                 Resource: !GetAtt ClickHouseEFS.Arn
+        - PolicyName: ClickHouseS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/clickhouse/*"
 
   ClickHouseTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -615,14 +629,14 @@ Resources:
       Volumes:
         - Name: clickhouse-data
           EFSVolumeConfiguration:
-            FileSystemId: !Ref ClickHouseEFS
+            FilesystemId: !Ref ClickHouseEFS
             TransitEncryption: ENABLED
             AuthorizationConfig:
               AccessPointId: !Ref ClickHouseEFSAccessPoint
               IAM: ENABLED
       ContainerDefinitions:
         - Name: clickhouse
-          Image: clickhouse/clickhouse-server:24.8
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cyinsight:clickhouse-24.8-v6"
           Essential: true
           PortMappings:
             - ContainerPort: 8123
@@ -636,6 +650,11 @@ Resources:
               Value: default
             - Name: CLICKHOUSE_PASSWORD
               Value: !Ref DBPassword
+            - Name: CH_S3_BUCKET
+              Value: !Ref DataBucket
+            - Name: CH_S3_REGION
+              Value: !Ref AWS::Region
+
           MountPoints:
             - SourceVolume: clickhouse-data
               ContainerPath: /var/lib/clickhouse
@@ -677,6 +696,7 @@ Resources:
       DeploymentConfiguration:
         MaximumPercent: 100
         MinimumHealthyPercent: 0
+      HealthCheckGracePeriodSeconds: 180
 
   # ============================================================================
   # S3 Bucket for Data Storage
@@ -701,6 +721,18 @@ Resources:
             Status: Enabled
             Transitions:
               - TransitionInDays: 365
+                StorageClass: GLACIER
+          - Id: CHWarmToIA
+            Status: Enabled
+            Prefix: clickhouse/warm/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+          - Id: CHColdToGlacier
+            Status: Enabled
+            Prefix: clickhouse/cold/
+            Transitions:
+              - TransitionInDays: 90
                 StorageClass: GLACIER
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -1069,7 +1101,7 @@ Resources:
       TargetTrackingScalingPolicyConfiguration:
         PredefinedMetricSpecification:
           PredefinedMetricType: ALBRequestCountPerTarget
-          ResourceLabel: !Sub "${ALB.FullLoadBalancerName}/${ALBTargetGroup.TargetGroupFullName}"
+          ResourceLabel: !Sub "${ALB.LoadBalancerFullName}/${ALBTargetGroup.TargetGroupFullName}"
         TargetValue: 500.0
         ScaleInCooldown: 60
         ScaleOutCooldown: 30

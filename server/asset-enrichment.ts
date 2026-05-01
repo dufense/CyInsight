@@ -239,10 +239,10 @@ export async function runStartupEnrichment(): Promise<void> {
       if (assetCount.rows[0].count === 0) continue;
 
       const needsEnrichment = await pool.query(
-        `SELECT COUNT(*)::int as count FROM assets WHERE tenant_id = $1 AND (source = 'import' OR software_inventory IS NULL OR software_inventory::text = '[]' OR user_name ~ '^[0-9]+$')`,
+        `SELECT 1 FROM assets WHERE tenant_id = $1 AND (source = 'import' OR software_inventory IS NULL OR software_inventory::text = '[]' OR user_name ~ '^[0-9]+$') LIMIT 1`,
         [t.tenant_id]
       );
-      if (needsEnrichment.rows[0].count > 0) {
+      if (needsEnrichment.rowCount && needsEnrichment.rowCount > 0) {
         const result = await enrichAssetsFromEvents(t.tenant_id);
         console.log(`[Enrichment] Tenant ${t.tenant_id}: ${result.enrichedFromEvents} from events, ${result.softwareInferred} inferred (${result.totalUpdated} total)`);
       }

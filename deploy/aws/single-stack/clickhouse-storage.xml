@@ -1,0 +1,31 @@
+<clickhouse>
+  <storage_configuration>
+    <disks>
+      <s3_warm>
+        <type>s3</type>
+        <endpoint>__S3_ENDPOINT_PLACEHOLDER__</endpoint>
+        <region>__S3_REGION_PLACEHOLDER__</region>
+        <use_environment_credentials>true</use_environment_credentials>
+        <metadata_path>/var/lib/clickhouse/metadata/s3_warm/</metadata_path>
+        <cache_path>/var/lib/clickhouse/caches/s3_warm/</cache_path>
+        <cache_enabled>true</cache_enabled>
+        <cache_max_size>5368709120</cache_max_size>
+      </s3_warm>
+    </disks>
+    <policies>
+      <ccc_tiered>
+        <volumes>
+          <hot>
+            <disk>default</disk>
+            <max_data_part_size_bytes>10737418240</max_data_part_size_bytes>
+          </hot>
+          <warm>
+            <disk>s3_warm</disk>
+            <move_factor>0.2</move_factor>
+            <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
+          </warm>
+        </volumes>
+      </ccc_tiered>
+    </policies>
+  </storage_configuration>
+</clickhouse>

@@ -438,17 +438,33 @@ export default function LogInvestigationPage() {
     }
   }, [searchStr, tenantId]);
 
+  // Helper: throw clear error on 403 so React Query surfaces it
+  async function checkInvestigationAccess(res: Response) {
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || "Access restricted to investigation analysts");
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "Request failed");
+      throw new Error(text);
+    }
+  }
+
   // Sessions list
   const sessionsQuery = useQuery<Session[]>({
     queryKey: ["/api/log-investigation/sessions", tenantId],
     queryFn: async () => {
       if (!tenantId) return [];
       const res = await fetch(`/api/log-investigation/sessions/${tenantId}`, { credentials: "include" });
-      if (!res.ok) return [];
+      await checkInvestigationAccess(res);
       return res.json();
     },
     enabled: !!tenantId,
     staleTime: 30000,
+    retry: (failureCount, error: any) => {
+      if (error?.message?.includes("Access restricted")) return false;
+      return failureCount < 2;
+    },
   });
 
   // Exports list
@@ -457,11 +473,15 @@ export default function LogInvestigationPage() {
     queryFn: async () => {
       if (!tenantId) return [];
       const res = await fetch(`/api/log-investigation/exports/${tenantId}`, { credentials: "include" });
-      if (!res.ok) return [];
+      await checkInvestigationAccess(res);
       return res.json();
     },
     enabled: !!tenantId,
     staleTime: 30000,
+    retry: (failureCount, error: any) => {
+      if (error?.message?.includes("Access restricted")) return false;
+      return failureCount < 2;
+    },
   });
 
   // Polling for cold-tier queries
@@ -635,6 +655,9 @@ export default function LogInvestigationPage() {
   const isColdQuery = sourceMode === "offline" || (sourceMode === "both" && !!pollingQueryId);
   const rows = queryResult?.rows ?? [];
 
+  const accessError = (sessionsQuery.error as Error | null)?.message?.includes("Access restricted")
+    || (exportsQuery.error as Error | null)?.message?.includes("Access restricted");
+
   return (
     <div className="flex flex-col min-h-full">
       <PageHero
@@ -649,6 +672,19 @@ export default function LogInvestigationPage() {
           { label: "Exports", value: exportsQuery.data?.length ?? 0 },
         ]}
       />
+
+      {accessError && (
+        <div className="mx-4 mt-2 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-medium text-amber-600">Access Restricted</p>
+            <p className="text-[11px] text-amber-600/80">
+              Log Investigation is only available to users with the <strong>platform_admin</strong>, <strong>mss_admin</strong>, or <strong>mss_analyst</strong> role.
+              Contact your administrator to request access.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 gap-4 p-4">
         {/* Left Panel — Sessions */}

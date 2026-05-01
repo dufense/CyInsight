@@ -76,7 +76,7 @@ export interface CorrelationPattern {
   tactics?: string[];
 }
 
-const SIGMA_RULES_DIR = path.join(process.cwd(), "sigma-rules");
+export const SIGMA_RULES_DIR = path.join(process.cwd(), "sigma-rules");
 const MAX_MATCHES_PER_EVENT = 10;
 
 let loadedRules: SigmaRule[] = [];
@@ -168,7 +168,7 @@ function determineRuleSource(filePath: string): "builtin" | "community" | "custo
   return "builtin";
 }
 
-function parseRule(content: string, filePath: string): SigmaRule | null {
+export function parseRule(content: string, filePath: string): SigmaRule | null {
   try {
     const parsed = yaml.load(content) as any;
     if (!parsed || !parsed.title || !parsed.detection) return null;
@@ -371,7 +371,7 @@ export function bulkToggleByCategory(category: string, enabled: boolean): number
   return count;
 }
 
-async function syncRuleToDb(rule: SigmaRule): Promise<void> {
+export async function syncRuleToDb(rule: SigmaRule): Promise<void> {
   try {
     const { pool } = await import("./db");
     await pool.query(
@@ -902,6 +902,7 @@ export function createSigmaRule(ruleData: {
   mitre: { tactic: string; technique: string; technique_name: string };
   tags?: string[];
   falsepositives?: string[];
+  tenantId?: number;
 }): SigmaRule {
   const id = `sigma-custom-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -920,7 +921,10 @@ export function createSigmaRule(ruleData: {
     mitre: ruleData.mitre,
   });
 
-  const customDir = path.join(SIGMA_RULES_DIR, "custom");
+  let customDir = path.join(SIGMA_RULES_DIR, "custom");
+  if (ruleData.tenantId) {
+    customDir = path.join(customDir, `tenant-${ruleData.tenantId}`);
+  }
   if (!fs.existsSync(customDir)) fs.mkdirSync(customDir, { recursive: true });
 
   const fileName = `${id}.yml`;
