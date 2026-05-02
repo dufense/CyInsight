@@ -1,0 +1,1018 @@
+##############################################################################
+# CyInsight - Elastic Substrate (pay-as-you-use, scales to Hyperscale)
+# Region: ap-south-1 (Mumbai) by default; works in any 3-AZ region.
+#
+# DESIGN GOAL
+# -----------
+# Same topology shape as cyinsight-hyperscale-substrate.yml, but every component
+# swapped for its on-demand/serverless equivalent so a 1-tenant pilot costs
+# ~$300-500/mo and the SAME stack scales to 500 tenants / 5M EPS without ever
+# being torn down and redesigned.
+#
+# Going from pilot -> hyperscale = `aws cloudformation update-stack` with a
+# different `TenantTier` parameter. The VPC, subnets, secrets, DNS, ALB, S3
+# buckets, Kinesis stream names, Aurora cluster identifier, and Redis endpoint
+# all stay the same. Only the SCALE knobs (Aurora MaxACU, NAT GW count,
+# ClickHouse instance type via the 08 child stack, ECS desired/max counts via
+# the 06/07 child stacks) change.
+#
+# WHAT THIS STACK PROVISIONS (pilot defaults shown)
+# -------------------------------------------------
+#   - VPC + 3 AZ subnets (public/private/data) — 3 AZs always provisioned so
+#     scaling to multi-AZ HA is a parameter flip, not a redesign.
+#   - NAT Gateway: 1 (HighAvailability=false) or 3 (HighAvailability=true).
+#   - Aurora PostgreSQL Serverless v2 (writer + optional reader; ACU range
+#     parameterised).
+#     + RDS Proxy in front (always — connection multiplexing matters even at
+#       small scale).
+#   - ElastiCache Serverless (Redis 7) — pay per ECPU + GB-hr.
+#   - 7 Kinesis Data Streams in ON-DEMAND mode (raw, normalized, alerts,
+#     enriched, commands-polling, metrics, dlq) — pay per GB ingested,
+#     no shard provisioning, auto-scales to 200 MB/s/partition.
+#   - S3 buckets (raw events, processed Iceberg, archive, DLQ, Athena results).
+#   - Glue catalog + Athena workgroups (default + forensics) so analytics work
+#     from day 1 even before ClickHouse is enabled.
+#   - ALB (internet-facing) + WAFv2 (managed rule set + per-IP rate limit).
+#   - Security groups (ALB, ECS, Aurora, Redis, ClickHouse).
+#   - CloudWatch alarms (Aurora ACU, Kinesis lag, ALB 5xx).
+#
+# WHAT THIS STACK DOES NOT PROVISION
+# ----------------------------------
+#   - ClickHouse cluster — optional; deploy 08-clickhouse-cluster.yml after
+#     this stack succeeds. Pilot tier intentionally skips ClickHouse and uses
+#     Athena/S3 for analytics ($0 idle cost). Growth tier deploys CH at 3
+#     nodes (r6i.large in single-AZ, r6i.2xlarge in HA).
+#   - ECS services — deploy 06-management-ecs.yml + 07-data-plane-ecs.yml
+#     using THIS stack name as VpcStackName/AuroraStackName/KinesisStackName/
+#     DataLakeStackName. They consume the cross-stack exports declared below
+#     without modification.
+#
+# COST (monthly, on-demand list, ap-south-1, May 2026 prices)
+# -----------------------------------------------------------
+#   Pilot     (1-5 tenants,    1-10 GB/day):   ~$300-500   (no ClickHouse)
+#   Growth    (20-50 tenants, 50-100 GB/day):  ~$2.5-3.5K  (CH 3xr6i.large)
+#   Midtier   (100-200 tenants,  500 GB/day):  ~$8-12K     (CH 3xr6i.2xlarge)
+#   Hyperscale (500 tenants,    5M EPS):       ~$180-220K  (CH 9xi4i.8xlarge,
+#                                                          mgmt 10-40 + data
+#                                                          60-600 ECS tasks)
+#   See deploy/aws/ELASTIC_RUNBOOK.md §3 for full breakdown.
+#
+# DEPLOY (pilot tier)
+# -------------------
+#   aws cloudformation deploy \
+#     --template-file deploy/aws/cloudformation/cyinsight-elastic-substrate.yml \
+#     --stack-name cyinsight-elastic \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --region ap-south-1 \
+#     --parameter-overrides \
+#       TenantTier=pilot \
+#       HighAvailability=false \
+#       DomainName=app.example.com \
+#       CertificateArn=arn:aws:acm:ap-south-1:ACCOUNT:certificate/ID
+#
+# UPGRADE (pilot -> growth, no redesign)
+# --------------------------------------
+#   aws cloudformation update-stack \
+#     --stack-name cyinsight-elastic \
+#     --use-previous-template \
+#     --parameters ParameterKey=TenantTier,ParameterValue=growth \
+#                  ParameterKey=HighAvailability,UsePreviousValue=true ...
+#   then deploy 08-clickhouse-cluster.yml separately.
+##############################################################################
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CyInsight Elastic Substrate — pay-as-you-use, scales pilot -> Hyperscale without redesign"
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: elastic
+    Description: Tag prefix on every resource. Use distinct values for prod/staging.
+
+  TenantTier:
+    Type: String
+    Default: pilot
+    AllowedValues: [pilot, growth, midtier, hyperscale]
+    Description: >
+      Single knob that drives every scale-related parameter via the TierMap
+      mapping below. pilot = lowest possible idle cost, hyperscale = the
+      500-tenant / 5M EPS ceiling. Changing this and running update-stack is
+      non-destructive: VPC, subnets, secrets, ALB, S3 buckets, Kinesis stream
+      names, and Aurora cluster identifier are all preserved.
+
+  HighAvailability:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      false = single NAT Gateway in AZ1 (private subnets in AZ2/3 route via it).
+      true  = NAT Gateway in every AZ + Aurora reader in AZ2.
+      Toggling false -> true is non-destructive (CFN adds new resources,
+      reconfigures route tables; no existing data touched).
+
+  DomainName:
+    Type: String
+    Description: FQDN customers use (e.g. app.example.com). Point your DNS at AlbDnsName output.
+    MinLength: 4
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for HTTPS, must be in the same region as this stack.
+    MinLength: 20
+
+  VpcCidr:
+    Type: String
+    Default: "10.60.0.0/16"
+    AllowedPattern: "^10\\.\\d{1,3}\\.0\\.0/16$"
+    Description: >
+      VPC CIDR. Default 10.60.0.0/16 avoids the existing Hyperscale ranges
+      (10.10/10.20/10.30/10.40/10.50). Pick a unique /16 if you run multiple
+      elastic substrates in the same account.
+
+  DBUsername:
+    Type: String
+    Default: cyinsight_admin
+    Description: >
+      Aurora master username. Password is auto-generated by Secrets Manager
+      and exposed via the ${StackName}-DBSecretArn export — task definitions
+      in 06/07 consume the secret and never see the plaintext password.
+
+  AuroraMinAcu:
+    Type: Number
+    Default: 0.5
+    MinValue: 0.5
+    MaxValue: 128
+    Description: >
+      Aurora Serverless v2 minimum capacity (ACU). 0.5 ACU is the absolute
+      floor (~$45/mo per instance). Bumped to 4-8 ACU at growth tier so cold
+      queries do not pay the warm-up tax.
+
+# ─── Mappings: TenantTier -> scale knobs ───────────────────────────────────
+# Each tier translates to concrete numbers used downstream. Keep this map in
+# sync with deploy/aws/ELASTIC_RUNBOOK.md §2.
+Mappings:
+  TierMap:
+    pilot:
+      AuroraMaxAcu: "16"      # peaks for cold reports; idles at MinAcu
+      AuroraReaders: "0"      # writer-only in pilot
+      RedisMaxEcpu: "5000"    # ElastiCache Serverless cap
+      KinesisMode: "ON_DEMAND"
+      WafRateLimit: "2000"    # per-IP per-5min — generous for small TAS
+    growth:
+      AuroraMaxAcu: "32"
+      AuroraReaders: "1"
+      RedisMaxEcpu: "15000"
+      KinesisMode: "ON_DEMAND"
+      WafRateLimit: "5000"
+    midtier:
+      AuroraMaxAcu: "64"
+      AuroraReaders: "1"
+      RedisMaxEcpu: "50000"
+      KinesisMode: "ON_DEMAND"
+      WafRateLimit: "10000"
+    hyperscale:
+      AuroraMaxAcu: "256"
+      AuroraReaders: "2"
+      RedisMaxEcpu: "200000"
+      KinesisMode: "ON_DEMAND"  # on-demand still, just higher GB/s
+      WafRateLimit: "20000"
+
+Conditions:
+  IsHA:           !Equals [!Ref HighAvailability, "true"]
+  HasReader1:    !Or
+                  - !Equals [!FindInMap [TierMap, !Ref TenantTier, AuroraReaders], "1"]
+                  - !Equals [!FindInMap [TierMap, !Ref TenantTier, AuroraReaders], "2"]
+  HasReader2:    !Equals [!FindInMap [TierMap, !Ref TenantTier, AuroraReaders], "2"]
+
+Resources:
+
+  # ============================================================================
+  # VPC — 3 AZ for forward compatibility (active AZs depend on HighAvailability)
+  # ============================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-vpc"}]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-igw"}]
+
+  GatewayAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnets (one per AZ) — ALB + NAT GW live here.
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-public-1"}]
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-public-2"}]
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-public-3"}]
+
+  # Private subnets (one per AZ) — ECS tasks + Aurora + Redis + ClickHouse.
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-private-1"}]
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [4, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-private-2"}]
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [5, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-private-3"}]
+
+  # Data subnets (one per AZ) — Aurora subnet group, ClickHouse ASG.
+  DataSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [6, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-data-1"}]
+  DataSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [7, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-data-2"}]
+  DataSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [8, !Cidr [!Ref VpcCidr, 12, 10]]
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-data-3"}]
+
+  # NAT Gateways — always 1 in AZ1, optional 2 more when HighAvailability=true.
+  Nat1Eip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-1-eip"}]
+  Nat1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt Nat1Eip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-1"}]
+
+  Nat2Eip:
+    Type: AWS::EC2::EIP
+    Condition: IsHA
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-2-eip"}]
+  Nat2:
+    Type: AWS::EC2::NatGateway
+    Condition: IsHA
+    Properties:
+      AllocationId: !GetAtt Nat2Eip.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-2"}]
+
+  Nat3Eip:
+    Type: AWS::EC2::EIP
+    Condition: IsHA
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-3-eip"}]
+  Nat3:
+    Type: AWS::EC2::NatGateway
+    Condition: IsHA
+    Properties:
+      AllocationId: !GetAtt Nat3Eip.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-nat-3"}]
+
+  # Public route table — one shared by all 3 public subnets.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-rt-public"}]
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttach
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet1, RouteTableId: !Ref PublicRouteTable }
+  PublicAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet2, RouteTableId: !Ref PublicRouteTable }
+  PublicAssoc3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet3, RouteTableId: !Ref PublicRouteTable }
+
+  # Private route tables — one per AZ. In single-NAT mode, all three route via Nat1.
+  # In HA mode, each AZ routes via its own NAT GW.
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-rt-private-1"}]
+  PrivateDefaultRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref Nat1
+  PrivateAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet1, RouteTableId: !Ref PrivateRouteTable1 }
+  DataAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DataSubnet1, RouteTableId: !Ref PrivateRouteTable1 }
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-rt-private-2"}]
+  PrivateDefaultRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [IsHA, !Ref Nat2, !Ref Nat1]
+  PrivateAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet2, RouteTableId: !Ref PrivateRouteTable2 }
+  DataAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DataSubnet2, RouteTableId: !Ref PrivateRouteTable2 }
+
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: !Sub "cyinsight-${EnvironmentName}-rt-private-3"}]
+  PrivateDefaultRoute3:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [IsHA, !Ref Nat3, !Ref Nat1]
+  PrivateAssoc3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet3, RouteTableId: !Ref PrivateRouteTable3 }
+  DataAssoc3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DataSubnet3, RouteTableId: !Ref PrivateRouteTable3 }
+
+  # ============================================================================
+  # Security Groups
+  # ============================================================================
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-${EnvironmentName}-alb-sg"
+      GroupDescription: ALB ingress 443 from internet, 80 redirect
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: "0.0.0.0/0", Description: HTTPS from internet }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: "0.0.0.0/0", Description: HTTP redirect }
+
+  EcsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-${EnvironmentName}-ecs-sg"
+      GroupDescription: ECS tasks - app port 5000 from ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref AlbSg
+          Description: App port from ALB only
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: "0.0.0.0/0", Description: All outbound for AWS APIs }
+
+  AuroraSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-${EnvironmentName}-aurora-sg"
+      GroupDescription: Aurora 5432 from ECS + RDS Proxy
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EcsSg
+          Description: Postgres from ECS tasks
+
+  # Self-referencing rule: RdsProxy and AuroraCluster both attach AuroraSg.
+  # Without this, the proxy ENI cannot reach the Aurora ENI on 5432 (default
+  # SG egress is open, but ingress is closed by default). Mirror of
+  # AuroraSgSelfIngress in cyinsight-hyperscale-substrate.yml.
+  AuroraSgSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AuroraSg
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AuroraSg
+      Description: Self-ingress so RDS Proxy can reach Aurora (both share AuroraSg)
+
+  RedisSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-${EnvironmentName}-redis-sg"
+      GroupDescription: Redis 6379 from ECS only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref EcsSg
+          Description: Redis from ECS tasks
+
+  ClickHouseSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "cyinsight-${EnvironmentName}-clickhouse-sg"
+      GroupDescription: ClickHouse HTTP 8123 + native 9000 from ECS only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8123, ToPort: 8123, SourceSecurityGroupId: !Ref EcsSg, Description: HTTP from ECS }
+        - { IpProtocol: tcp, FromPort: 9000, ToPort: 9000, SourceSecurityGroupId: !Ref EcsSg, Description: Native from ECS }
+
+  # ============================================================================
+  # Aurora PostgreSQL Serverless v2 + RDS Proxy
+  # ============================================================================
+  AuroraSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "cyinsight ${EnvironmentName} Aurora subnets (3 AZ)"
+      SubnetIds: [!Ref DataSubnet1, !Ref DataSubnet2, !Ref DataSubnet3]
+
+  AuroraParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "cyinsight ${EnvironmentName} aurora-postgresql15 params"
+      Family: aurora-postgresql15
+      Parameters:
+        rds.force_ssl: "0"             # app verifies SSL via PGSSLMODE=verify-ca
+        log_connections: "1"
+
+  # Master credentials secret — auto-generated by Secrets Manager.
+  DBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "cyinsight/${EnvironmentName}/aurora-master-password"
+      Description: Auto-generated Aurora master password (rotated separately from app secret)
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBUsername}"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\$`'
+        PasswordLength: 32
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: "15.10"
+      EngineMode: provisioned    # Serverless v2 uses "provisioned" engine mode + ACU instances
+      DBClusterIdentifier: !Sub "cyinsight-${EnvironmentName}-aurora"
+      DatabaseName: cyinsight
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBPasswordSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      DBClusterParameterGroupName: !Ref AuroraParameterGroup
+      VpcSecurityGroupIds: [!Ref AuroraSg]
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref AuroraMinAcu
+        MaxCapacity: !FindInMap [TierMap, !Ref TenantTier, AuroraMaxAcu]
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      EnableCloudwatchLogsExports: [postgresql]
+
+  AuroraWriter:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "cyinsight-${EnvironmentName}-writer"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      PromotionTier: 0
+
+  AuroraReader1:
+    Type: AWS::RDS::DBInstance
+    Condition: HasReader1
+    Properties:
+      DBInstanceIdentifier: !Sub "cyinsight-${EnvironmentName}-reader-1"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      PromotionTier: 1
+
+  AuroraReader2:
+    Type: AWS::RDS::DBInstance
+    Condition: HasReader2
+    Properties:
+      DBInstanceIdentifier: !Sub "cyinsight-${EnvironmentName}-reader-2"
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      PromotionTier: 1
+
+  # ── RDS Proxy ──────────────────────────────────────────────────────────────
+  RdsProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "cyinsight-${EnvironmentName}-rdsproxy-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: rds.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue, secretsmanager:DescribeSecret]
+                Resource: !Ref DBPasswordSecret
+
+  RdsProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub "cyinsight-${EnvironmentName}-proxy"
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RdsProxyRole.Arn
+      VpcSubnetIds: [!Ref DataSubnet1, !Ref DataSubnet2, !Ref DataSubnet3]
+      VpcSecurityGroupIds: [!Ref AuroraSg]
+      RequireTLS: true     # in-VPC traffic is still encrypted; matches Hyperscale substrate
+      Auth:
+        - { AuthScheme: SECRETS, IAMAuth: DISABLED, SecretArn: !Ref DBPasswordSecret }
+
+  RdsProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RdsProxy
+      TargetGroupName: default
+      DBClusterIdentifiers: [!Ref AuroraCluster]
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # Application DB secret — points at the RDS Proxy endpoint, used by 06/07.
+  DBSecretViaProxy:
+    Type: AWS::SecretsManager::Secret
+    DependsOn: RdsProxyTargetGroup
+    Properties:
+      Name: !Sub "cyinsight/${EnvironmentName}/db-via-proxy"
+      Description: App DB connection string (via RDS Proxy) — consumed by ECS task defs
+      SecretString: !Sub
+        - '{"DATABASE_URL":"postgres://${DBUsername}:${pw}@${proxyEp}:5432/cyinsight?sslmode=require","host":"${proxyEp}","port":"5432","username":"${DBUsername}","dbname":"cyinsight"}'
+        - pw: !Sub "{{resolve:secretsmanager:${DBPasswordSecret}:SecretString:password}}"
+          proxyEp: !GetAtt RdsProxy.Endpoint
+
+  # ============================================================================
+  # ElastiCache Serverless (Redis) — pay per ECPU + GB-hr
+  # ============================================================================
+  RedisServerless:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName: !Sub "cyinsight-${EnvironmentName}-cache"
+      Engine: redis
+      MajorEngineVersion: "7"
+      Description: !Sub "cyinsight ${EnvironmentName} elastic Redis (serverless)"
+      SecurityGroupIds: [!Ref RedisSg]
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2, !Ref PrivateSubnet3]
+      CacheUsageLimits:
+        DataStorage:
+          Maximum: 5      # GB max — caps cost at low tiers, raise for hyperscale
+          Unit: GB
+        ECPUPerSecond:
+          Maximum: !FindInMap [TierMap, !Ref TenantTier, RedisMaxEcpu]
+
+  # ============================================================================
+  # Kinesis Data Streams — ON-DEMAND mode (no shard provisioning)
+  # ============================================================================
+  KinesisRawEvents:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-events-raw"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisNormalizedEvents:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-events-normalized"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisAlertEvents:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-events-alerts"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisEnrichedEvents:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-events-enriched"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisCommandsPolling:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-commands-polling"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisPipelineMetrics:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-metrics-pipeline"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 24
+  KinesisDlq:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-dlq"
+      StreamModeDetails: { StreamMode: !FindInMap [TierMap, !Ref TenantTier, KinesisMode] }
+      RetentionPeriodHours: 168
+
+  # ============================================================================
+  # S3 Data Lake
+  # ============================================================================
+  RawEventsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cyinsight-${EnvironmentName}-${AWS::AccountId}-raw-events"
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierAfter90Days
+            Status: Enabled
+            Transitions: [{StorageClass: GLACIER_IR, TransitionInDays: 90}]
+      VersioningConfiguration: { Status: Suspended }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cyinsight-${EnvironmentName}-${AWS::AccountId}-processed"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cyinsight-${EnvironmentName}-${AWS::AccountId}-archive"
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeepArchiveAfter180Days
+            Status: Enabled
+            Transitions: [{StorageClass: DEEP_ARCHIVE, TransitionInDays: 180}]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+
+  DlqBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cyinsight-${EnvironmentName}-${AWS::AccountId}-dlq"
+      LifecycleConfiguration:
+        Rules: [{Id: ExpireAfter30Days, Status: Enabled, ExpirationInDays: 30}]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cyinsight-${EnvironmentName}-${AWS::AccountId}-athena-results"
+      LifecycleConfiguration:
+        Rules: [{Id: ExpireAfter14Days, Status: Enabled, ExpirationInDays: 14}]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+
+  # ============================================================================
+  # Glue + Athena (analytics from day 1, no ClickHouse required for pilot)
+  # ============================================================================
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "cyinsight_${EnvironmentName}_lake"
+        Description: !Sub "cyinsight ${EnvironmentName} data lake (raw + processed)"
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-wg"
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/wg/"
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+
+  AthenaForensicsWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-forensics-wg"
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/forensics/"
+        EnforceWorkGroupConfiguration: true
+
+  # ============================================================================
+  # ALB (internet-facing) + WAF
+  # ============================================================================
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-alb"
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups: [!Ref AlbSg]
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2, !Ref PublicSubnet3]
+      LoadBalancerAttributes:
+        - { Key: idle_timeout.timeout_seconds, Value: "60" }
+        - { Key: routing.http2.enabled, Value: "true" }
+        - { Key: deletion_protection.enabled, Value: "false" }
+
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-tg"
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200-299" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates: [{CertificateArn: !Ref CertificateArn}]
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref AlbTargetGroup}]
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  HttpRedirectListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 }
+
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "cyinsight-${EnvironmentName}-acl"
+      Scope: REGIONAL
+      DefaultAction: { Allow: {} }
+      VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: !Sub "cyinsight-${EnvironmentName}-acl" }
+      Rules:
+        - Name: AWSCommonRules
+          Priority: 0
+          OverrideAction: { None: {} }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: AWSCommonRules }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+        - Name: PerIpRateLimit
+          Priority: 1
+          Action: { Block: {} }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: PerIpRateLimit }
+          Statement:
+            RateBasedStatement:
+              Limit: !FindInMap [TierMap, !Ref TenantTier, WafRateLimit]
+              AggregateKeyType: IP
+
+  WafAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref ALB
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  # ============================================================================
+  # Session Secret
+  # ============================================================================
+  SessionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "cyinsight/${EnvironmentName}/session-secret"
+      Description: Express session secret (auto-generated, never logged)
+      GenerateSecretString:
+        ExcludePunctuation: true
+        PasswordLength: 64
+
+  # ============================================================================
+  # CloudWatch alarms — minimum operational set
+  # ============================================================================
+  AuroraAcuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-${EnvironmentName}-aurora-acu-high"
+      MetricName: ServerlessDatabaseCapacity
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !FindInMap [TierMap, !Ref TenantTier, AuroraMaxAcu]
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions: [{Name: DBClusterIdentifier, Value: !Ref AuroraCluster}]
+      TreatMissingData: notBreaching
+
+  KinesisRawIteratorAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-${EnvironmentName}-kinesis-raw-lag"
+      MetricName: GetRecords.IteratorAgeMilliseconds
+      Namespace: AWS/Kinesis
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 60000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions: [{Name: StreamName, Value: !Ref KinesisRawEvents}]
+      TreatMissingData: notBreaching
+
+  Alb5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cyinsight-${EnvironmentName}-alb-5xx"
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 50
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions: [{Name: LoadBalancer, Value: !GetAtt ALB.LoadBalancerFullName}]
+      TreatMissingData: notBreaching
+
+# ============================================================================
+# Outputs — DROP-IN COMPATIBLE with existing 06/07/08 child stacks.
+# Export names mirror cyinsight-hyperscale-substrate.yml exactly so the
+# existing per-plane templates resolve every Fn::ImportValue without change.
+# ============================================================================
+Outputs:
+  StackName:
+    Description: This stack's own name — for nested-parent passthrough.
+    Value: !Ref AWS::StackName
+
+  TenantTier:
+    Description: Currently-active tier (pilot|growth|midtier|hyperscale)
+    Value: !Ref TenantTier
+
+  # ─── VPC ────────────────────────────────────────────────────────────────────
+  VpcId:    { Value: !Ref VPC,                   Export: { Name: !Sub "${AWS::StackName}-VpcId" } }
+  VpcCidr:  { Value: !GetAtt VPC.CidrBlock,      Export: { Name: !Sub "${AWS::StackName}-VpcCidr" } }
+  PublicSubnet1Id:  { Value: !Ref PublicSubnet1,  Export: { Name: !Sub "${AWS::StackName}-PublicSubnet1Id" } }
+  PublicSubnet2Id:  { Value: !Ref PublicSubnet2,  Export: { Name: !Sub "${AWS::StackName}-PublicSubnet2Id" } }
+  PublicSubnet3Id:  { Value: !Ref PublicSubnet3,  Export: { Name: !Sub "${AWS::StackName}-PublicSubnet3Id" } }
+  PrivateSubnet1Id: { Value: !Ref PrivateSubnet1, Export: { Name: !Sub "${AWS::StackName}-PrivateSubnet1Id" } }
+  PrivateSubnet2Id: { Value: !Ref PrivateSubnet2, Export: { Name: !Sub "${AWS::StackName}-PrivateSubnet2Id" } }
+  PrivateSubnet3Id: { Value: !Ref PrivateSubnet3, Export: { Name: !Sub "${AWS::StackName}-PrivateSubnet3Id" } }
+  DataSubnet1Id:    { Value: !Ref DataSubnet1,    Export: { Name: !Sub "${AWS::StackName}-DataSubnet1Id" } }
+  DataSubnet2Id:    { Value: !Ref DataSubnet2,    Export: { Name: !Sub "${AWS::StackName}-DataSubnet2Id" } }
+  DataSubnet3Id:    { Value: !Ref DataSubnet3,    Export: { Name: !Sub "${AWS::StackName}-DataSubnet3Id" } }
+  ECSSecurityGroupId:        { Value: !Ref EcsSg,        Export: { Name: !Sub "${AWS::StackName}-ECSSecurityGroupId" } }
+  ALBSecurityGroupId:        { Value: !Ref AlbSg,        Export: { Name: !Sub "${AWS::StackName}-ALBSecurityGroupId" } }
+  AuroraSecurityGroupId:     { Value: !Ref AuroraSg,     Export: { Name: !Sub "${AWS::StackName}-AuroraSecurityGroupId" } }
+  ClickHouseSecurityGroupId: { Value: !Ref ClickHouseSg, Export: { Name: !Sub "${AWS::StackName}-ClickHouseSecurityGroupId" } }
+
+  # ─── Aurora ─────────────────────────────────────────────────────────────────
+  ClusterEndpoint:        { Value: !GetAtt AuroraCluster.Endpoint.Address,     Export: { Name: !Sub "${AWS::StackName}-ClusterEndpoint" } }
+  ReaderEndpoint:         { Value: !GetAtt AuroraCluster.ReadEndpoint.Address, Export: { Name: !Sub "${AWS::StackName}-ReaderEndpoint" } }
+  ClusterPort:            { Value: !GetAtt AuroraCluster.Endpoint.Port,        Export: { Name: !Sub "${AWS::StackName}-ClusterPort" } }
+  DBSecretArn:
+    Description: App DB secret (DATABASE_URL via RDS Proxy) consumed by 06/07 task defs.
+    Value: !Ref DBSecretViaProxy
+    Export: { Name: !Sub "${AWS::StackName}-DBSecretArn" }
+  DBAuroraSecretArn:
+    Description: Aurora master credentials (RDS Proxy backend; not for app use).
+    Value: !Ref DBPasswordSecret
+    Export: { Name: !Sub "${AWS::StackName}-DBAuroraSecretArn" }
+  DBPasswordSecretArn:
+    Value: !Ref DBPasswordSecret
+    Export: { Name: !Sub "${AWS::StackName}-DBPasswordSecretArn" }
+  RDSProxyEndpoint:
+    Value: !GetAtt RdsProxy.Endpoint
+    Export: { Name: !Sub "${AWS::StackName}-RDSProxyEndpoint" }
+  ClusterIdentifier:
+    Value: !Ref AuroraCluster
+    Export: { Name: !Sub "${AWS::StackName}-ClusterIdentifier" }
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  RedisConfigurationEndpoint:
+    Description: ElastiCache Serverless Redis endpoint (use TLS).
+    Value: !GetAtt RedisServerless.Endpoint.Address
+    Export: { Name: !Sub "${AWS::StackName}-RedisConfigurationEndpoint" }
+
+  # ─── Kinesis ────────────────────────────────────────────────────────────────
+  StreamPrefix:
+    Description: Common prefix for Kinesis streams.
+    Value: !Sub "cyinsight-${EnvironmentName}"
+    Export: { Name: !Sub "${AWS::StackName}-StreamPrefix" }
+  RawEventsStream:        { Value: !Ref KinesisRawEvents,        Export: { Name: !Sub "${AWS::StackName}-RawEventsStream" } }
+  NormalizedEventsStream: { Value: !Ref KinesisNormalizedEvents, Export: { Name: !Sub "${AWS::StackName}-NormalizedEventsStream" } }
+  AlertEventsStream:      { Value: !Ref KinesisAlertEvents,      Export: { Name: !Sub "${AWS::StackName}-AlertEventsStream" } }
+  EnrichedEventsStream:   { Value: !Ref KinesisEnrichedEvents,   Export: { Name: !Sub "${AWS::StackName}-EnrichedEventsStream" } }
+  CommandsPollingStream:  { Value: !Ref KinesisCommandsPolling,  Export: { Name: !Sub "${AWS::StackName}-CommandsPollingStream" } }
+  PipelineMetricsStream:  { Value: !Ref KinesisPipelineMetrics,  Export: { Name: !Sub "${AWS::StackName}-PipelineMetricsStream" } }
+  DlqStream:              { Value: !Ref KinesisDlq,              Export: { Name: !Sub "${AWS::StackName}-DlqStream" } }
+  DlqBucketName:          { Value: !Ref DlqBucket,               Export: { Name: !Sub "${AWS::StackName}-DlqBucketName" } }
+
+  # ─── S3 Data Lake ───────────────────────────────────────────────────────────
+  RawEventsBucketName:    { Value: !Ref RawEventsBucket,        Export: { Name: !Sub "${AWS::StackName}-RawEventsBucketName" } }
+  RawEventsBucketArn:     { Value: !GetAtt RawEventsBucket.Arn, Export: { Name: !Sub "${AWS::StackName}-RawEventsBucketArn" } }
+  ProcessedBucketName:    { Value: !Ref ProcessedBucket,        Export: { Name: !Sub "${AWS::StackName}-ProcessedBucketName" } }
+  ProcessedBucketArn:     { Value: !GetAtt ProcessedBucket.Arn, Export: { Name: !Sub "${AWS::StackName}-ProcessedBucketArn" } }
+  ArchiveBucketName:      { Value: !Ref ArchiveBucket,          Export: { Name: !Sub "${AWS::StackName}-ArchiveBucketName" } }
+  ArchiveBucketArn:       { Value: !GetAtt ArchiveBucket.Arn,   Export: { Name: !Sub "${AWS::StackName}-ArchiveBucketArn" } }
+  GlueDatabaseName:       { Value: !Ref GlueDatabase,           Export: { Name: !Sub "${AWS::StackName}-GlueDatabaseName" } }
+  AthenaWorkgroupName:    { Value: !Ref AthenaWorkgroup,        Export: { Name: !Sub "${AWS::StackName}-AthenaWorkgroupName" } }
+  AthenaForensicsWorkgroupName:
+    Value: !Ref AthenaForensicsWorkgroup
+    Export: { Name: !Sub "${AWS::StackName}-AthenaForensicsWorkgroupName" }
+
+  # ─── ALB ────────────────────────────────────────────────────────────────────
+  AlbDnsName:
+    Description: ALB DNS — point your DomainName CNAME/ALIAS here.
+    Value: !GetAtt ALB.DNSName
+    Export: { Name: !Sub "${AWS::StackName}-AlbDnsName" }
+  AlbTargetGroupArn:
+    Value: !Ref AlbTargetGroup
+    Export: { Name: !Sub "${AWS::StackName}-AlbTargetGroupArn" }
+
+  # ─── Session secret ─────────────────────────────────────────────────────────
+  SessionSecretArn:
+    Value: !Ref SessionSecret
+    Export: { Name: !Sub "${AWS::StackName}-SessionSecretArn" }
+
+  FollowOnDeployHint:
+    Description: Next steps after this stack succeeds.
+    Value: !Sub "Pilot tier ready. To enable ClickHouse: deploy 08-clickhouse-cluster.yml with VpcStackName=${AWS::StackName}, DataLakeStackName=${AWS::StackName}, ClusterSize=3 (r6i.large for growth, i4i.8xlarge for hyperscale). Then deploy 06-management-ecs.yml + 07-data-plane-ecs.yml with VpcStackName=${AWS::StackName}, AuroraStackName=${AWS::StackName}, KinesisStackName=${AWS::StackName}, DataLakeStackName=${AWS::StackName}. See deploy/aws/ELASTIC_RUNBOOK.md."

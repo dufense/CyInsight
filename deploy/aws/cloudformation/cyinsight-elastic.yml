@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CyInsight Elastic — single-deploy nested root stack.
+
+  Wraps the elastic substrate + (optional) ClickHouse + management plane +
+  (optional) data plane in one `aws cloudformation deploy`. Pilot tier
+  intentionally skips ClickHouse + data plane to hold the idle floor near
+  $300-500/mo; growth/midtier/hyperscale enable them.
+
+  Same TenantTier knob as cyinsight-elastic-substrate.yml — the wrapper
+  forwards it to the substrate AND maps it to the per-plane sizing knobs
+  (DesiredCount / MinCount / MaxCount / TaskCpu / TaskMemory / DbPoolMax /
+  ClickHouse instance type).
+
+  Deploy:
+    deploy/aws/scripts/upload-elastic-templates.sh <bucket>      # one-time
+    deploy/aws/scripts/deploy-elastic.sh                          # orchestrator
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: elastic
+    AllowedValues: [elastic, production, staging]
+
+  TenantTier:
+    Type: String
+    Default: pilot
+    AllowedValues: [pilot, growth, midtier, hyperscale]
+    Description: Single scale knob — propagates to substrate + every child stack.
+
+  HighAvailability:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  EnableClickHouse:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      pilot tier defaults this to "false" (Athena/S3 only — $0 idle OLAP cost).
+      Flip to "true" once tenant load justifies the hot OLAP tier
+      (typical inflection point: ~50 tenants or 100 GB/day events).
+
+  EnableDataPlane:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      pilot tier defaults to "false" — management plane handles ingestion
+      directly. Flip to "true" at growth+ to dedicate ingest to the data
+      plane ECS service.
+
+  TemplatesBucket:
+    Type: String
+    Description: S3 bucket where the 4 child templates have been uploaded.
+    AllowedPattern: "^[a-z0-9.\\-]{3,63}$"
+
+  TemplatesPrefix:
+    Type: String
+    Default: "elastic/v1/"
+    Description: S3 key prefix under TemplatesBucket containing the templates.
+
+  DomainName:
+    Type: String
+    Description: FQDN customers reach (e.g. app.example.com).
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN in the same region as this stack.
+
+  ImageUri:
+    Type: String
+    Description: ECR image URI for both planes (mgmt + data).
+
+  EC2KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 keypair for ClickHouse SSH (use SSM Session Manager instead).
+
+  ClickHouseAdminPasswordParam:
+    Type: String
+    Default: "/cyinsight/elastic/ch-admin-password"
+    Description: SSM SecureString parameter holding the ClickHouse admin password.
+
+  RegionCode:
+    Type: String
+    Default: ap-south-1
+    AllowedValues: [ap-south-1, me-south-1, af-south-1, us-east-1, us-west-2, eu-west-1]
+
+# ─── Tier mapping (mgmt + data plane sizing) ───────────────────────────────
+Mappings:
+  TierMap:
+    pilot:
+      MgmtTaskCpu:    "1024"
+      MgmtTaskMemory: "2048"
+      MgmtDesired:    "2"
+      MgmtMin:        "2"
+      MgmtMax:        "10"
+      MgmtDbPoolMax:  "20"
+      DataTaskCpu:    "1024"
+      DataTaskMemory: "2048"
+      DataDesired:    "2"
+      DataMin:        "2"
+      DataMax:        "10"
+      DataDbPoolMax:  "20"
+      ChInstanceType: "r6i.large"
+      ChClusterSize:  "3"
+      ChDiskGiB:      "200"
+      ChDiskIops:     "6000"
+      ChDiskMbps:     "500"
+    growth:
+      MgmtTaskCpu:    "2048"
+      MgmtTaskMemory: "4096"
+      MgmtDesired:    "3"
+      MgmtMin:        "3"
+      MgmtMax:        "20"
+      MgmtDbPoolMax:  "30"
+      DataTaskCpu:    "2048"
+      DataTaskMemory: "4096"
+      DataDesired:    "3"
+      DataMin:        "3"
+      DataMax:        "30"
+      DataDbPoolMax:  "30"
+      ChInstanceType: "r6i.large"
+      ChClusterSize:  "3"
+      ChDiskGiB:      "500"
+      ChDiskIops:     "8000"
+      ChDiskMbps:     "600"
+    midtier:
+      MgmtTaskCpu:    "4096"
+      MgmtTaskMemory: "8192"
+      MgmtDesired:    "5"
+      MgmtMin:        "5"
+      MgmtMax:        "30"
+      MgmtDbPoolMax:  "50"
+      DataTaskCpu:    "4096"
+      DataTaskMemory: "8192"
+      DataDesired:    "10"
+      DataMin:        "10"
+      DataMax:        "60"
+      DataDbPoolMax:  "50"
+      ChInstanceType: "r6i.2xlarge"
+      ChClusterSize:  "3"
+      ChDiskGiB:      "1000"
+      ChDiskIops:     "12000"
+      ChDiskMbps:     "700"
+    hyperscale:
+      MgmtTaskCpu:    "4096"
+      MgmtTaskMemory: "8192"
+      MgmtDesired:    "10"
+      MgmtMin:        "10"
+      MgmtMax:        "40"
+      MgmtDbPoolMax:  "200"
+      DataTaskCpu:    "8192"
+      DataTaskMemory: "16384"
+      DataDesired:    "60"
+      DataMin:        "60"
+      DataMax:        "600"
+      DataDbPoolMax:  "200"
+      ChInstanceType: "i4i.8xlarge"
+      ChClusterSize:  "3"
+      ChDiskGiB:      "4000"
+      ChDiskIops:     "16000"
+      ChDiskMbps:     "1000"
+
+Conditions:
+  WantClickHouse: !Equals [!Ref EnableClickHouse, "true"]
+  WantDataPlane:  !Equals [!Ref EnableDataPlane,  "true"]
+  IsHyperscale:   !Equals [!Ref TenantTier, "hyperscale"]
+  HasKeyPair:     !Not [!Equals [!Ref EC2KeyName, ""]]
+
+Resources:
+
+  # ── 1. Substrate (always deployed) ─────────────────────────────────────────
+  SubstrateStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/${TemplatesPrefix}cyinsight-elastic-substrate.yml"
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        TenantTier: !Ref TenantTier
+        HighAvailability: !Ref HighAvailability
+        DomainName: !Ref DomainName
+        CertificateArn: !Ref CertificateArn
+      TimeoutInMinutes: 60
+
+  # ── 2. ClickHouse (optional — pilot defaults OFF, $0 idle saving) ──────────
+  ClickHouseStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: WantClickHouse
+    DependsOn: SubstrateStack
+    Properties:
+      TemplateURL: !Sub "https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/${TemplatesPrefix}08-clickhouse-cluster.yml"
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcStackName: !GetAtt SubstrateStack.Outputs.StackName
+        DataLakeStackName: !GetAtt SubstrateStack.Outputs.StackName
+        InstanceType: !FindInMap [TierMap, !Ref TenantTier, ChInstanceType]
+        ClusterSize: !FindInMap [TierMap, !Ref TenantTier, ChClusterSize]
+        HotDiskSizeGiB: !FindInMap [TierMap, !Ref TenantTier, ChDiskGiB]
+        HotDiskIops: !FindInMap [TierMap, !Ref TenantTier, ChDiskIops]
+        HotDiskThroughputMBps: !FindInMap [TierMap, !Ref TenantTier, ChDiskMbps]
+        ClickHouseAdminPasswordParam: !Ref ClickHouseAdminPasswordParam
+        KeyName: !If [HasKeyPair, !Ref EC2KeyName, ""]
+      TimeoutInMinutes: 90
+
+  # ── 3. Management plane (always deployed) ──────────────────────────────────
+  ManagementStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: SubstrateStack
+    Properties:
+      TemplateURL: !Sub "https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/${TemplatesPrefix}06-management-ecs.yml"
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcStackName: !GetAtt SubstrateStack.Outputs.StackName
+        AuroraStackName: !GetAtt SubstrateStack.Outputs.StackName
+        KinesisStackName: !GetAtt SubstrateStack.Outputs.StackName
+        DataLakeStackName: !GetAtt SubstrateStack.Outputs.StackName
+        ClickHouseStackName: !If [WantClickHouse, !GetAtt ClickHouseStack.Outputs.StackName, ""]
+        CertificateArn: !Ref CertificateArn
+        SessionSecretArn: !GetAtt SubstrateStack.Outputs.SessionSecretArn
+        ImageUri: !Ref ImageUri
+        AppBaseUrl: !Sub "https://${DomainName}"
+        TaskCpu: !FindInMap [TierMap, !Ref TenantTier, MgmtTaskCpu]
+        TaskMemory: !FindInMap [TierMap, !Ref TenantTier, MgmtTaskMemory]
+        DesiredCount: !FindInMap [TierMap, !Ref TenantTier, MgmtDesired]
+        MinCount: !FindInMap [TierMap, !Ref TenantTier, MgmtMin]
+        MaxCount: !FindInMap [TierMap, !Ref TenantTier, MgmtMax]
+        DbPoolMax: !FindInMap [TierMap, !Ref TenantTier, MgmtDbPoolMax]
+        EnableHyperscaleProfile: !If [IsHyperscale, "true", "false"]
+        EnableClickHouseAsyncInsert: !If [WantClickHouse, "true", "false"]
+      TimeoutInMinutes: 45
+
+  # ── 4. Data plane (optional — pilot defaults OFF) ──────────────────────────
+  DataPlaneStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: WantDataPlane
+    DependsOn: ManagementStack
+    Properties:
+      TemplateURL: !Sub "https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/${TemplatesPrefix}07-data-plane-ecs.yml"
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcStackName: !GetAtt SubstrateStack.Outputs.StackName
+        AuroraStackName: !GetAtt SubstrateStack.Outputs.StackName
+        KinesisStackName: !GetAtt SubstrateStack.Outputs.StackName
+        DataLakeStackName: !GetAtt SubstrateStack.Outputs.StackName
+        ClickHouseStackName: !If [WantClickHouse, !GetAtt ClickHouseStack.Outputs.StackName, ""]
+        DataPlaneRegion: hyperscale
+        RegionCode: !Ref RegionCode
+        DataPlaneId: hyperscale
+        AlbScheme: internet-facing
+        AlbCertificateArn: !Ref CertificateArn
+        ManagementVpcCidr: "10.60.0.0/16"
+        ImageUri: !Ref ImageUri
+        TaskCpu: !FindInMap [TierMap, !Ref TenantTier, DataTaskCpu]
+        TaskMemory: !FindInMap [TierMap, !Ref TenantTier, DataTaskMemory]
+        DesiredCount: !FindInMap [TierMap, !Ref TenantTier, DataDesired]
+        MinCount: !FindInMap [TierMap, !Ref TenantTier, DataMin]
+        MaxCount: !FindInMap [TierMap, !Ref TenantTier, DataMax]
+        DbPoolMax: !FindInMap [TierMap, !Ref TenantTier, DataDbPoolMax]
+        EnableHyperscaleProfile: !If [IsHyperscale, "true", "false"]
+        EnableClickHouseAsyncInsert: !If [WantClickHouse, "true", "false"]
+        EnableClickHouseDirectIngest: "false"
+      TimeoutInMinutes: 30
+
+Outputs:
+  AppUrl:
+    Value: !Sub "https://${DomainName}"
+    Description: Public application URL — point your DNS at the substrate ALB DNS name.
+  SubstrateStackName:
+    Value: !GetAtt SubstrateStack.Outputs.StackName
+  ManagementStackName:
+    Value: !GetAtt ManagementStack.Outputs.StackName
+  ClickHouseStackName:
+    Condition: WantClickHouse
+    Value: !GetAtt ClickHouseStack.Outputs.StackName
+  DataPlaneStackName:
+    Condition: WantDataPlane
+    Value: !GetAtt DataPlaneStack.Outputs.StackName
+  TenantTier:
+    Value: !Ref TenantTier
+    Description: Active tier — change with update-stack to scale up without redesign.

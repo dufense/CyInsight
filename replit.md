@@ -56,6 +56,7 @@ The platform utilizes a multi-plane architecture, separating Management, Data, a
 - **Per-Tenant Quota Engine:** Implements Redis token-bucket rate limiting per tenant.
 - **DB Read Replica Routing:** Utilizes read replicas for heavy analytics queries.
 - **7-Layer Crash-Proof Architecture:** Comprehensive resilience layer.
+- **Elastic AWS ECS Tier (pay-as-you-use):** CloudFormation templates deploy the same topology as Hyperscale but with on-demand AWS primitives (Aurora Serverless v2, Kinesis on-demand, ElastiCache Serverless, ECS Fargate autoscaling, ClickHouse 3-node). A `TenantTier` parameter drives scaling via CFN `Mappings`. Compatible with existing management and data plane components.
 
 ### Technology Stack
 - **Frontend:** React with Vite, TailwindCSS, shadcn/ui, Recharts.
