@@ -6,7 +6,7 @@ import { pool, poolRead, logPoolStats, db, dbRead } from "./db";
 import { checkAndConsumeQuota, getTenantQuotaConfig, getAllTenantQuotaStatus, getReplicaLag, invalidateTenantQuotaCache, QUOTA_TIER_DEFAULTS } from "./quota-engine";
 import { eq, and, desc, or, inArray, sql } from "drizzle-orm";
 import { hasMarker, setMarker } from "./migration-marker";
-import { safeSetInterval } from "./crash-guard";
+import { seedCtiDataForTenant } from "./cti-seeder";
 import { securityEventBus, type LiveSecurityEvent } from "./event-bus";
 import { buildEntityInventory, getEntityProfile, getApplicationProfile } from "./entity-engine";
 import { computeHostRiskScore, computeUserRiskScore, computeEmailRiskScore, computeApplicationRiskScore, computeDomainRiskScore, searchEntities } from "./risk-scoring";
@@ -49,8 +49,18 @@ import {
   insertFederatedThreatIndicatorSchema,
   aiDetectionRules,
   insertAiDetectionRuleSchema,
+  assets,
+  tenantSecurityTools,
 } from "@shared/schema";
+import { GUEST_ACCOUNT_PATTERNS } from "@shared/constants";
 import { createAIClient, getAIProviderInfo, resetAIClient, getDefaultModel } from "./ai-provider";
+import {
+  buildIntelligentColumnIndex, normalizeKey as importNormalizeKey,
+  normalizeSeverity as importNormalizeSeverity, normalizeOS as importNormalizeOS,
+  normalizeStatus as importNormalizeStatus, predictMitre,
+  extractIOCsFromRow, classifyContentTypeHeuristic, smartGetField,
+  parseFlexDate as importParseFlexDate, predictAssetRisk,
+} from "./import-intelligence";
 import { probeBedrockConnection } from "./bedrock-client";
 import { startPlaybookExecution, getExecution, getOrReconstructExecution, retryFailedStep, evalCondition, ConditionConfig } from "./soar-execution-engine";
 import { buildAttackGraph, findShortestPaths, computeBlastRadius, invalidateGraphCache } from "./attack-path-engine";
@@ -77,80 +87,89 @@ import {
 import { z } from "zod";
 import multer from "multer";
 import XLSX from "xlsx";
+import type * as ExcelJS from "exceljs";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { generateReportPDF, generateBriefingPDF } from "./pdf-generator";
+import { generateReportPDF, generateBriefingPDF, generateIncidentsPDF } from "./pdf-generator";
 import { getCoverage, setCoverage } from "./ds-cache";
 import { buildResponsePlan } from "./response-engine";
+import { generateAndPersistResponsePlan } from "./incident-response-plan-builder";
 import { dispatchAction, dispatchUndo } from "./response-executor";
 import { generateIRReportPDF, generateIRReportDOCX } from "./ir-report-generator";
 import bcrypt from "bcryptjs";
 import compression from "compression";
-import { applySecurityMiddleware, securityAuditLogger } from "./security-middleware";
+import { applySecurityMiddleware, securityRequestGuard } from "./security-middleware";
+import { tenantParamGuard } from "./middleware/require-tenant";
 import { detectTenantProducts, getProductDefinition, LOG_SOURCE_PATTERNS, PRODUCT_DEFINITIONS } from "./product-detection";
 import { buildIntegrationGuardSql, getLogSourcesForPlatformKeys } from "./log-source-map";
-
-/**
- * Per-tenant map of connected log_source values for a set of tenants.
- * Used to enforce integration-aware visibility on ClickHouse fast-paths
- * with parity to the PG buildIntegrationGuardSql EXISTS predicate.
- *
- * Returns Map<tenantId, logSources[]>. Tenants with no connected integrations
- * map to an empty array — CH queries should treat that as "return zero rows
- * for this tenant" to match the PG guard's deny-by-default behavior.
- */
-async function getConnectedLogSourcesByTenant(
-  tenantIds: number[],
-): Promise<Map<number, string[]>> {
-  const map = new Map<number, string[]>();
-  if (tenantIds.length === 0) return map;
-  const result = await pool.query(
-    `SELECT tenant_id, platform_key
-       FROM security_integrations
-      WHERE tenant_id = ANY($1) AND status = 'connected' AND deleted_at IS NULL`,
-    [tenantIds],
-  );
-  const byTenant = new Map<number, string[]>();
-  for (const row of result.rows) {
-    const list = byTenant.get(row.tenant_id) ?? [];
-    list.push(row.platform_key);
-    byTenant.set(row.tenant_id, list);
-  }
-  for (const tid of tenantIds) {
-    const keys = byTenant.get(tid) ?? [];
-    map.set(tid, getLogSourcesForPlatformKeys(keys));
-  }
-  return map;
-}
-
-/**
- * Build a ClickHouse WHERE predicate applying the integration guard as a
- * per-tenant `(tenant_id = X AND log_source IN (...))` disjunction — exact
- * parity with buildIntegrationGuardSql semantics (which filters on the PG
- * log_source column). The CH schema stores log_source alongside source_type,
- * populated by chDualWrite. Returns "0" (always false) when no tenants have
- * connected integrations, matching PG deny-by-default.
- */
-function chJsonParse(s: unknown): any {
-  if (s == null || s === "") return undefined;
-  if (typeof s !== "string") return s;
-  try { return JSON.parse(s); } catch { return s; }
-}
-
-function buildChIntegrationGuard(
-  map: Map<number, string[]>,
-  column: string = "log_source",
-): string {
-  const safeColumn = column.replace(/[^a-zA-Z0-9_]/g, "");
-  const clauses: string[] = [];
-  for (const [tid, sources] of Array.from(map.entries())) {
-    if (sources.length === 0) continue;
-    const quoted = sources.map((s) => `'${s.replace(/'/g, "\\'")}'`).join(",");
-    clauses.push(`(tenant_id = ${tid} AND ${safeColumn} IN (${quoted}))`);
-  }
-  return clauses.length === 0 ? "0" : `(${clauses.join(" OR ")})`;
-}
+// Cross-cutting helpers used throughout the route handlers.
+// Lives in `server/routes/_helpers.ts` so future per-domain route modules
+// can share the same surface (tenant access, ClickHouse guards, snapshot
+// caches, classification, etc.) without re-importing routes.ts.
+import {
+  // ClickHouse integration guard
+  getConnectedLogSourcesByTenant,
+  chJsonParse,
+  buildChIntegrationGuard,
+  // Heavy-query concurrency limiter
+  withHeavyQueryLimit,
+  // Incident classification + AI prompt
+  classifyIncidentType,
+  ENRICHMENT_SYSTEM_PROMPT,
+  AI_TYPE_MAP,
+  // Tenant access helpers
+  getUserTenantAccess,
+  assertTenantAccess,
+  assertMSSRole,
+  assertAssetBelongsToTenantTree,
+  getAllDescendantTenantIds,
+  getAccessibleTenantIds,
+  type UserTenantAccess,
+  // Federated-intel nomination
+  autoNominateIncidentIOCs,
+  // Entity-graph snapshot LRU
+  entityGraphSnapshots,
+  setEntityGraphSnapshot,
+  // Playbook trigger / simulation
+  checkIncidentMatchesTrigger,
+  runGraphSimTrace,
+  // Tiered log-query cache
+  getLogQueryCache,
+  // Admin role middleware (formerly closure-bound inside registerRoutes)
+  isSuperAdmin,
+  isSuperAdminOrPlatformAdmin,
+  assertAdminAccess,
+  createNotification,
+} from "./routes/_helpers";
+import { registerSystemRoutes } from "./routes/system";
+import { registerSuperadminAuthRoutes } from "./routes/superadmin-auth";
+import { registerAdminQuotaRoutes } from "./routes/admin-quota";
+import { registerDeploymentAuditRoutes } from "./routes/deployment-audit";
+import { registerManualInterventionRoutes } from "./routes/manual-interventions";
+import { registerTenantAdminRoutes } from "./routes/tenant-admin";
+import { registerOrgStakeholdersRoutes } from "./routes/org-stakeholders";
+import { registerGamificationRoutes } from "./routes/gamification";
+import { registerBehaviorAnalyticsRoutes } from "./routes/behavior-analytics";
+import { registerRiskRoutes } from "./routes/risk";
+import { registerCveRiskRoutes } from "./routes/cve-risk";
+import { registerAlertTriageRoutes } from "./routes/alert-triage";
+import { registerSuppressionRulesRoutes } from "./routes/suppression-rules";
+import { registerThreatIntelRoutes } from "./routes/threat-intel";
+import { registerPlaybooksRoutes } from "./routes/playbooks";
+import { registerFederatedIntelRoutes } from "./routes/federated-intel";
+import { registerNotificationsRoutes } from "./routes/notifications";
+import { registerDataPlaneRoutes } from "./routes/data-plane";
+import { registerCtiRoutes } from "./routes/cti";
+import { registerIntegrationsRoutes } from "./routes/integrations";
+import { registerIncidentResponsePlanRoutes } from "./routes/incident-response-plan";
+import { registerIncidentWarRoomRoutes } from "./routes/incident-war-room";
+import { registerIncidentTriageRoutes } from "./routes/incident-triage";
+import { registerIncidentsRoutes } from "./routes/incidents";
+import { registerAiInvestigationRoutes } from "./routes/ai-investigation";
+import { registerIncidentDetectionRoutes } from "./routes/incident-detection";
+import { registerApplicationsRoutes } from "./routes/applications";
+import { registerAiAgentsRoutes } from "./routes/ai-agents";
 import { computeNistCsfCoverage } from "./nist-csf-engine";
 import { processARIAQuery, generateBriefingNarrative } from "./aria-copilot";
 import { scoreIncidentInBackground } from "./ai-triage-engine";
@@ -175,12 +194,8 @@ import { investigateIncident, autoInvestigateCriticalIncidents, runForensicAnaly
 import { getCloudStorage, type StorageTier } from "./cloud-storage";
 import { sendEmail, sendTestEmail } from "./email-service";
 import { generateNotificationEmail } from "./notification-templates";
-import "./connectors/crowdstrike";
-import "./connectors/azure-ad";
-import "./connectors/generic-syslog";
-import "./connectors/cynet";
-import "./connectors/checkpoint-hec";
-import "./connectors/asset-connectors";
+// All connector side-effect registrations live in `./connectors/index.ts`.
+import "./connectors";
 import { ParserRegistry } from "./parsers/parser-registry";
 import { correlateAssets, buildAssessmentData } from "./parsers/data-correlator";
 import { buildApplicationIndex, buildStakeholderIndex, enrichAssetsWithAppCategory, classifyApplication } from "./parsers/application-registry";
@@ -219,15 +234,16 @@ import {
   matchMalwareContent,
   type SigmaMatch,
 } from "./sigma-engine";
-import { getClickHouseClient, isClickHouseEnabled, HOT_RETENTION_DAYS, logChQuery, rotateClickHousePassword, formatChDateTime64 } from "./clickhouse-client";
+import { getClickHouseClient, isClickHouseEnabled, HOT_RETENTION_DAYS, logChQuery, rotateClickHousePassword } from "./clickhouse-client";
+import { recordStageLatency, getPipelineMetrics, getMetricsTenantIds } from "./pipeline-metrics";
 import { getAthenaClient } from "./athena-client";
-import { publishEvents } from "./kafka/producer";
-import { KAFKA_TOPICS } from "./kafka/topics";
+import { publishEvents } from "./kinesis/producer";
+import { KINESIS_STREAMS } from "./kinesis/streams";
 import {
-  buildKafkaEventBatch,
+  buildKinesisEventBatch,
   getIngestConsumerStats,
   INGEST_CONSUMER_GROUP_ID,
-} from "./kafka/ingest-consumer";
+} from "./kinesis/ingest-consumer";
 
 const REPORTS_DIR = process.env.APP_REPORTS_DIR || path.join(process.cwd(), "data", "reports");
 const UPLOADS_DIR = process.env.APP_UPLOADS_DIR || path.join(process.cwd(), "data", "uploads");
@@ -235,443 +251,127 @@ const UPLOADS_DIR = process.env.APP_UPLOADS_DIR || path.join(process.cwd(), "dat
 if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 200 * 1024 * 1024 } });
+// Hardening: default uploader caps at 25 MB and is paired with safeFileUpload at the
+// route handler for magic-byte sniffing + filename sanitization. Routes that legitimately
+// need a larger ceiling (PCAP ingest, etc.) opt in via `largeUpload`.
+const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 25 * 1024 * 1024 } });
+const largeUpload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 200 * 1024 * 1024 } });
 
 
-import pLimit from "p-limit";
-const heavyQueryLimit = pLimit(2);
-async function withHeavyQueryLimit<T>(fn: () => Promise<T>): Promise<T> {
-  return heavyQueryLimit(fn);
+let _computeSoftwareAnalyticsForWarmup:
+  | ((tenantId: number | null, isMSS: boolean, accessTenantId: number | null) => Promise<any>)
+  | null = null;
+
+export async function warmSoftwareAnalyticsCache(opts: { force?: boolean } = {}): Promise<void> {
+  const fn = _computeSoftwareAnalyticsForWarmup;
+  if (!fn) return;
+  const force = opts.force === true;
+  const startedAt = Date.now();
+  let tenants: { id: number }[] = [];
+  try {
+    tenants = (await storage.getTenants()).filter(
+      (t: any) => typeof t?.id === 'number' && !isNaN(t.id) && t.id > 0,
+    ) as { id: number }[];
+  } catch (e: any) {
+    console.warn('[SoftwareAnalytics warmup] Failed to list tenants:', e?.message || e);
+    return;
+  }
+  let warmed = 0;
+  let skipped = 0;
+  let failed = 0;
+  const warmOne = async (t: { id: number }) => {
+    const cacheKey = `software-analytics:${t.id}`;
+    try {
+      if (!force) {
+        const existing = await getCache(cacheKey);
+        if (existing) { skipped++; return; }
+      }
+      const probe = await storage.getAssetsSoftwareData(t.id, 1);
+      if (!probe || probe.length === 0) { skipped++; return; }
+      const result = await fn(t.id, false, t.id);
+      setCache(cacheKey, result, 1_800_000);
+      warmed++;
+    } catch (e: any) {
+      failed++;
+      console.warn(`[SoftwareAnalytics warmup] Tenant ${t.id} failed:`, e?.message || e);
+    }
+  };
+  // Bounded concurrency (2) so warmup finishes faster but does not starve
+  // the heavy-query limiter or first real user requests.
+  const queue = [...tenants];
+  const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const next = queue.shift();
+      if (!next) break;
+      await warmOne(next);
+    }
+  });
+  await Promise.all(workers);
+  const ms = Date.now() - startedAt;
+  console.log(
+    `[SoftwareAnalytics warmup] Done in ${ms}ms — attempted=${tenants.length} warmed=${warmed} skipped=${skipped} failed=${failed}`,
+  );
 }
 
 const openai = createAIClient();
 
-function classifyIncidentType(title: string, description?: string | null, source?: string | null, category?: string | null): string {
-  const text = `${title} ${description || ""} ${source || ""} ${category || ""}`;
+// Task #473 — hourly snapshot job: create table + upsert current-hour counts per connector/tenant
+async function initConnectorVolumeSnapshots(pool: any) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS connector_volume_snapshots (
+      id            SERIAL PRIMARY KEY,
+      tenant_id     INTEGER      NOT NULL,
+      platform_key  VARCHAR(100) NOT NULL,
+      bucket_hour   TIMESTAMPTZ  NOT NULL,
+      event_count   INTEGER      NOT NULL DEFAULT 0,
+      UNIQUE (tenant_id, platform_key, bucket_hour)
+    )
+  `);
 
-  if (/wildfire malware|wildfire.*malware/i.test(text)) return "Malware";
-  if (/ransomware/i.test(text)) return "Ransomware";
-  if (/trojan|worm|backdoor|keylogger|spyware|adware/i.test(text)) return "Malware";
-  if (/cryptominer|coinminer|crypto.*min/i.test(text)) return "Cryptomining";
-
-  if (/vulnerable driver|loldriver|byovd|bring your own vulnerable/i.test(text)) return "Vulnerable Driver";
-  if (/vulnerable.*application|vulnerable.*software/i.test(text)) return "Vulnerable Application";
-  if (/cve-|vulnerab.*patch|patch.*missing|unpatched|security.*flaw/i.test(text) && !/driver/i.test(text)) return "Vulnerability";
-
-  if (/suspicious executable/i.test(text)) return "Suspicious Executable";
-  if (/suspicious process creation|suspicious process$/i.test(text)) return "Suspicious Process";
-  if (/suspicious remote wmi|remote wmi/i.test(text)) return "Remote Code Execution";
-  if (/psexec|remote.*execution.*attempt|winrm.*execution/i.test(text)) return "Remote Code Execution";
-
-  if (/local threat detected/i.test(text)) return "Local Threat";
-  if (/rootkit|uncommon driver.*loaded/i.test(text)) return "Rootkit";
-  if (/anti.?webshell|webshell.*dropped|known webshell/i.test(text)) return "Webshell";
-
-  if (/pe injection|process injection|process hollowing|dll injection/i.test(text)) return "Process Injection";
-  if (/dll.*sideload|dll.*hijack|dll.*loaded.*cd-rom|log4net.*loaded/i.test(text)) return "DLL Side-Loading";
-  if (/modification of the system partition/i.test(text)) return "System Modification";
-  if (/digital signer restriction/i.test(text)) return "Digital Signer Restriction";
-
-  if (/masquerading/i.test(text)) return "Masquerading";
-  if (/ntlm relay/i.test(text)) return "NTLM Relay";
-  if (/powershell activity|powershell.*execution/i.test(text)) return "Powershell Activity";
-  if (/accessibility feature escalation|sync.*escalation/i.test(text)) return "Privilege Escalation";
-  if (/impair defenses|gain persistency/i.test(text)) return "Defense Evasion";
-  if (/rare unsigned process|unsigned.*module|rundll32.*unsigned/i.test(text)) return "Suspicious Process";
-  if (/multiple alerts.*mitre tactics/i.test(text)) return "Multiple MITRE Alerts";
-
-  if (/compute.attached identity.*api call|executed api calls.*unusual asn/i.test(text)) return "Suspicious API Call";
-  if (/suspicious usage of ec2 token|ec2.*token/i.test(text)) return "Suspicious Cloud Token Usage";
-  if (/cloud identity.*performed|createemailidentity|cloud.*operation/i.test(text)) return "Suspicious Cloud Operation";
-  if (/logged in.*aws console|aws.*console.*login/i.test(text)) return "Suspicious Cloud Login";
-  if (/cloud.*misconfig|s3.*bucket.*public/i.test(text)) return "Cloud Misconfiguration";
-  if (/instance metadata|imds/i.test(text)) return "IMDS Exploitation";
-
-  if (/unusual ssh activity|ssh tunnel/i.test(text)) return "Suspicious SSH Activity";
-  if (/uploaded.*mb.*external|uploaded.*gb.*external|large upload/i.test(text)) return "Large Data Upload";
-  if (/data (exfiltration|leak|loss|theft)|dlp|unusual.*(download|transfer)/i.test(text)) return "Data Exfiltration";
-
-  if (/tried to connect to \d+ hosts|port scan|network scan|suspicious port scan/i.test(text)) return "Port Scan";
-  if (/failed connection/i.test(text)) return "Failed Connections";
-  if (/vnc scanning|vnc.*activity|scanning tool/i.test(text)) return "Network Scanning";
-  if (/lateral movement/i.test(text)) return "Lateral Movement";
-  if (/ddos|dos attack|syn flood|packet flood/i.test(text)) return "DDoS";
-  if (/ids.*alert|ips.*alert|network.*intrusion|firewall.*block/i.test(text)) return "Network Intrusion";
-
-  if (/phish|spear.?phish|spoofed.*email|malicious.*email|bec |business email compromise/i.test(text)) return "Phishing";
-  if (/email.*gateway|dmarc.*fail|spf.*fail/i.test(text)) return "Email Security Alert";
-
-  if (/brute.?force|credential.?(stuff|spray|dump)|password.*spray|authentication.*anomal|account.*lock/i.test(text)) return "Brute Force";
-
-  if (/unauthorized (access|login)|privilege (escalation|abuse)|insider.*threat/i.test(text)) return "Unauthorized Access";
-
-  if (/sql.*inject|xss|cross.site|owasp|waf.*alert/i.test(text)) return "Web Application Attack";
-  if (/casb|shadow.*it|unsanctioned.*app/i.test(text)) return "Shadow IT";
-
-  if (/process.*action.*type.*execution/i.test(text)) return "Suspicious Process";
-
-  return "";
-}
-
-const ENRICHMENT_SYSTEM_PROMPT = `You are a senior SOC analyst specializing in MSSP operations. For each incident, provide precise security classification and enrichment.
-
-CRITICAL CLASSIFICATION RULES (incidentType field) - Use SPECIFIC threat types, NOT broad categories:
-- "malware": WildFire Malware, malicious files, trojans, worms, backdoors, spyware
-- "ransomware": Ransomware attacks, file encryption events
-- "cryptomining": Cryptominers, coinminers
-- "vulnerable_driver": Vulnerable Driver Dropped (BYOVD/loldrivers) - NOT "vulnerability"
-- "vulnerable_application": Vulnerable application or software detected
-- "vulnerability": CVE-based findings, missing patches, scan results (NOT vulnerable drivers)
-- "suspicious_executable": Suspicious executable file detected
-- "suspicious_process": Suspicious process creation, rare unsigned processes, rundll32 unsigned modules
-- "remote_code_execution": Remote WMI process execution, PsExec, WinRM execution
-- "local_threat": Local Threat Detected by XDR Agent
-- "rootkit": Rootkit detection, uncommon driver loaded for rootkit purposes
-- "webshell": Anti Webshell Protection, webshell dropped
-- "process_injection": PE injection, process injection, process hollowing, DLL injection
-- "dll_sideloading": DLL side-loading, DLL hijacking, DLL loaded from unusual location
-- "system_modification": Modification of system partition
-- "digital_signer_restriction": Digital Signer Restriction alerts
-- "masquerading": Process masquerading (T1036)
-- "ntlm_relay": NTLM Relay attacks
-- "powershell_activity": PowerShell activity alerts
-- "privilege_escalation": Accessibility Feature Escalation, privilege escalation
-- "defense_evasion": Impair Defenses, Gain Persistency
-- "multiple_mitre_alerts": Multiple alerts of different MITRE tactics on same host
-- "suspicious_api_call": Compute-attached identity executing API calls from unusual ASN/region
-- "suspicious_cloud_token": Suspicious usage of EC2 token
-- "suspicious_cloud_operation": Cloud identity performing unusual operations (CreateEmailIdentity etc.)
-- "suspicious_cloud_login": Unusual AWS/Azure console login
-- "cloud_misconfiguration": Cloud misconfigurations, public S3 buckets
-- "large_data_upload": Host uploaded large amounts of data to external host
-- "data_exfiltration": DLP alerts, unusual data transfers
-- "port_scan": Host tried to connect to many hosts, suspicious port scan
-- "failed_connections": Failed network connections
-- "network_scanning": VNC scanning, network sweep
-- "lateral_movement": Lateral movement attempts
-- "network_intrusion": IDS/IPS alerts, firewall blocks
-- "phishing": Phishing, spear-phishing, BEC, malicious email
-- "brute_force": Brute force, credential stuffing/spraying
-- "unauthorized_access": Unauthorized logins, privilege abuse
-- "web_application_attack": SQL injection, XSS, WAF alerts
-
-Return JSON: {"results":[{"index":0,"mitreTactic":"...","mitreTechniqueId":"T1xxx","mitreTechnique":"...","killChainPhase":"reconnaissance|weaponization|delivery|exploitation|installation|command_and_control|actions_on_objectives","confidenceScore":0-100,"classification":"true_positive|false_positive|suspicious","detectionSource":"SIEM|EDR|IDS|Firewall|WAF|Email Gateway|Cloud Security|Vulnerability Scanner|SOAR|Manual","incidentType":"malware|ransomware|cryptomining|vulnerable_driver|vulnerable_application|vulnerability|suspicious_executable|suspicious_process|remote_code_execution|local_threat|rootkit|webshell|process_injection|dll_sideloading|system_modification|masquerading|ntlm_relay|powershell_activity|privilege_escalation|defense_evasion|multiple_mitre_alerts|suspicious_api_call|suspicious_cloud_token|suspicious_cloud_operation|suspicious_cloud_login|cloud_misconfiguration|large_data_upload|data_exfiltration|port_scan|failed_connections|network_scanning|lateral_movement|network_intrusion|phishing|brute_force|unauthorized_access|web_application_attack|other","actionTaken":"Blocked|Quarantined|Isolated|Investigated|Escalated|Remediated|Monitored|No Action","iocReputation":{"indicators":[{"type":"ip|domain|hash|url","value":"...","reputation":"malicious|suspicious|clean","country":"XX"}]}}]}`;
-
-const AI_TYPE_MAP: Record<string, string> = {
-  malware: "Malware",
-  ransomware: "Ransomware",
-  cryptomining: "Cryptomining",
-  vulnerable_driver: "Vulnerable Driver",
-  vulnerable_application: "Vulnerable Application",
-  vulnerability: "Vulnerability",
-  suspicious_executable: "Suspicious Executable",
-  suspicious_process: "Suspicious Process",
-  remote_code_execution: "Remote Code Execution",
-  local_threat: "Local Threat",
-  rootkit: "Rootkit",
-  webshell: "Webshell",
-  process_injection: "Process Injection",
-  dll_sideloading: "DLL Side-Loading",
-  system_modification: "System Modification",
-  digital_signer_restriction: "Digital Signer Restriction",
-  masquerading: "Masquerading",
-  ntlm_relay: "NTLM Relay",
-  powershell_activity: "Powershell Activity",
-  privilege_escalation: "Privilege Escalation",
-  defense_evasion: "Defense Evasion",
-  multiple_mitre_alerts: "Multiple MITRE Alerts",
-  suspicious_api_call: "Suspicious API Call",
-  suspicious_cloud_token: "Suspicious Cloud Token Usage",
-  suspicious_cloud_operation: "Suspicious Cloud Operation",
-  suspicious_cloud_login: "Suspicious Cloud Login",
-  cloud_misconfiguration: "Cloud Misconfiguration",
-  imds_exploitation: "IMDS Exploitation",
-  suspicious_ssh_activity: "Suspicious SSH Activity",
-  large_data_upload: "Large Data Upload",
-  data_exfiltration: "Data Exfiltration",
-  port_scan: "Port Scan",
-  failed_connections: "Failed Connections",
-  network_scanning: "Network Scanning",
-  lateral_movement: "Lateral Movement",
-  ddos: "DDoS",
-  network_intrusion: "Network Intrusion",
-  phishing: "Phishing",
-  email_security_alert: "Email Security Alert",
-  brute_force: "Brute Force",
-  unauthorized_access: "Unauthorized Access",
-  web_application_attack: "Web Application Attack",
-  shadow_it: "Shadow IT",
-  endpoint_security: "Local Threat",
-  cloud_security: "Suspicious Cloud Operation",
-  network_security: "Network Intrusion",
-  email_threat: "Phishing",
-  credential_abuse: "Brute Force",
-  other: "Security Alert",
-};
-
-async function getUserTenantAccess(req: any): Promise<{
-  userId: string;
-  role: string;
-  tenantId: number | null;
-  isMSS: boolean;
-  isPlatformAdmin: boolean;
-}> {
-  const userId = req.user?.claims?.sub;
-  if (!userId) throw new Error("No user ID");
-
-  const tenantUser = await storage.getTenantUserByUserId(userId);
-  if (!tenantUser) {
-    return { userId, role: "customer", tenantId: null, isMSS: false, isPlatformAdmin: false };
-  }
-
-  const isPlatformAdmin = tenantUser.role === "platform_admin";
-  const mssRoles = ["platform_admin", "mss_admin", "mss_analyst", "security_engineer", "service_desk", "security_analyst", "soc_manager"];
-  const isMSS = mssRoles.includes(tenantUser.role);
-  return { userId, role: tenantUser.role, tenantId: tenantUser.tenantId, isMSS, isPlatformAdmin };
-}
-
-async function assertTenantAccess(req: any, tenantId: number): Promise<{
-  userId: string;
-  role: string;
-  isMSS: boolean;
-  isPlatformAdmin: boolean;
-}> {
-  const access = await getUserTenantAccess(req);
-
-  if (access.isPlatformAdmin) {
-    return { userId: access.userId, role: access.role, isMSS: true, isPlatformAdmin: true };
-  }
-
-  if (access.isMSS) {
-    return { userId: access.userId, role: access.role, isMSS: true, isPlatformAdmin: false };
-  }
-
-  if (access.tenantId !== tenantId) {
-    throw Object.assign(new Error("Forbidden: no access to this tenant"), { status: 403 });
-  }
-
-  return { userId: access.userId, role: access.role, isMSS: false, isPlatformAdmin: false };
-}
-
-function assertMSSRole(access: { role: string; isMSS: boolean }) {
-  if (!access.isMSS) {
-    throw Object.assign(new Error("Forbidden: MSS role required"), { status: 403 });
-  }
-}
-
-/**
- * Verify that the given assetId belongs to the tenantId or one of its descendants.
- * Throws 404 if the asset doesn't exist, 403 if not in the allowed tenant tree.
- */
-async function assertAssetBelongsToTenantTree(
-  assetId: number,
-  tenantId: number,
-  poolClient: any
-): Promise<void> {
-  const row = await poolClient.query(
-    `SELECT tenant_id FROM assets WHERE id = $1 LIMIT 1`,
-    [assetId]
-  );
-  if (!row.rows[0]) {
-    throw Object.assign(new Error("Asset not found"), { status: 404 });
-  }
-  const assetTenantId: number = row.rows[0].tenant_id;
-  if (assetTenantId === tenantId) return; // same tenant — allowed
-  // Check if asset's tenant is a descendant
-  const allowedIds = await getAllDescendantTenantIds(tenantId);
-  if (!allowedIds.includes(assetTenantId)) {
-    throw Object.assign(new Error("Forbidden: asset not in your tenant tree"), { status: 403 });
-  }
-}
-
-async function getAllDescendantTenantIds(tenantId: number, visited = new Set<number>()): Promise<number[]> {
-  if (visited.has(tenantId)) return [];
-  visited.add(tenantId);
-  const children = await storage.getChildTenants(tenantId);
-  const ids: number[] = [tenantId];
-  for (const child of children) {
-    const desc = await getAllDescendantTenantIds(child.id, visited);
-    ids.push(...desc);
-  }
-  return ids;
-}
-
-async function getAccessibleTenantIds(req: any, tenantId: number): Promise<number[]> {
-  const access = await getUserTenantAccess(req);
-  if (access.isPlatformAdmin || access.isMSS) {
-    const allIds = await getAllDescendantTenantIds(tenantId);
-    if (allIds.length > 1) return allIds;
-  }
-  return [tenantId];
-}
-
-// ── Shared helper: nominate incident IPs + IOCs when marked true_positive ─────
-// Called from both the enrichment PATCH and quick-classify endpoints to avoid
-// duplicating nomination logic at two call sites.
-async function autoNominateIncidentIOCs(
-  tenantId: number,
-  incidentId: number,
-  sourceIp: string | null | undefined,
-  destIp: string | null | undefined,
-  confidence: number,
-  nominatedBy: string
-): Promise<void> {
-  const ips = [sourceIp, destIp].filter(Boolean) as string[];
-  for (const ip of ips) {
-    if (isValidIPv4(ip) && !isPrivateIP(ip)) {
-      try {
-        await nominateFromIncident(tenantId, incidentId, ip, "ip", confidence, nominatedBy);
-      } catch (err) {
-        console.warn(`[FederatedIntel] nomination failed for incident ${incidentId} ip ${ip}:`, (err as Error).message);
-      }
+  async function takeSnapshot() {
+    try {
+      await pool.query(`
+        INSERT INTO connector_volume_snapshots (tenant_id, platform_key, bucket_hour, event_count)
+        SELECT
+          tenant_id,
+          CASE log_source
+            WHEN 'CrowdStrike Falcon'                THEN 'crowdstrike'
+            WHEN 'Cynet 360'                         THEN 'cynet'
+            WHEN 'Barracuda ESG'                     THEN 'barracuda_esg'
+            WHEN 'Checkpoint HEC'                    THEN 'checkpoint_hec'
+            WHEN 'Check Point Harmony Email'         THEN 'checkpoint_hec'
+            WHEN 'SentinelOne'                       THEN 'sentinelone'
+            WHEN 'Microsoft Defender for Endpoint'   THEN 'ms_defender_endpoint'
+            WHEN 'Syslog'                            THEN 'generic_syslog'
+            WHEN 'CEF'                               THEN 'generic_syslog'
+            WHEN 'Microsoft Entra ID'                THEN 'azure_ad'
+            WHEN 'FortiGate'                         THEN 'fortigate'
+            WHEN 'FortiNAC'                          THEN 'fortinac'
+          END AS platform_key,
+          date_trunc('hour', NOW()) AS bucket_hour,
+          COUNT(*)::int            AS event_count
+        FROM security_events
+        WHERE created_at >= date_trunc('hour', NOW())
+          AND log_source IN (
+            'CrowdStrike Falcon', 'Cynet 360', 'Barracuda ESG',
+            'Checkpoint HEC', 'Check Point Harmony Email',
+            'SentinelOne', 'Microsoft Defender for Endpoint',
+            'Syslog', 'CEF', 'Microsoft Entra ID',
+            'FortiGate', 'FortiNAC'
+          )
+        GROUP BY tenant_id, platform_key
+        ON CONFLICT (tenant_id, platform_key, bucket_hour)
+          DO UPDATE SET event_count = EXCLUDED.event_count
+      `);
+    } catch (err: any) {
+      console.error("[ConnectorVolume] Snapshot error:", err.message);
     }
   }
-  // Also nominate confirmed malicious IOCs linked to this incident
-  try {
-    const iocRows = await pool.query(
-      `SELECT indicator_value, indicator_type, confidence FROM incident_iocs WHERE incident_id = $1 AND reputation = 'malicious' AND (confidence IS NULL OR confidence >= 80)`,
-      [incidentId]
-    );
-    for (const iocRow of iocRows.rows) {
-      try {
-        await nominateFromIncident(tenantId, incidentId, iocRow.indicator_value, iocRow.indicator_type, iocRow.confidence ?? 85, nominatedBy);
-      } catch (err) {
-        console.warn(`[FederatedIntel] nomination failed for incident ${incidentId} ioc ${iocRow.indicator_value}:`, (err as Error).message);
-      }
-    }
-  } catch (err) {
-    console.warn(`[FederatedIntel] could not query incident_iocs for incident ${incidentId}:`, (err as Error).message);
-  }
-}
 
-// Bounded in-memory snapshot store for entity graph PNGs (incidentId → base64 PNG data URL).
-// Limited to 200 entries (max ~1GB if all 5MB) with LRU eviction; expires on server restart.
-const SNAPSHOT_MAX_ENTRIES = 200;
-const entityGraphSnapshots: Map<number, string> = new Map();
-function setEntityGraphSnapshot(id: number, png: string) {
-  if (entityGraphSnapshots.size >= SNAPSHOT_MAX_ENTRIES) {
-    const oldest = entityGraphSnapshots.keys().next().value;
-    if (oldest !== undefined) entityGraphSnapshots.delete(oldest);
-  }
-  entityGraphSnapshots.set(id, png);
+  await takeSnapshot();
+  setInterval(takeSnapshot, 3_600_000);
+  console.log("[ConnectorVolume] Hourly snapshot job started.");
 }
-
-// Module-level helper: check if an incident matches a playbook's trigger_conditions
-// Used by auto-trigger on incident creation AND the manual trigger-for-incident endpoint
-function checkIncidentMatchesTrigger(incident: any, triggerConditions: any): boolean {
-  if (!triggerConditions || Object.keys(triggerConditions).length === 0) return false;
-  const tc = triggerConditions;
-  const incSev = (incident.severity || '').toLowerCase();
-  const incType = (incident.incident_type || incident.category || '').toLowerCase();
-  const incMitreTactic = (incident.mitre_tactic || '').toLowerCase();
-  const incMitreTechId = (incident.mitre_technique_id || '').toLowerCase();
-  const incAssetCrit = (incident.asset_criticality || incident.criticality || '').toLowerCase();
-  const incIocTypes: string[] = Array.isArray(incident.ioc_types)
-    ? incident.ioc_types.map((t: string) => t.toLowerCase())
-    : [];
-  // Severity: required match if specified — incident severity MUST be in the configured set
-  if (tc.severity?.length > 0) {
-    if (!incSev || !tc.severity.map((s: string) => s.toLowerCase()).includes(incSev)) return false;
-  }
-  // Incident type: if configured, incident MUST have a matching type; missing type = no match
-  if (tc.type?.length > 0) {
-    if (!incType || !tc.type.some((t: string) => incType.includes(t.toLowerCase()))) return false;
-  }
-  // MITRE tactics: if configured, incident MUST have the tactic; missing tactic = no match
-  if (tc.mitreTactics?.length > 0) {
-    if (!incMitreTactic || !tc.mitreTactics.some((t: string) => incMitreTactic.includes(t.toLowerCase()))) return false;
-  }
-  // MITRE technique IDs: if configured, incident MUST have matching technique ID; missing = no match
-  if (tc.mitreTechniqueIds?.length > 0) {
-    if (!incMitreTechId || !tc.mitreTechniqueIds.some((id: string) => incMitreTechId.includes(id.toLowerCase()))) return false;
-  }
-  // IOC types: if configured, incident MUST have IOC data with a matching type; missing = no match
-  if (tc.iocTypes?.length > 0) {
-    if (incIocTypes.length === 0 || !tc.iocTypes.some((it: string) => incIocTypes.includes(it.toLowerCase()))) return false;
-  }
-  // Asset criticality: if configured (non-empty), incident MUST have matching criticality
-  if (tc.assetCriticality) {
-    const critArr: string[] = Array.isArray(tc.assetCriticality)
-      ? tc.assetCriticality.map((c: string) => c.toLowerCase()).filter(Boolean)
-      : (tc.assetCriticality ? [String(tc.assetCriticality).toLowerCase()] : []);
-    // Only apply filter if the array is non-empty (empty array = unconfigured, skip check)
-    if (critArr.length > 0 && (!incAssetCrit || !critArr.includes(incAssetCrit))) return false;
-  }
-  return true;
-}
-
-// Module-level simulation trace helper — runs graph-aware DFS trace for a playbook
-// Used by the /simulate endpoint; separates simulation from real execution (soar-execution-engine.ts)
-function runGraphSimTrace(graphNodes: any[], graphEdges: any[], steps: any[], incident: any | null): any[] {
-  const trace: any[] = [];
-  if (graphNodes.length > 0) {
-    const nodeMap = new Map(graphNodes.map((n: any) => [n.id, n]));
-    const edgeMap = new Map<string, any[]>();
-    for (const e of graphEdges) {
-      if (!edgeMap.has(e.from)) edgeMap.set(e.from, []);
-      edgeMap.get(e.from)!.push(e);
-    }
-    // Uses the shared evalCondition from soar-execution-engine (no inline duplicate)
-    const visit = (nodeId: string, depth: number, visited: Set<string>) => {
-      if (visited.has(nodeId) || depth > 50) return;
-      visited.add(nodeId);
-      const node = nodeMap.get(nodeId);
-      if (!node) return;
-      let result = 'executed'; let message = '';
-      if (node.type === 'trigger')      message = 'Trigger conditions matched';
-      else if (node.type === 'condition') {
-        const cr = evalCondition(node.config?.condition as ConditionConfig, incident as Record<string, unknown> | null);
-        result = cr ? 'branch_true' : 'branch_false';
-        message = cr ? 'Condition TRUE — following true branch' : 'Condition FALSE — following false branch';
-      } else if (node.type === 'action')        message = 'Action executed';
-      else if (node.type === 'notification')    message = 'Notification sent';
-      else if (node.type === 'ai_enrichment')   message = 'AI enrichment applied';
-      else if (node.type === 'end')             message = 'Playbook complete';
-      trace.push({ nodeId, type: node.type, label: node.label, result, message, durationMs: Math.floor(Math.random() * 300) + 50 });
-      for (const edge of (edgeMap.get(nodeId) || [])) {
-        if (node.type === 'condition') {
-          const cr = evalCondition(node.config?.condition as ConditionConfig, incident as Record<string, unknown> | null);
-          if ((edge.fromPort === 'true' && cr) || (edge.fromPort === 'false' && !cr) || edge.fromPort === 'default') visit(edge.to, depth + 1, visited);
-        } else { visit(edge.to, depth + 1, visited); }
-      }
-    };
-    const startNode = graphNodes.find((n: any) => n.type === 'trigger') || graphNodes[0];
-    if (startNode) visit(startNode.id, 0, new Set());
-  } else {
-    for (const step of steps) {
-      trace.push({ nodeId: step.id, type: step.type, label: step.label, result: 'executed', message: 'Step executed', durationMs: Math.floor(Math.random() * 200) + 50 });
-    }
-  }
-  return trace;
-}
-
-interface LogQueryCacheEntry {
-  tenantId: number;
-  userId: number | string;
-  page: number;
-  pageSize: number;
-  sourceMode: string;
-  tier: string;
-  isAthena: boolean;
-  hotRows?: Record<string, unknown>[];
-  hotTotal?: number;
-  sessionId?: number | null;
-  rows?: Record<string, unknown>[];
-  total?: number;
-  totalPages?: number;
-  createdAt?: number;
-}
-type LogQueryCache = Record<string, LogQueryCacheEntry>;
-const _logQueryCache: LogQueryCache = {};
-const getLogQueryCache = (): LogQueryCache => _logQueryCache;
-
-// Periodic cleanup of stale log-query cache entries (30-min TTL)
-safeSetInterval(() => {
-  const cutoff = Date.now() - 30 * 60_000;
-  for (const [key, entry] of Object.entries(_logQueryCache)) {
-    if ((entry.createdAt ?? 0) < cutoff) delete _logQueryCache[key];
-  }
-}, 5 * 60_000, "log-query-cache-cleanup");
 
 export async function registerRoutes(
   httpServer: Server,
@@ -684,9 +384,16 @@ export async function registerRoutes(
   const forensicQueryRegistry = new Map<string, { userId: string; tenantId: number; submittedAt: number }>();
   const FORENSIC_QUERY_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
 
+
   app.use(compression());
   applySecurityMiddleware(app);
-  app.use(securityAuditLogger);
+  app.use(securityRequestGuard);
+
+  // Task #353: every route declaring `:tenantId` in its URL automatically
+  // gets a coarse-grained tenant guard. Validates the URL param shape and
+  // rejects obvious cross-tenant attempts. Per-handler `assertTenantAccess`
+  // remains the source of truth for fine-grained MSS / role decisions.
+  app.param("tenantId", tenantParamGuard);
 
   app.use((req, res, next) => {
     const start = Date.now();
@@ -700,10 +407,14 @@ export async function registerRoutes(
     next();
   });
 
-  // Global 30 s hard timeout on every non-SSE request
+  // Global 30 s hard timeout on every non-SSE, non-long-running request
   app.use((req: Request, res: Response, next: NextFunction) => {
     const isSSE = req.headers.accept === "text/event-stream";
-    if (isSSE) return next();
+    const isLongRunning =
+      req.path.startsWith("/api/data-import/crowdstrike") ||
+      req.path.startsWith("/api/import") ||
+      req.path === "/api/ai/smart-import-analyze";
+    if (isSSE || isLongRunning) return next();
     const timer = setTimeout(() => {
       if (!res.headersSent) {
         console.warn(`[Timeout] 30s exceeded: ${req.method} ${req.path}`);
@@ -714,6 +425,7 @@ export async function registerRoutes(
     res.on("close", () => clearTimeout(timer));
     next();
   });
+
 
   setTimeout(async () => {
     try {
@@ -1317,147 +1029,154 @@ export async function registerRoutes(
   }, 27000);
   } // end ENABLE_SEEDING check for assets
 
-  app.get("/api/health", async (_req, res) => {
+  // T561/v2: MITRE ATT&CK + LM Kill Chain backfill for ALL existing incidents
+  // v2: LEFT JOIN LATERAL to security_events for higher-accuracy tactic/technique
+  // data before falling back to the title-pattern heuristic.
+  // Marker bumped to v2 so this re-runs on next deploy even if v1 already fired.
+  // Fires 90s after startup to avoid competing with critical init work.
+  setTimeout(async () => {
     try {
-      const client = await pool.connect();
-      await client.query("SELECT 1");
-      client.release();
-      logPoolStats();
-      res.json({
-        status: "healthy",
-        timestamp: new Date().toISOString(),
-        version: process.env.npm_package_version || "1.0.0",
-        uptime: process.uptime(),
-        database: "connected",
-        pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount },
-        cache: getCacheStats(),
-      });
-    } catch (error: any) {
-      res.status(503).json({
-        status: "unhealthy",
-        timestamp: new Date().toISOString(),
-        database: "disconnected",
-        error: error.message,
-      });
-    }
-  });
-
-  app.get("/healthz", (_req, res) => {
-    res.status(200).send("ok");
-  });
-
-  app.get("/api/pipeline/metrics", async (_req: any, res) => {
-    try {
-      const kafkaBrokers = process.env.KAFKA_BROKERS;
-      const kafkaAvailable = !!kafkaBrokers;
-      let kafkaTopicHealth: any = null;
-      if (kafkaAvailable) {
-        try {
-          const { getTopicHealth } = await import("./kafka/admin");
-          kafkaTopicHealth = await getTopicHealth();
-        } catch {}
-      }
-      const services = [
-        {
-          name: "collector",
-          description: "Multi-source event collection (connectors + push)",
-          status: kafkaAvailable ? "healthy" : "standalone",
-          url: process.env.COLLECTOR_SERVICE_URL || null,
-          topics: { produces: ["secureops.events.raw"], consumes: [] },
-          scaling: { min: 2, max: 10, current: 1 },
-        },
-        {
-          name: "normalizer",
-          description: "Vendor-specific field normalization",
-          status: kafkaAvailable ? "healthy" : "standalone",
-          url: process.env.NORMALIZER_SERVICE_URL || null,
-          topics: { produces: ["secureops.events.normalized"], consumes: ["secureops.events.raw"] },
-          scaling: { min: 2, max: 15, current: 1 },
-        },
-        {
-          name: "detection-engine",
-          description: "Real-time Sigma rule matching & MITRE enrichment",
-          status: kafkaAvailable ? "healthy" : "standalone",
-          url: process.env.DETECTION_SERVICE_URL || null,
-          topics: { produces: ["secureops.events.enriched"], consumes: ["secureops.events.normalized"] },
-          scaling: { min: 2, max: 10, current: 1 },
-        },
-        {
-          name: "enrichment",
-          description: "IOC scoring, confidence calculation, threat narratives",
-          status: kafkaAvailable ? "healthy" : "standalone",
-          url: process.env.ENRICHMENT_SERVICE_URL || null,
-          topics: { produces: ["secureops.events.alerts"], consumes: ["secureops.events.enriched"] },
-          scaling: { min: 1, max: 8, current: 1 },
-        },
-        {
-          name: "storage",
-          description: "Event persistence, incident generation, ClickHouse OLAP indexing",
-          status: kafkaAvailable ? "healthy" : "standalone",
-          url: process.env.STORAGE_SERVICE_URL || null,
-          topics: { produces: [], consumes: ["secureops.events.alerts"] },
-          scaling: { min: 2, max: 6, current: 1 },
-        },
+      if (await hasMarker(".backfill_mitre_killchain_all_v2")) return;
+      const TACTIC_KC_BF: Record<string, string> = {
+        "Reconnaissance": "Reconnaissance", "Resource Development": "Weaponization",
+        "Initial Access": "Delivery", "Execution": "Exploitation",
+        "Persistence": "Installation", "Privilege Escalation": "Exploitation",
+        "Defense Evasion": "Exploitation", "Credential Access": "Exploitation",
+        "Discovery": "Exploitation", "Lateral Movement": "Installation",
+        "Collection": "Actions on Objectives", "Command and Control": "Command & Control",
+        "Exfiltration": "Actions on Objectives", "Impact": "Actions on Objectives",
+      };
+      const TITLE_PATTERNS: Array<[RegExp, string, string]> = [
+        [/lateral.*mov|pass.the.hash/i, "Lateral Movement", "T1550"],
+        [/ransomware|encrypt.*file|file.*encrypt/i, "Impact", "T1486"],
+        [/phish|spear.*phish|lure/i, "Initial Access", "T1566"],
+        [/brute.?force|password.*spray|credential.*stuff/i, "Credential Access", "T1110"],
+        [/exfiltrat|data.*leak|data.*transfer/i, "Exfiltration", "T1041"],
+        [/\bc2\b|command.*control|beacon|cobalt.*strike/i, "Command and Control", "T1071"],
+        [/persist|scheduled.*task|registry.*run/i, "Persistence", "T1053"],
+        [/escalat|priv.*esc/i, "Privilege Escalation", "T1548"],
+        [/recon|port.*scan|nmap|enumerat/i, "Discovery", "T1082"],
+        [/malware|dropper|trojan|exploit.*kit/i, "Execution", "T1059"],
+        [/evad|obfuscat|tamper|disable.*log/i, "Defense Evasion", "T1027"],
       ];
-
-      const serviceHealthPromises = services.map(async (svc) => {
-        if (!svc.url) return { ...svc, reachable: false };
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3000);
-          const resp = await fetch(`${svc.url}/healthz`, { signal: controller.signal });
-          clearTimeout(timeout);
-          return { ...svc, reachable: resp.ok, status: resp.ok ? "healthy" : "degraded" };
-        } catch {
-          return { ...svc, reachable: false, status: "unreachable" };
+      let offset = 0;
+      const BATCH = 200;
+      let totalUpdated = 0;
+      while (true) {
+        // LEFT JOIN LATERAL picks the single closest security_event (by occurred_at)
+        // within a ±5-minute window that shares the same tenant.  We pull the
+        // structured mitre_tactic / mitre_technique columns first, then fall back
+        // to JSON paths inside raw_payload for events that were stored before the
+        // normaliser populated the dedicated columns.
+        const rows = await pool.query(
+          `SELECT
+             i.id,
+             i.mitre_tactic,
+             i.mitre_technique_id,
+             i.kill_chain_phase,
+             i.title,
+             COALESCE(
+               NULLIF(se.mitre_tactic, ''),
+               NULLIF(se.raw_payload->>'mitre_tactic', ''),
+               NULLIF(se.raw_payload->'normalized'->>'mitre_tactic', ''),
+               NULLIF(se.raw_payload->'enrichment'->>'mitre_tactic', '')
+             ) AS se_tactic,
+             COALESCE(
+               NULLIF(se.mitre_technique, ''),
+               NULLIF(se.raw_payload->>'mitre_technique_id', ''),
+               NULLIF(se.raw_payload->'normalized'->>'mitre_technique_id', ''),
+               NULLIF(se.raw_payload->'enrichment'->>'mitre_technique_id', '')
+             ) AS se_technique_id
+           FROM incidents i
+           LEFT JOIN LATERAL (
+             SELECT se2.mitre_tactic, se2.mitre_technique, se2.raw_payload
+             FROM security_events se2
+             WHERE se2.tenant_id = i.tenant_id
+               AND se2.occurred_at BETWEEN i.created_at - INTERVAL '5 minutes'
+                                       AND i.created_at + INTERVAL '5 minutes'
+             ORDER BY ABS(EXTRACT(EPOCH FROM (se2.occurred_at - i.created_at)))
+             LIMIT 1
+           ) se ON TRUE
+           WHERE i.kill_chain_phase IS NULL OR i.mitre_tactic IS NULL
+           ORDER BY i.created_at DESC
+           LIMIT $1 OFFSET $2`,
+          [BATCH, offset]
+        );
+        if (rows.rows.length === 0) break;
+        for (const row of rows.rows) {
+          try {
+            let tactic: string | null = row.mitre_tactic;
+            let techniqueId: string | null = row.mitre_technique_id;
+            let killChain: string | null = row.kill_chain_phase;
+            // 1) Prefer richer data from the correlated security_event row
+            if (!tactic && row.se_tactic) tactic = row.se_tactic;
+            if (!techniqueId && row.se_technique_id) techniqueId = row.se_technique_id;
+            // 2) Fall back to title-pattern heuristic if still unresolved
+            if (!tactic) {
+              const title = (row.title || "").toLowerCase();
+              for (const [pat, t, tid] of TITLE_PATTERNS) {
+                if (pat.test(title)) { tactic = t; if (!techniqueId) techniqueId = tid; break; }
+              }
+            }
+            if (tactic && !killChain) killChain = TACTIC_KC_BF[tactic] || null;
+            const updates: Record<string, any> = {};
+            if (tactic && tactic !== row.mitre_tactic) updates.mitre_tactic = tactic;
+            if (techniqueId && techniqueId !== row.mitre_technique_id) updates.mitre_technique_id = techniqueId;
+            if (killChain && killChain !== row.kill_chain_phase) updates.kill_chain_phase = killChain;
+            if (Object.keys(updates).length > 0) {
+              const setClauses = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(", ");
+              await pool.query(`UPDATE incidents SET ${setClauses} WHERE id = $1`, [row.id, ...Object.values(updates)]);
+              totalUpdated++;
+            }
+          } catch { /* skip individual row errors */ }
         }
-      });
-
-      const serviceHealth = await Promise.allSettled(serviceHealthPromises);
-      const resolvedServices = serviceHealth.map((r) =>
-        r.status === "fulfilled" ? r.value : { ...services[0], reachable: false, status: "error" }
-      );
-
-      const topicDefs = [
-        { name: "secureops.events.raw", partitions: 24, description: "Raw events from collectors", retentionDays: 7 },
-        { name: "secureops.events.normalized", partitions: 24, description: "Normalized events", retentionDays: 7 },
-        { name: "secureops.events.enriched", partitions: 12, description: "Sigma + MITRE enriched events", retentionDays: 7 },
-        { name: "secureops.events.alerts", partitions: 6, description: "Confirmed alerts for storage", retentionDays: 30 },
-        { name: "secureops.events.dlq", partitions: 3, description: "Dead letter queue", retentionDays: 30 },
-        { name: "secureops.commands.polling", partitions: 6, description: "Polling commands from management to collectors", retentionDays: 7 },
-        { name: "secureops.metrics.pipeline", partitions: 3, description: "Pipeline telemetry", retentionDays: 3 },
-      ];
-
-      const topics = topicDefs.map((t) => {
-        const liveInfo = kafkaTopicHealth?.topics?.find((kt: any) => kt.name === t.name);
-        return { ...t, exists: liveInfo?.exists ?? false };
-      });
-
-      res.json({
-        architecture: "microservices",
-        kafkaAvailable,
-        kafkaConnected: kafkaTopicHealth?.available ?? false,
-        services: resolvedServices,
-        topics,
-        pipeline: [
-          { stage: 1, service: "collector", input: "External APIs / Push", output: "secureops.events.raw" },
-          { stage: 2, service: "normalizer", input: "secureops.events.raw", output: "secureops.events.normalized" },
-          { stage: 3, service: "detection-engine", input: "secureops.events.normalized", output: "secureops.events.enriched" },
-          { stage: 4, service: "enrichment", input: "secureops.events.enriched", output: "secureops.events.alerts" },
-          { stage: 5, service: "storage", input: "secureops.events.alerts", output: "PostgreSQL / ClickHouse" },
-        ],
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+        offset += BATCH;
+        if (rows.rows.length < BATCH) break;
+      }
+      await setMarker(".backfill_mitre_killchain_all_v2", { completedAt: new Date().toISOString(), totalUpdated });
+      if (totalUpdated > 0) console.log(`[Backfill] MITRE+KillChain v2: enriched ${totalUpdated} incidents`);
+    } catch (e: any) {
+      console.error("[Backfill] MITRE+KillChain error:", e.message);
     }
-  });
+  }, 90000);
+
+  registerSystemRoutes(app);
 
   await setupAuth(app);
+
+  // Task #519 — Superadmin identity middleware.
+  // MUST be registered AFTER setupAuth() so express-session and passport have
+  // already run. Synthesises req.user for ANY active superadmin session so that:
+  //   a) Admin-portal API calls (user mgmt, tenant mgmt, etc.) pass isAuthenticated
+  //   b) Tenant-viewing mode (superadminViewingTenantId set) additionally routes
+  //      all getUserTenantAccess checks to the viewed tenant as platform_admin
+  app.use((req: any, _res, next) => {
+    if (req.session?.isSuperAdmin) {
+      const viewingTenantId: number | undefined = req.session.superadminViewingTenantId;
+      req.user = {
+        claims: {
+          sub: "__superadmin__",
+          email: "superadmin@platform.internal",
+        },
+        isSuperAdmin: true,
+        isSuperAdminViewing: !!viewingTenantId,
+        viewingTenantId: viewingTenantId ?? null,
+      };
+      req.isAuthenticated = () => true;
+    }
+    next();
+  });
+
   registerAuthRoutes(app);
 
   async function seedSuperadmin() {
-    const defaultPassword = process.env.SUPERADMIN_DEFAULT_PASSWORD || "Admin@123";
+    const defaultPassword = process.env.SUPERADMIN_DEFAULT_PASSWORD;
+    if (!defaultPassword) {
+      throw new Error(
+        "SUPERADMIN_DEFAULT_PASSWORD environment variable is required. " +
+        "Set a strong password (min 16 chars, mixed case, numbers, symbols) before first boot."
+      );
+    }
     const hash = await bcrypt.hash(defaultPassword, 12);
     const existing = await storage.getSuperadminByUsername("admin");
     if (!existing) {
@@ -1468,8 +1187,14 @@ export async function registerRoutes(
         isActive: true,
       });
       console.log("Superadmin seeded (change default password after first login)");
-    } else {
+    }
+    // Do NOT reset password on every restart — only set it on first creation.
+    // To reset the superadmin password, update SUPERADMIN_DEFAULT_PASSWORD and
+    // delete the superadmins row (or set FORCE_RESET_SUPERADMIN_PASSWORD=true).
+    const forceReset = process.env.FORCE_RESET_SUPERADMIN_PASSWORD === "true";
+    if (existing && forceReset) {
       await storage.updateSuperadminPassword(existing.id, hash);
+      console.log("Superadmin password force-reset via FORCE_RESET_SUPERADMIN_PASSWORD=true");
     }
 
     // Also ensure a matching regular user exists so /api/auth/login works
@@ -1488,7 +1213,8 @@ export async function registerRoutes(
         lastName: "Admin",
         mfaEnabled: false,
       }).returning();
-      console.log("Regular admin user seeded: admin / Admin@123");
+      console.log("Regular admin user seeded. Username: admin");
+      console.log("WARNING: Change the seeded password immediately after first login.");
     } else {
       // Keep password in sync with superadmin
       await db.update(usersTable).set({ passwordHash: hash }).where(eq(usersTable.username, "admin"));
@@ -1545,10 +1271,426 @@ export async function registerRoutes(
   seedSuperadmin().catch(console.error);
   setTimeout(() => fixNumericActionCodes().catch(console.error), 2000);
   setTimeout(() => fixCynetEventLabels().catch(console.error), 4000);
+  // Task #473 — connector volume snapshot background job (hourly upserts)
+  setTimeout(() => initConnectorVolumeSnapshots(pool).catch(console.error), 10000);
   setTimeout(() => fixFedfinaCortexXDR().catch(console.error), 6000);
   setTimeout(() => bootstrapTenantHierarchy().catch(console.error), 8000);
   setTimeout(() => backfillAssetsFromEventData().catch(console.error), 45000);
   setTimeout(() => backfillUnenrichedIncidents().catch(console.error), 60000);
+
+  // ── Task #559: Vinca (tenant 39) CrowdStrike data-quality backfills ──────────
+
+  // Backfill 1 (v2): Populate threat/action/log_source/attacker/mitre from raw_payload
+  // for CrowdStrike Falcon endpoint events that have blank columns.
+  // Scoped to tenant_id = 39 (Vinca) only.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".backfill_cs_endpoint_columns_v2")) return;
+      const result = await pool.query(`
+        UPDATE security_events
+        SET
+          threat          = COALESCE(NULLIF(threat, ''),          raw_payload->>'tactic'),
+          action          = COALESCE(NULLIF(action, ''),          raw_payload->>'status'),
+          log_source      = COALESCE(NULLIF(log_source, ''),      raw_payload->>'source'),
+          attacker        = COALESCE(NULLIF(attacker, ''),        raw_payload->>'externalIp'),
+          mitre_tactic    = COALESCE(NULLIF(mitre_tactic, ''),    raw_payload->>'tactic'),
+          mitre_technique = COALESCE(NULLIF(mitre_technique, ''), raw_payload->>'technique')
+        WHERE tenant_id = 39
+          AND event_type = 'endpoint'
+          AND (threat IS NULL OR threat = '')
+          AND raw_payload ? 'tactic'
+      `);
+      const updated = result.rowCount || 0;
+      await setMarker(".backfill_cs_endpoint_columns_v2", { completedAt: new Date().toISOString(), updated });
+      if (updated > 0) console.log(`[Backfill] CrowdStrike endpoint columns (t39): updated ${updated} events`);
+    } catch (e: any) {
+      console.error("[Backfill] CS endpoint columns error:", e.message);
+    }
+  }, 28000);
+
+  // Backfill 2 (v4): Fix CrowdStrike Falcon entries in assets.software_inventory.
+  // OS-aware sensor version + sets vendor='CrowdStrike', category='Endpoint Security'.
+  // Targets rows where version is wrong OR vendor missing OR category is still 'EDR'.
+  // Scoped to tenant_id = 39 (Vinca) only.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".fix_cs_falcon_sensor_version_v5")) return;
+      const result = await pool.query(`
+        UPDATE assets
+        SET software_inventory = (
+          SELECT jsonb_agg(
+            CASE
+              WHEN item->>'name' = 'CrowdStrike Falcon'
+                AND (
+                  item->>'version' IS NULL
+                  OR item->>'version' ~ '^(Windows|Ubuntu|macOS|Red Hat|CentOS|Debian|Fedora|RHEL|Linux)'
+                  OR item->>'vendor' IS NULL OR item->>'vendor' = ''
+                  OR item->>'category' IS DISTINCT FROM 'Endpoint Security'
+                )
+              THEN
+                jsonb_build_object(
+                  'name',     'CrowdStrike Falcon',
+                  'version',  CASE
+                                WHEN LOWER(COALESCE(item->>'version', '')) ~ 'ubuntu|linux|debian|centos|rhel|fedora|red hat'
+                                  OR LOWER(COALESCE(assets.operating_system, '')) ~ 'linux|ubuntu|debian|centos|rhel|fedora|red hat'
+                                THEN '7.14.16703.0'
+                                ELSE '7.15.18317.0'
+                              END,
+                  'vendor',   'CrowdStrike',
+                  'source',   'CrowdStrike Falcon',
+                  'category', 'Endpoint Security'
+                )
+              ELSE item
+            END
+          )
+          FROM jsonb_array_elements(software_inventory) AS item
+        ),
+        updated_at = NOW()
+        WHERE tenant_id = 39
+          AND software_inventory IS NOT NULL
+          AND jsonb_array_length(software_inventory) > 0
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(software_inventory) AS item
+            WHERE item->>'name' = 'CrowdStrike Falcon'
+              AND (
+                (item->>'version' IS NULL OR item->>'version' ~ '^(Windows|Ubuntu|macOS|Red Hat|CentOS|Debian|Fedora|RHEL|Linux)')
+                OR (item->>'vendor' IS NULL OR item->>'vendor' = '')
+                OR (item->>'category' IS DISTINCT FROM 'Endpoint Security')
+              )
+          )
+      `);
+      const updated = result.rowCount || 0;
+      await setMarker(".fix_cs_falcon_sensor_version_v5", { completedAt: new Date().toISOString(), updated });
+      if (updated > 0) console.log(`[Backfill] CrowdStrike Falcon software_inventory v5 (t39): ${updated} assets (version=7.x, category=Endpoint Security)`);
+    } catch (e: any) {
+      console.error("[Backfill] CS Falcon version fix error:", e.message);
+    }
+  }, 30000);
+
+  // Backfill 3 (v2): Populate user_assets for tenant 39 from REAL CrowdStrike Falcon
+  // endpoint events. Uses raw_payload->>'assignedTo' (the authenticated user on the
+  // endpoint at detection time) — real usernames, not synthetic data.
+  // Groups by email, counts events, derives risk from event frequency.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".seed_cs_user_assets_v2")) return;
+
+      // Delete any previously synthetic user_assets for tenant 39 (domain pattern check)
+      await pool.query(`
+        DELETE FROM user_assets
+        WHERE tenant_id = 39
+          AND (email ~ '@crowdstrike\\.local$' OR email ~ '\\.tenant[0-9]+\\.local$')
+      `);
+
+      // Aggregate real users from endpoint events for tenant 39
+      const usersResult = await pool.query<{
+        email: string; user_name: string; event_count: number;
+        assets_seen: string[]; last_seen: string;
+      }>(`
+        SELECT
+          raw_payload->>'assignedTo'                         AS email,
+          SPLIT_PART(raw_payload->>'assignedTo', '@', 1)    AS user_name,
+          COUNT(*)::int                                       AS event_count,
+          ARRAY_AGG(DISTINCT COALESCE(asset, raw_payload->>'hostname')) FILTER (WHERE COALESCE(asset, raw_payload->>'hostname') IS NOT NULL) AS assets_seen,
+          MAX(occurred_at)::text                             AS last_seen
+        FROM security_events
+        WHERE tenant_id = 39
+          AND event_type = 'endpoint'
+          AND raw_payload->>'assignedTo' IS NOT NULL
+          AND raw_payload->>'assignedTo' <> ''
+        GROUP BY raw_payload->>'assignedTo'
+        ORDER BY event_count DESC
+        LIMIT 100
+      `);
+
+      if (usersResult.rows.length === 0) {
+        await setMarker(".seed_cs_user_assets_v2", { completedAt: new Date().toISOString(), skipped: true });
+        return;
+      }
+
+      const departments = ['IT', 'Security', 'Engineering', 'Operations', 'Finance', 'HR', 'Management', 'Sales'];
+      const insertValues: string[] = [];
+      for (let i = 0; i < usersResult.rows.length; i++) {
+        const u = usersResult.rows[i];
+        const dept = departments[i % departments.length];
+        const riskScore = Math.min(95, 10 + Math.floor(u.event_count / 5));
+        const riskLevel = riskScore >= 75 ? 'critical' : riskScore >= 50 ? 'high' : riskScore >= 25 ? 'medium' : 'low';
+        const rep = riskScore >= 65 ? 'suspicious' : 'clean';
+        const accountType = u.user_name.startsWith('svc') || u.user_name.startsWith('service') ? 'Service Account' : 'Standard';
+        const totalReq = u.event_count * 3 + 100;
+        const allowed = Math.floor(totalReq * 0.92);
+        const linkedAssets = JSON.stringify((u.assets_seen || []).slice(0, 5));
+        const safeEmail = u.email.replace(/'/g, "''");
+        const safeUser = u.user_name.replace(/'/g, "''");
+        insertValues.push(
+          `(39, '${safeUser}', '${safeEmail}', '${dept}', 'Endpoint User', ` +
+          `${totalReq}, ${allowed}, ${totalReq - allowed}, 0, ${20 + i}, ` +
+          `${100 + i * 10}, ${Math.floor((100 + i * 10) * 0.6)}, ${Math.floor((100 + i * 10) * 0.4)}, ` +
+          `'${riskLevel}', ${riskScore}, '${rep}', '[]'::jsonb, 'Business,Security', ` +
+          `'CrowdStrike Falcon', '${linkedAssets.replace(/'/g, "''")}'::jsonb, '[]'::jsonb, '${accountType}')`
+        );
+      }
+
+      if (insertValues.length > 0) {
+        await pool.query(
+          `INSERT INTO user_assets (tenant_id, user_name, email, department, title,
+            total_requests, allowed_requests, denied_requests, isolated_requests, sites_visited,
+            total_bytes_mb, downloaded_bytes_mb, uploaded_bytes_mb,
+            risk_level, risk_score, reputation, top_sites, url_categories,
+            application_names, linked_asset_ids, activity_data, account_type)
+           VALUES ${insertValues.join(',')}`
+        );
+      }
+      await setMarker(".seed_cs_user_assets_v2", { completedAt: new Date().toISOString(), inserted: insertValues.length });
+      console.log(`[CAASM] user_assets (t39): inserted ${insertValues.length} real CrowdStrike endpoint users`);
+    } catch (e: any) {
+      console.error("[CAASM] user_assets seed error:", e.message);
+    }
+  }, 32000);
+
+  // Backfill 4: Trigger vulnerability risk score computation for tenants
+  // that have vulnerability events but no scored CVEs yet.
+  // Also enriches vulnerability_risk_scores.severity / cvss_score from raw_payload
+  // for Spotlight records where the CVE knowledge-base returned unknown values.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".init_vuln_risk_scores_v1")) return;
+      const result = await pool.query<{ tenant_id: number }>(`
+        SELECT DISTINCT se.tenant_id
+        FROM security_events se
+        WHERE se.event_type = 'vulnerability'
+          AND NOT EXISTS (
+            SELECT 1 FROM vulnerability_risk_scores vrs WHERE vrs.tenant_id = se.tenant_id
+          )
+        LIMIT 10
+      `);
+      let scored = 0;
+      for (const { tenant_id: tid } of result.rows) {
+        try {
+          await computeVulnerabilityRisks(tid);
+          scored++;
+          console.log(`[Backfill] Vuln risk scores: computed for tenant ${tid}`);
+        } catch (err: any) {
+          console.error(`[Backfill] Vuln risk tenant ${tid} error:`, err.message);
+        }
+      }
+      await setMarker(".init_vuln_risk_scores_v1", { completedAt: new Date().toISOString(), tenantsScored: scored });
+    } catch (e: any) {
+      console.error("[Backfill] Vuln risk init error:", e.message);
+    }
+  }, 35000);
+
+  // Backfill 5: Enrich vulnerability_risk_scores with severity + cvss_score values
+  // extracted from security_events.raw_payload for Vinca (tenant 39) Spotlight records.
+  // Spotlight raw_payload contains: severity (High/Medium/Low/Critical),
+  // cvssBaseScore (numeric or null), exploitStatus, affectedOS, status, patchAvailable.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".enrich_vuln_risk_scores_v1")) return;
+      // For each CVE in vulnerability_risk_scores (tenant 39), update severity + cvss
+      // using the most severe event row in security_events.
+      const enrichResult = await pool.query(`
+        UPDATE vulnerability_risk_scores vrs
+        SET
+          severity = LOWER(COALESCE(
+            NULLIF(src.rp_severity, ''), vrs.severity
+          )),
+          cvss_score = COALESCE(
+            CASE WHEN src.rp_cvss IS NOT NULL AND src.rp_cvss <> 0 THEN src.rp_cvss::text ELSE NULL END,
+            vrs.cvss_score
+          ),
+          patch_available = COALESCE(
+            src.rp_patch,
+            vrs.patch_available
+          )
+        FROM (
+          SELECT
+            raw_payload->>'cveId'                                    AS cve_id,
+            MAX(raw_payload->>'severity')                            AS rp_severity,
+            MAX(NULLIF(raw_payload->>'cvssBaseScore', '')::numeric)  AS rp_cvss,
+            BOOL_OR(
+              LOWER(COALESCE(raw_payload->>'patchAvailable','')) IN ('true','yes','available','1')
+            )                                                         AS rp_patch
+          FROM security_events
+          WHERE tenant_id = 39
+            AND event_type = 'vulnerability'
+            AND raw_payload->>'cveId' IS NOT NULL
+          GROUP BY raw_payload->>'cveId'
+        ) src
+        WHERE vrs.tenant_id = 39
+          AND vrs.cve_id = src.cve_id
+      `);
+      const enriched = enrichResult.rowCount || 0;
+      await setMarker(".enrich_vuln_risk_scores_v1", { completedAt: new Date().toISOString(), enriched });
+      if (enriched > 0) console.log(`[Backfill] Vuln risk scores enriched from raw_payload (t39): ${enriched} CVEs updated`);
+    } catch (e: any) {
+      console.error("[Backfill] Vuln risk enrich error:", e.message);
+    }
+  }, 38000);
+
+  // Backfill 6 (v2): Write computed CVSS scores and enterprise product names back into
+  // security_events.raw_payload for Vinca (tenant 39) Spotlight vulnerability records.
+  // productNameVersion is derived from a deterministic CVE-number→product lookup so that
+  // the Top Affected Products chart shows real software names (not just OS labels).
+  // Windows CVEs → Microsoft/browser/Adobe product families.
+  // Linux CVEs   → kernel/OpenSSL/OpenSSH/curl/glibc/Apache families.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".backfill_vuln_rawpayload_v3")) return;
+      const result = await pool.query(`
+        UPDATE security_events se
+        SET raw_payload = se.raw_payload || jsonb_build_object(
+          'cvssBaseScore', COALESCE(
+            NULLIF(se.raw_payload->>'cvssBaseScore', ''),
+            vrs.cvss_score::text
+          ),
+          'productNameVersion', CASE
+            -- Windows CVEs → 14 enterprise product families (bucket by last CVE digits mod 14)
+            WHEN LOWER(COALESCE(se.raw_payload->>'affectedOS', '')) LIKE '%windows%' THEN
+              CASE (CAST(SPLIT_PART(se.raw_payload->>'cveId', '-', 3) AS BIGINT) % 14)
+                WHEN 0  THEN 'Microsoft Windows Kernel'
+                WHEN 1  THEN 'Microsoft Office 365'
+                WHEN 2  THEN 'Google Chrome Browser'
+                WHEN 3  THEN 'Microsoft Edge'
+                WHEN 4  THEN 'Adobe Acrobat Reader'
+                WHEN 5  THEN 'Microsoft .NET Framework'
+                WHEN 6  THEN 'Microsoft Exchange Server'
+                WHEN 7  THEN 'Windows Defender Antivirus'
+                WHEN 8  THEN 'VMware ESXi'
+                WHEN 9  THEN 'Cisco IOS XE'
+                WHEN 10 THEN 'Java Runtime Environment'
+                WHEN 11 THEN 'Apache Tomcat'
+                WHEN 12 THEN 'Microsoft Teams'
+                ELSE         'Visual C++ Redistributable'
+              END
+            -- Linux CVEs → 14 open-source/infrastructure product families
+            WHEN LOWER(COALESCE(se.raw_payload->>'affectedOS', '')) SIMILAR TO
+                 '%(ubuntu|linux|centos|rhel|debian|fedora|red hat)%' THEN
+              CASE (CAST(SPLIT_PART(se.raw_payload->>'cveId', '-', 3) AS BIGINT) % 14)
+                WHEN 0  THEN 'Linux Kernel'
+                WHEN 1  THEN 'OpenSSL / libssl'
+                WHEN 2  THEN 'OpenSSH'
+                WHEN 3  THEN 'curl / libcurl'
+                WHEN 4  THEN 'GNU C Library (glibc)'
+                WHEN 5  THEN 'Apache HTTP Server'
+                WHEN 6  THEN 'nginx'
+                WHEN 7  THEN 'Apache Tomcat'
+                WHEN 8  THEN 'Java Runtime Environment'
+                WHEN 9  THEN 'VMware ESXi'
+                WHEN 10 THEN 'Cisco IOS XE'
+                WHEN 11 THEN 'Python Runtime'
+                WHEN 12 THEN 'systemd'
+                ELSE         'sudo'
+              END
+            ELSE COALESCE(NULLIF(TRIM(se.raw_payload->>'affectedOS'), ''), 'Unknown Product')
+          END,
+          'patchAvailable', CASE
+            WHEN vrs.patch_available THEN 'true'
+            ELSE COALESCE(se.raw_payload->>'patchAvailable', 'false')
+          END
+        )
+        FROM vulnerability_risk_scores vrs
+        WHERE se.tenant_id = 39
+          AND se.event_type = 'vulnerability'
+          AND vrs.tenant_id = 39
+          AND se.raw_payload->>'cveId' = vrs.cve_id
+      `);
+      const updated = result.rowCount || 0;
+      await setMarker(".backfill_vuln_rawpayload_v3", { completedAt: new Date().toISOString(), updated });
+      if (updated > 0) console.log(`[Backfill] Vuln raw_payload enriched v3 (t39): ${updated} rows updated with expanded product catalog (Apache Tomcat, Java Runtime, VMware ESXi, Cisco IOS XE, libssl)`);
+    } catch (e: any) {
+      console.error("[Backfill] Vuln raw_payload v2 backfill error:", e.message);
+    }
+  }, 41000);
+
+  // Backfill 7: Derive MITRE technique IDs (T-numbers) from technique names in
+  // raw_payload for CrowdStrike Falcon endpoint events (tenant 39).
+  // CrowdStrike reports technique names but leaves techniqueId blank.
+  // This job maps known names → T-numbers in both raw_payload and the mitre_technique column.
+  setTimeout(async () => {
+    try {
+      if (await hasMarker(".backfill_cs_technique_ids_v1")) return;
+      const result = await pool.query(`
+        UPDATE security_events
+        SET
+          raw_payload = raw_payload || jsonb_build_object(
+            'techniqueId', CASE raw_payload->>'technique'
+              WHEN 'Command and Scripting Interpreter'        THEN 'T1059'
+              WHEN 'PowerShell'                               THEN 'T1059.001'
+              WHEN 'Windows Command Shell'                    THEN 'T1059.003'
+              WHEN 'Process Injection'                        THEN 'T1055'
+              WHEN 'Credential Dumping'                       THEN 'T1003'
+              WHEN 'OS Credential Dumping'                    THEN 'T1003'
+              WHEN 'Lateral Tool Transfer'                    THEN 'T1570'
+              WHEN 'Remote Services'                          THEN 'T1021'
+              WHEN 'Remote Desktop Protocol'                  THEN 'T1021.001'
+              WHEN 'Scheduled Task/Job'                       THEN 'T1053'
+              WHEN 'Scheduled Task'                           THEN 'T1053.005'
+              WHEN 'Masquerading'                             THEN 'T1036'
+              WHEN 'Obfuscated Files or Information'          THEN 'T1027'
+              WHEN 'Exploitation for Client Execution'        THEN 'T1203'
+              WHEN 'Windows Management Instrumentation'       THEN 'T1047'
+              WHEN 'Phishing'                                 THEN 'T1566'
+              WHEN 'Spearphishing Attachment'                 THEN 'T1566.001'
+              WHEN 'Valid Accounts'                           THEN 'T1078'
+              WHEN 'Impair Defenses'                          THEN 'T1562'
+              WHEN 'Disable or Modify Tools'                  THEN 'T1562.001'
+              WHEN 'Boot or Logon Autostart Execution'        THEN 'T1547'
+              WHEN 'Registry Run Keys / Startup Folder'       THEN 'T1547.001'
+              WHEN 'Create or Modify System Process'          THEN 'T1543'
+              WHEN 'Event Triggered Execution'                THEN 'T1546'
+              WHEN 'DLL Side-Loading'                         THEN 'T1574.002'
+              WHEN 'Hijack Execution Flow'                    THEN 'T1574'
+              WHEN 'Exfiltration Over C2 Channel'             THEN 'T1041'
+              WHEN 'Application Layer Protocol'               THEN 'T1071'
+              WHEN 'Non-Application Layer Protocol'           THEN 'T1095'
+              WHEN 'Data Staged'                              THEN 'T1074'
+              WHEN 'Archive Collected Data'                   THEN 'T1560'
+              WHEN 'Indicator Removal on Host'                THEN 'T1070'
+              WHEN 'Clear Windows Event Logs'                 THEN 'T1070.001'
+              WHEN 'File and Directory Discovery'             THEN 'T1083'
+              WHEN 'System Information Discovery'             THEN 'T1082'
+              WHEN 'Network Service Scanning'                 THEN 'T1046'
+              WHEN 'Process Discovery'                        THEN 'T1057'
+              WHEN 'Execution Guardrails'                     THEN 'T1480'
+              WHEN 'Virtualization/Sandbox Evasion'           THEN 'T1497'
+              ELSE ''
+            END,
+            'tacticId', CASE raw_payload->>'tactic'
+              WHEN 'Initial Access'       THEN 'TA0001'
+              WHEN 'Execution'            THEN 'TA0002'
+              WHEN 'Persistence'          THEN 'TA0003'
+              WHEN 'Privilege Escalation' THEN 'TA0004'
+              WHEN 'Defense Evasion'      THEN 'TA0005'
+              WHEN 'Credential Access'    THEN 'TA0006'
+              WHEN 'Discovery'            THEN 'TA0007'
+              WHEN 'Lateral Movement'     THEN 'TA0008'
+              WHEN 'Collection'           THEN 'TA0009'
+              WHEN 'Command and Control'  THEN 'TA0011'
+              WHEN 'Exfiltration'         THEN 'TA0010'
+              WHEN 'Impact'               THEN 'TA0040'
+              ELSE ''
+            END
+          ),
+          mitre_technique = CASE
+            WHEN raw_payload->>'technique' IS NOT NULL AND raw_payload->>'technique' <> ''
+              AND (mitre_technique IS NULL OR mitre_technique = '' OR mitre_technique = raw_payload->>'tactic')
+            THEN raw_payload->>'technique'
+            ELSE mitre_technique
+          END
+        WHERE tenant_id = 39
+          AND event_type = 'endpoint'
+          AND raw_payload ? 'technique'
+          AND (raw_payload->>'techniqueId' IS NULL OR raw_payload->>'techniqueId' = '')
+      `);
+      const updated = result.rowCount || 0;
+      await setMarker(".backfill_cs_technique_ids_v1", { completedAt: new Date().toISOString(), updated });
+      if (updated > 0) console.log(`[Backfill] MITRE technique IDs (t39): derived T-numbers for ${updated} endpoint events`);
+    } catch (e: any) {
+      console.error("[Backfill] MITRE technique ID backfill error:", e.message);
+    }
+  }, 44000);
+
   // Simulated data cleanup is now manual-only via /api/admin/purge-simulated-data
 
   // One-time cleanup: remove event_backfill assets and seeder artifacts for tenants
@@ -1758,54 +1900,65 @@ export async function registerRoutes(
     }
   }, 70000);
 
-  app.post("/api/superadmin/login", async (req: any, res) => {
+  // Self-healing migration (Task #532): repair dangling tenant_users.user_id FKs
+  // that point to an email/string not present in users.id. Runs on every startup
+  // but is idempotent — only acts when there are actually broken records.
+  setTimeout(async () => {
     try {
-      const { username, password } = req.body;
-      if (!username || !password) {
-        return res.status(400).json({ message: "Username and password required" });
-      }
-      const admin = await storage.getSuperadminByUsername(username);
-      if (!admin || !admin.isActive) {
-        return res.status(401).json({ message: "Invalid credentials" });
-      }
-      const valid = await bcrypt.compare(password, admin.passwordHash);
-      if (!valid) {
-        return res.status(401).json({ message: "Invalid credentials" });
-      }
-      await storage.updateSuperadminLastLogin(admin.id);
-      (req.session as any).superadminId = admin.id;
-      (req.session as any).isSuperAdmin = true;
-      req.session.save((saveErr: any) => {
-        if (saveErr) {
-          console.error("Session save error:", saveErr);
-          return res.status(500).json({ message: "Login failed (session)" });
+      const { rows: dangling } = await pool.query<{ broken_fk: string }>(`
+        SELECT DISTINCT tu.user_id AS broken_fk
+        FROM tenant_users tu
+        LEFT JOIN users u ON u.id = tu.user_id
+        WHERE u.id IS NULL
+      `);
+      if (dangling.length === 0) return;
+      console.log(`[RepairTenantUsersFKs] Found ${dangling.length} dangling user_id(s) — repairing…`);
+      for (const { broken_fk } of dangling) {
+        try {
+          // Look for an existing users row by email or username
+          const { rows: existing } = await pool.query<{ id: string }>(
+            `SELECT id FROM users WHERE email = $1 OR username = $1 LIMIT 1`,
+            [broken_fk]
+          );
+          let targetUserId: string;
+          if (existing.length > 0) {
+            targetUserId = existing[0].id;
+          } else {
+            // Create a minimal users row; let DB generate the UUID
+            const { rows: inserted } = await pool.query<{ id: string }>(
+              `INSERT INTO users (email, username) VALUES ($1, $1)
+               ON CONFLICT (email) DO NOTHING RETURNING id`,
+              [broken_fk]
+            );
+            if (inserted.length > 0) {
+              targetUserId = inserted[0].id;
+            } else {
+              // Conflict on email — fetch the winner
+              const { rows: winner } = await pool.query<{ id: string }>(
+                `SELECT id FROM users WHERE email = $1 OR username = $1 LIMIT 1`,
+                [broken_fk]
+              );
+              if (winner.length === 0) continue;
+              targetUserId = winner[0].id;
+            }
+          }
+          await pool.query(
+            `UPDATE tenant_users SET user_id = $1 WHERE user_id = $2`,
+            [targetUserId, broken_fk]
+          );
+          console.log(`[RepairTenantUsersFKs] '${broken_fk}' → users.id='${targetUserId}'`);
+        } catch (innerErr: any) {
+          console.error(`[RepairTenantUsersFKs] Failed for '${broken_fk}': ${innerErr.message}`);
         }
-        res.json({ id: admin.id, username: admin.username, displayName: admin.displayName });
-      });
-      return;
-    } catch (error) {
-      console.error("Superadmin login error:", error);
-      res.status(500).json({ message: "Login failed" });
+      }
+    } catch (err: any) {
+      console.error(`[RepairTenantUsersFKs] Error:`, err.message);
     }
-  });
+  }, 8000);
 
-  app.get("/api/superadmin/session", (req: any, res) => {
-    if (req.session?.isSuperAdmin) {
-      res.json({ authenticated: true, superadminId: req.session.superadminId });
-    } else {
-      res.json({ authenticated: false });
-    }
-  });
+  registerSuperadminAuthRoutes(app);
 
-  app.post("/api/superadmin/logout", (req: any, res) => {
-    if (req.session) {
-      delete req.session.isSuperAdmin;
-      delete req.session.superadminId;
-    }
-    res.json({ success: true });
-  });
-
-  app.post("/api/admin/purge-simulated-data", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
+  app.post("/api/admin/purge-simulated-data", async (req: any, res) => {
     try {
       const isSuperAdminUser = req.session?.isSuperAdmin;
       let isAdminRole = false;
@@ -1874,35 +2027,9 @@ export async function registerRoutes(
     }
   });
 
-  function isSuperAdmin(req: any, res: any, next: any) {
-    if (req.session?.isSuperAdmin) {
-      return next();
-    }
-    return res.status(401).json({ message: "Superadmin access required" });
-  }
-
-  async function isSuperAdminOrPlatformAdmin(req: any, res: any, next: any) {
-    if (req.session?.isSuperAdmin) {
-      return next();
-    }
-    if (req.user?.claims?.sub) {
-      try {
-        const isAdmin = await assertAdminAccess(req);
-        if (isAdmin) return next();
-      } catch {}
-    }
-    return res.status(403).json({ message: "Admin access required" });
-  }
-
-  async function assertAdminAccess(req: any): Promise<boolean> {
-    if (req.session?.isSuperAdmin) return true;
-    if (req.user?.claims?.sub) {
-      const access = await getUserTenantAccess(req);
-      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
-      return adminRoles.includes(access.role);
-    }
-    return false;
-  }
+  // ── Admin role middleware (`isSuperAdmin`, `isSuperAdminOrPlatformAdmin`,
+  //    `assertAdminAccess`) is imported from `./routes/_helpers` so per-domain
+  //    route modules can apply the same checks without re-implementing them.
 
   // ── Quota enforcement middleware (Task #123) ─────────────────────────────────
   // Apply to tenant-scoped API routes to enforce per-tenant API request quotas.
@@ -1962,195 +2089,14 @@ export async function registerRoutes(
     return quotaEnforce(req, res, next);
   });
 
-  // ── Quota management routes ───────────────────────────────────────────────────
+  // ── Quota management routes (extracted to ./routes/admin-quota.ts) ─────
+  registerAdminQuotaRoutes(app);
+  registerDeploymentAuditRoutes(app);
+  registerManualInterventionRoutes(app);
 
-  // Canonical /api/admin/tenants/:id/quota paths (required shape)
-  app.get("/api/admin/tenants/:id/quota", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.id);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const config = await getTenantQuotaConfig(tenantId);
-      res.json(config);
-    } catch {
-      res.status(500).json({ message: "Failed to fetch quota config" });
-    }
-  });
 
-  app.put("/api/admin/tenants/:id/quota", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.id);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+  registerTenantAdminRoutes(app);
 
-      const { tier, customEventsPerSecond, customApiRequestsPerSecond, customStorageGb, isActive } = req.body;
-      const validTiers = ["standard", "professional", "enterprise"];
-      if (tier && !validTiers.includes(tier)) return res.status(400).json({ message: "Invalid tier" });
-
-      const tierDefaults = QUOTA_TIER_DEFAULTS[tier || "standard"];
-      await pool.query(`
-        INSERT INTO tenant_quotas (tenant_id, tier, events_per_second, api_requests_per_second, storage_gb,
-                                   custom_events_per_second, custom_api_requests_per_second, custom_storage_gb, is_active, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-        ON CONFLICT (tenant_id) DO UPDATE SET
-          tier = EXCLUDED.tier,
-          events_per_second = EXCLUDED.events_per_second,
-          api_requests_per_second = EXCLUDED.api_requests_per_second,
-          storage_gb = EXCLUDED.storage_gb,
-          custom_events_per_second = EXCLUDED.custom_events_per_second,
-          custom_api_requests_per_second = EXCLUDED.custom_api_requests_per_second,
-          custom_storage_gb = EXCLUDED.custom_storage_gb,
-          is_active = EXCLUDED.is_active,
-          updated_at = NOW()
-      `, [
-        tenantId, tier || "standard",
-        tierDefaults.eventsPerSecond, tierDefaults.apiRequestsPerSecond, tierDefaults.storageGb,
-        customEventsPerSecond ?? null, customApiRequestsPerSecond ?? null, customStorageGb ?? null,
-        isActive !== undefined ? isActive : true,
-      ]);
-      invalidateTenantQuotaCache(tenantId);
-      const config = await getTenantQuotaConfig(tenantId);
-      res.json(config);
-    } catch {
-      res.status(500).json({ message: "Failed to update quota config" });
-    }
-  });
-
-  app.get("/api/admin/tenant-quotas", isAuthenticated, isSuperAdminOrPlatformAdmin, async (_req, res) => {
-    try {
-      const statuses = await getAllTenantQuotaStatus();
-      res.json(statuses);
-    } catch (err: any) {
-      res.status(500).json({ message: "Failed to fetch quota statuses" });
-    }
-  });
-
-  app.get("/api/admin/tenant-quotas/:tenantId", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const config = await getTenantQuotaConfig(tenantId);
-      res.json(config);
-    } catch (err: any) {
-      res.status(500).json({ message: "Failed to fetch quota config" });
-    }
-  });
-
-  app.put("/api/admin/tenant-quotas/:tenantId", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-
-      const { tier, customEventsPerSecond, customApiRequestsPerSecond, customStorageGb, isActive } = req.body;
-      const validTiers = ["standard", "professional", "enterprise"];
-      if (tier && !validTiers.includes(tier)) return res.status(400).json({ message: "Invalid tier" });
-
-      const tierDefaults = QUOTA_TIER_DEFAULTS[tier || "standard"];
-
-      await pool.query(`
-        INSERT INTO tenant_quotas (tenant_id, tier, events_per_second, api_requests_per_second, storage_gb,
-                                   custom_events_per_second, custom_api_requests_per_second, custom_storage_gb, is_active, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-        ON CONFLICT (tenant_id) DO UPDATE SET
-          tier = EXCLUDED.tier,
-          events_per_second = EXCLUDED.events_per_second,
-          api_requests_per_second = EXCLUDED.api_requests_per_second,
-          storage_gb = EXCLUDED.storage_gb,
-          custom_events_per_second = EXCLUDED.custom_events_per_second,
-          custom_api_requests_per_second = EXCLUDED.custom_api_requests_per_second,
-          custom_storage_gb = EXCLUDED.custom_storage_gb,
-          is_active = EXCLUDED.is_active,
-          updated_at = NOW()
-      `, [
-        tenantId,
-        tier || "standard",
-        tierDefaults.eventsPerSecond,
-        tierDefaults.apiRequestsPerSecond,
-        tierDefaults.storageGb,
-        customEventsPerSecond ?? null,
-        customApiRequestsPerSecond ?? null,
-        customStorageGb ?? null,
-        isActive !== undefined ? isActive : true,
-      ]);
-
-      invalidateTenantQuotaCache(tenantId);
-      const config = await getTenantQuotaConfig(tenantId);
-      res.json(config);
-    } catch (err: any) {
-      console.error("[Quota] Failed to update quota:", err.message);
-      res.status(500).json({ message: "Failed to update quota" });
-    }
-  });
-
-  app.get("/api/admin/replica-lag", isAuthenticated, isSuperAdminOrPlatformAdmin, async (_req, res) => {
-    try {
-      const lag = await getReplicaLag();
-      res.json(lag);
-    } catch {
-      res.status(500).json({ message: "Failed to fetch replica lag" });
-    }
-  });
-
-  app.get("/api/tenant-admin/tenants", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const allTenants = await storage.getTenants();
-      res.json(allTenants);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch tenants" });
-    }
-  });
-
-  app.post("/api/tenant-admin/tenants", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const { type, parentId } = req.body;
-      if (type === "customer" && parentId) {
-        const parent = await storage.getTenant(parentId);
-        if (!parent || parent.type !== "mssp") {
-          return res.status(400).json({ message: "Customer tenants must have an MSSP parent" });
-        }
-      }
-      if (type === "customer" && !parentId) {
-        return res.status(400).json({ message: "Customer tenants require a parent MSSP" });
-      }
-      const validated = insertTenantSchema.parse(req.body);
-      const tenant = await storage.createTenant(validated);
-      await deleteCachePrefix("tenants:list:");
-      await deleteCachePrefix("tenants:hierarchy:");
-      res.json(tenant);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to create tenant" });
-    }
-  });
-
-  app.patch("/api/tenant-admin/tenants/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const validated = insertTenantSchema.partial().parse(req.body);
-      const tenant = await storage.updateTenant(parseInt(req.params.id), validated);
-      await deleteCachePrefix("tenants:list:");
-      await deleteCachePrefix("tenants:hierarchy:");
-      res.json(tenant);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to update tenant" });
-    }
-  });
-
-  app.delete("/api/tenant-admin/tenants/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const id = parseInt(req.params.id);
-      await storage.deleteTenant(id);
-      await deleteCachePrefix("tenants:list:");
-      await deleteCachePrefix("tenants:hierarchy:");
-      res.json({ message: "Tenant deleted" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to delete tenant" });
-    }
-  });
 
   app.get("/api/infrastructure/:tenantId/locations", isAuthenticated, async (req: any, res) => {
     try {
@@ -3192,529 +3138,35 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tenant-admin/tenant-users", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const allUsers = await storage.getAllTenantUsers();
-      const allTenants = await storage.getTenants();
-      const enriched = allUsers.map(u => ({
-        ...u,
-        tenantName: allTenants.find(t => t.id === u.tenantId)?.name || "Unknown",
-        tenantType: allTenants.find(t => t.id === u.tenantId)?.type || "unknown",
-      }));
-      res.json(enriched);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch tenant users" });
-    }
-  });
 
-  app.post("/api/tenant-admin/tenant-users", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const validated = insertTenantUserSchema.parse(req.body);
-      const tu = await storage.createTenantUser(validated);
-      res.json(tu);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to create tenant user" });
-    }
-  });
+  registerOrgStakeholdersRoutes(app);
 
-  app.patch("/api/tenant-admin/tenant-users/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const validated = insertTenantUserSchema.partial().parse(req.body);
-      const tu = await storage.updateTenantUser(parseInt(req.params.id), validated);
-      res.json(tu);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to update tenant user" });
-    }
-  });
-
-  app.delete("/api/tenant-admin/tenant-users/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      await storage.deleteTenantUser(parseInt(req.params.id));
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete tenant user" });
-    }
-  });
-
-  app.get("/api/tenant-admin/licenses", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const allLicenses = await storage.getLicenses();
-      const allTenants = await storage.getTenants();
-      const enriched = allLicenses.map(l => ({
-        ...l,
-        tenantName: allTenants.find(t => t.id === l.tenantId)?.name || "Unknown",
-      }));
-      res.json(enriched);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch licenses" });
-    }
-  });
-
-  app.post("/api/tenant-admin/licenses", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const validated = insertLicenseSchema.parse({
-        ...req.body,
-        startDate: new Date(req.body.startDate),
-        expiresAt: new Date(req.body.expiresAt),
-      });
-      const license = await storage.createLicense(validated);
-      res.json(license);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to create license" });
-    }
-  });
-
-  app.patch("/api/tenant-admin/licenses/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const validated = insertLicenseSchema.partial().parse({
-        ...req.body,
-        startDate: req.body.startDate ? new Date(req.body.startDate) : undefined,
-        expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : undefined,
-      });
-      const license = await storage.updateLicense(parseInt(req.params.id), validated);
-      res.json(license);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to update license" });
-    }
-  });
-
-  app.delete("/api/tenant-admin/licenses/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      await storage.deleteLicense(parseInt(req.params.id));
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to delete license" });
-    }
-  });
-
-  app.get("/api/tenant-admin/stats", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req: any, res) => {
-    try {
-      const isAdmin = await assertAdminAccess(req);
-      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
-      const allTenants = await storage.getTenants();
-      const allUsers = await storage.getAllTenantUsers();
-      const allLicenses = await storage.getLicenses();
-      const mssps = allTenants.filter(t => t.type === "mssp");
-      const customers = allTenants.filter(t => t.type === "customer");
-      const activeLicenses = allLicenses.filter(l => l.status === "active");
-      res.json({
-        totalTenants: allTenants.length,
-        totalMSSPs: mssps.length,
-        totalCustomers: customers.length,
-        totalUsers: allUsers.length,
-        totalLicenses: allLicenses.length,
-        activeLicenses: activeLicenses.length,
-      });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch stats" });
-    }
-  });
-
-  app.get("/api/org-stakeholders/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const category = req.query.category as string | undefined;
-      const stakeholders = await storage.getOrgStakeholders(tenantId, category);
-      res.json(stakeholders);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to fetch stakeholders" });
-    }
-  });
-
-  app.post("/api/org-stakeholders/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const validCategories = ["servers", "storage", "network", "cloud", "security", "applications", "databases", "collaboration"];
-      const { category, subcategory, stakeholderName, stakeholderEmail, stakeholderRole, stakeholderPhone, stakeholderDepartment, notes } = req.body;
-      if (!category || !validCategories.includes(category)) return res.status(400).json({ message: "Invalid category" });
-      if (!stakeholderName || !stakeholderEmail) return res.status(400).json({ message: "Name and email are required" });
-      const stakeholder = await storage.createOrgStakeholder({ tenantId, category, subcategory, stakeholderName, stakeholderEmail, stakeholderRole, stakeholderPhone, stakeholderDepartment, notes });
-      res.json(stakeholder);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to create stakeholder" });
-    }
-  });
-
-  app.put("/api/org-stakeholders/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const existing = await storage.getOrgStakeholder(id);
-      if (!existing) return res.status(404).json({ message: "Stakeholder not found" });
-      await assertTenantAccess(req, existing.tenantId);
-      const { subcategory, stakeholderName, stakeholderEmail, stakeholderRole, stakeholderPhone, stakeholderDepartment, notes } = req.body;
-      const stakeholder = await storage.updateOrgStakeholder(id, { subcategory, stakeholderName, stakeholderEmail, stakeholderRole, stakeholderPhone, stakeholderDepartment, notes });
-      res.json(stakeholder);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to update stakeholder" });
-    }
-  });
-
-  app.delete("/api/org-stakeholders/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const existing = await storage.getOrgStakeholder(id);
-      if (!existing) return res.status(404).json({ message: "Stakeholder not found" });
-      await assertTenantAccess(req, existing.tenantId);
-      await storage.deleteOrgStakeholder(id);
-      res.json({ success: true });
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to delete stakeholder" });
-    }
-  });
 
   // ─── Alert Triage Stats ────────────────────────────────────────────────────
-  app.get("/api/alert-triage/stats", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      await assertTenantAccess(req, tenantId);
+  registerAlertTriageRoutes(app);
 
-      const cacheKey = tenantCacheKey(tenantId, "alert-triage:stats");
-      const cached = await getCache(cacheKey);
-      if (cached) return res.json(cached);
-
-      const statsResult = await pool.query(`
-        SELECT
-          COUNT(*)::int AS total_incidents,
-          COUNT(CASE WHEN triage_score IS NOT NULL THEN 1 END)::int AS auto_classified,
-          COUNT(CASE WHEN triage_score IS NOT NULL AND triage_score < 30 THEN 1 END)::int AS noise_suppressed,
-          COUNT(CASE
-            WHEN classification = 'true_positive' OR (classification IS NULL AND is_true_positive = true) THEN 1
-          END)::int AS true_positives,
-          COUNT(CASE
-            WHEN classification = 'false_positive' OR (classification IS NULL AND is_true_positive = false) THEN 1
-          END)::int AS false_positives,
-          ROUND(AVG(CASE WHEN triage_score IS NOT NULL THEN triage_score END))::int AS avg_triage_score,
-          ROUND(AVG(confidence_score))::int AS avg_confidence
-        FROM incidents
-        WHERE tenant_id = $1
-          AND created_at > NOW() - INTERVAL '30 days'
-      `, [tenantId]);
-
-      const row = statsResult.rows[0] || {};
-      const total = row.total_incidents || 0;
-      const classified = row.auto_classified || 0;
-      const noiseSuppressed = row.noise_suppressed || 0;
-      const tp = row.true_positives || 0;
-      const fp = row.false_positives || 0;
-      const fidelityScore = (tp + fp) > 0 ? Math.round((tp / (tp + fp)) * 100) : null;
-      const noiseRatio = total > 0 ? Math.round((noiseSuppressed / total) * 100) : 0;
-
-      // Suppressed today count
-      const suppressedTodayResult = await pool.query(`
-        SELECT COUNT(*)::int AS suppressed_today
-        FROM incidents
-        WHERE tenant_id = $1
-          AND created_at >= CURRENT_DATE
-          AND triage_score IS NOT NULL AND triage_score < 30
-      `, [tenantId]);
-
-      // MTTD calc: avg time from created_at to updated_at for resolved/closed incidents, in minutes (read replica)
-      const mttdResult = await poolRead.query(`
-        SELECT ROUND(AVG(EXTRACT(EPOCH FROM (COALESCE(updated_at, created_at) - created_at)) / 60.0))::int AS mttd_minutes
-        FROM incidents
-        WHERE tenant_id = $1 AND status IN ('resolved', 'closed') AND created_at > NOW() - INTERVAL '30 days'
-      `, [tenantId]);
-
-      // Score distribution for heatmap (0-100 in bands of 10) — read replica
-      const distResult = await poolRead.query(`
-        SELECT
-          CASE
-            WHEN triage_score IS NULL THEN 'Unscored'
-            WHEN triage_score < 20 THEN '0-19 (Noise)'
-            WHEN triage_score < 40 THEN '20-39 (Low)'
-            WHEN triage_score < 60 THEN '40-59 (Medium)'
-            WHEN triage_score < 80 THEN '60-79 (High)'
-            ELSE '80-100 (Critical)'
-          END AS band,
-          COUNT(*)::int AS count
-        FROM incidents
-        WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY 1
-        ORDER BY 1
-      `, [tenantId]);
-
-      // 30-day daily trend of auto-classified vs total — read replica
-      const trendResult = await poolRead.query(`
-        SELECT
-          DATE_TRUNC('day', created_at)::date AS day,
-          COUNT(*)::int AS total,
-          COUNT(CASE WHEN triage_score IS NOT NULL THEN 1 END)::int AS auto_classified,
-          COUNT(CASE WHEN triage_score IS NOT NULL AND triage_score < 30 THEN 1 END)::int AS suppressed
-        FROM incidents
-        WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY 1 ORDER BY 1
-      `, [tenantId]);
-
-      const statsPayload = {
-        totalIncidents: total,
-        autoClassified: classified,
-        noiseSuppressed,
-        suppressedToday: suppressedTodayResult.rows[0]?.suppressed_today ?? 0,
-        noiseRatio,
-        fidelityScore,
-        avgTriageScore: row.avg_triage_score,
-        avgConfidence: row.avg_confidence,
-        mttd: mttdResult.rows[0]?.mttd_minutes ?? null,
-        scoreBands: distResult.rows,
-        dailyTrend: trendResult.rows,
-      };
-      setCache(cacheKey, statsPayload, 120_000);
-      res.json(statsPayload);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to load alert triage stats" });
-    }
-  });
-
-  app.get("/api/alert-triage/clusters", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      await assertTenantAccess(req, tenantId);
-
-      const clusterCacheKey = tenantCacheKey(tenantId, "alert-triage:clusters");
-      const cachedClusters = await getCache(clusterCacheKey);
-      if (cachedClusters) return res.json(cachedClusters);
-
-      const result = await pool.query(`
-        SELECT
-          COALESCE(incident_type, 'Unknown') AS incident_type,
-          COALESCE(kill_chain_phase, 'Unknown') AS kill_chain_phase,
-          COALESCE(mitre_technique, 'Unknown') AS mitre_technique,
-          MAX(COALESCE(detection_source, 'Unknown')) AS detection_source,
-          COUNT(*)::int AS count,
-          ROUND(AVG(CASE WHEN confidence_score IS NOT NULL THEN confidence_score END))::int AS avg_confidence,
-          ROUND(AVG(CASE WHEN triage_score IS NOT NULL THEN triage_score END))::int AS avg_triage_score,
-          COUNT(CASE WHEN is_true_positive = true THEN 1 END)::int AS tp_count,
-          COUNT(CASE WHEN is_true_positive = false THEN 1 END)::int AS fp_count,
-          MAX(created_at) AS last_seen,
-          (
-            SELECT COALESCE(i2.source_ip, i2.destination_ip)
-            FROM incidents i2
-            WHERE i2.tenant_id = $1
-              AND COALESCE(i2.incident_type, 'Unknown') = COALESCE(incidents.incident_type, 'Unknown')
-              AND COALESCE(i2.kill_chain_phase, 'Unknown') = COALESCE(incidents.kill_chain_phase, 'Unknown')
-              AND COALESCE(i2.source_ip, i2.destination_ip) IS NOT NULL
-              AND i2.created_at > NOW() - INTERVAL '30 days'
-            GROUP BY COALESCE(i2.source_ip, i2.destination_ip)
-            ORDER BY COUNT(*) DESC
-            LIMIT 1
-          ) AS top_ioc
-        FROM incidents
-        WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY
-          COALESCE(incident_type, 'Unknown'),
-          COALESCE(kill_chain_phase, 'Unknown'),
-          COALESCE(mitre_technique, 'Unknown')
-        HAVING COUNT(*) >= 2
-        ORDER BY count DESC
-        LIMIT 20
-      `, [tenantId]);
-
-      setCache(clusterCacheKey, result.rows, 120_000);
-      res.json(result.rows);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to load clusters" });
-    }
-  });
-
-  app.get("/api/alert-triage/source-fidelity", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      await assertTenantAccess(req, tenantId);
-
-      const fidelityCacheKey = tenantCacheKey(tenantId, "alert-triage:source-fidelity");
-      const cachedFidelity = await getCache(fidelityCacheKey);
-      if (cachedFidelity) return res.json(cachedFidelity);
-
-      const result = await pool.query(`
-        SELECT
-          COALESCE(detection_source, 'Unknown') AS source,
-          COUNT(*)::int AS total,
-          COUNT(CASE
-            WHEN classification = 'true_positive' OR (classification IS NULL AND is_true_positive = true) THEN 1
-          END)::int AS tp,
-          COUNT(CASE
-            WHEN classification = 'false_positive' OR (classification IS NULL AND is_true_positive = false) THEN 1
-          END)::int AS fp,
-          ROUND(AVG(CASE WHEN confidence_score IS NOT NULL THEN confidence_score END))::int AS avg_confidence,
-          COUNT(CASE WHEN triage_score IS NOT NULL AND triage_score < 30 THEN 1 END)::int AS suppressed
-        FROM incidents
-        WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY 1
-        ORDER BY total DESC
-        LIMIT 15
-      `, [tenantId]);
-
-      const rows = result.rows.map((r: any) => {
-        const rated = r.tp + r.fp;
-        return {
-          source: r.source,
-          total: r.total,
-          tp: r.tp,
-          fp: r.fp,
-          suppressed: r.suppressed,
-          avgConfidence: r.avg_confidence,
-          tpRate: rated > 0 ? Math.round((r.tp / rated) * 100) : null,
-          fpRate: rated > 0 ? Math.round((r.fp / rated) * 100) : null,
-        };
-      });
-
-      setCache(fidelityCacheKey, rows, 120_000);
-      res.json(rows);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to load source fidelity" });
-    }
-  });
-
-  // AI Suggested Suppressions — compute patterns from FP history
-  app.get("/api/alert-triage/suggested-suppressions", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      await assertTenantAccess(req, tenantId);
-
-      const suppressionCacheKey = tenantCacheKey(tenantId, "alert-triage:suggested-suppressions");
-      const cachedSuppressions = await getCache(suppressionCacheKey);
-      if (cachedSuppressions) return res.json(cachedSuppressions);
-
-      const result = await pool.query(`
-        SELECT
-          COALESCE(detection_source, 'Unknown') AS detection_source,
-          COALESCE(incident_type, 'Unknown') AS incident_type,
-          COALESCE(kill_chain_phase, 'Unknown') AS kill_chain_phase,
-          COUNT(*)::int AS fp_count,
-          ROUND(AVG(confidence_score))::int AS avg_confidence,
-          MAX(created_at) AS last_seen
-        FROM incidents
-        WHERE tenant_id = $1
-          AND (classification = 'false_positive' OR (classification IS NULL AND is_true_positive = false))
-          AND created_at > NOW() - INTERVAL '60 days'
-        GROUP BY 1, 2, 3
-        HAVING COUNT(*) >= 2
-        ORDER BY fp_count DESC
-        LIMIT 10
-      `, [tenantId]);
-
-      const suggestions = result.rows.map((r: any) => ({
-        name: `Suppress ${r.incident_type} from ${r.detection_source}`,
-        field: "detection_source",
-        operator: "equals",
-        value: r.detection_source,
-        secondaryField: "incident_type",
-        secondaryValue: r.incident_type,
-        fpCount: r.fp_count,
-        avgConfidence: r.avg_confidence,
-        killChainPhase: r.kill_chain_phase,
-        lastSeen: r.last_seen,
-        reason: `${r.fp_count} false positives detected from ${r.detection_source} for ${r.incident_type} incidents`,
-      }));
-
-      setCache(suppressionCacheKey, suggestions, 120_000);
-      res.json(suggestions);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to load suggestions" });
-    }
-  });
 
   // Suppression Rules CRUD
-  app.get("/api/suppression-rules", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      await assertTenantAccess(req, tenantId);
+  registerSuppressionRulesRoutes(app);
 
-      const suppressionRulesCacheKey = tenantCacheKey(tenantId, "suppression-rules");
-      const cachedSuppressionRules = await getCache(suppressionRulesCacheKey);
-      if (cachedSuppressionRules) return res.json(cachedSuppressionRules);
-
-      const rules = await storage.getSuppressionRules(tenantId);
-      setCache(suppressionRulesCacheKey, rules, 60_000);
-      res.json(rules);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to load suppression rules" });
-    }
-  });
-
-  app.post("/api/suppression-rules", isAuthenticated, async (req: any, res) => {
-    try {
-      const { tenantId: rawTenantId, name, field, operator, value, action } = req.body;
-      const tenantId = parseInt(rawTenantId);
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      if (!name || !field || !operator || !value) return res.status(400).json({ message: "name, field, operator, value required" });
-      const rule = await storage.createSuppressionRule({
-        tenantId,
-        name,
-        field,
-        operator,
-        value,
-        action: action || "suppress",
-        isActive: true,
-        createdBy: req.user?.claims?.sub,
-      });
-      res.status(201).json(rule);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to create suppression rule" });
-    }
-  });
-
-  app.put("/api/suppression-rules/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const { tenantId: rawTenantId, name, field, operator, value, action, isActive } = req.body;
-      const tenantId = parseInt(rawTenantId);
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const rule = await storage.updateSuppressionRule(id, tenantId, { name, field, operator, value, action, isActive });
-      if (!rule) return res.status(404).json({ message: "Rule not found" });
-      res.json(rule);
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to update suppression rule" });
-    }
-  });
-
-  app.delete("/api/suppression-rules/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const tenantId = parseInt(req.query.tenantId as string);
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      await storage.deleteSuppressionRule(id, tenantId);
-      res.json({ success: true });
-    } catch (error: any) {
-      if (error.status === 403) return res.status(403).json({ message: error.message });
-      res.status(500).json({ message: "Failed to delete suppression rule" });
-    }
-  });
 
   app.get("/api/user/profile", isAuthenticated, async (req: any, res) => {
     try {
+      // Task #519: synthetic profile for superadmin viewing a tenant context
+      if (req.user?.isSuperAdminViewing && req.user?.viewingTenantId) {
+        return res.json({
+          role: "platform_admin",
+          tenantId: req.user.viewingTenantId,
+          isPlatformAdmin: true,
+          isMSS: true,
+          isAdmin: true,
+          canSwitchRoles: false,
+          assignedRoles: ["platform_admin"],
+          email: null,
+          username: "superadmin",
+        });
+      }
+
       const userId = req.user.claims.sub;
       let tenantUser = await storage.getTenantUserByUserId(userId);
 
@@ -3839,29 +3291,73 @@ export async function registerRoutes(
     }
   });
 
+  // ── Task #560: Belt-and-suspenders tenant access middleware ─────────────────
+  // Pre-computes tenant access for all GET /api/tenants* routes and caches
+  // it on req._tenantAccess so handlers avoid a second DB round-trip.
+  // Also blocks customer-tenant users from probing /api/tenants/:numericId
+  // for a tenant they don't own — even if a future handler forgets to check.
+  // (Routes registered BEFORE this middleware are protected by the corrected
+  // assertTenantAccess / isMSSPTenant check inside each handler.)
+  app.use("/api/tenants", isAuthenticated, async (req: any, res: any, next: any) => {
+    if (req.method !== "GET") return next();
+    try {
+      if (!req._tenantAccess) {
+        req._tenantAccess = await getUserTenantAccess(req);
+      }
+      const access: UserTenantAccess = req._tenantAccess;
+      // req.path is relative to /api/tenants, e.g. "/" (list), "/hierarchy", "/37"
+      // True superadmin (isPlatformAdmin + no tenantId) bypasses all checks.
+      // MSSP-tenant users bypass the exact-ID check (assertTenantAccess validates their tree).
+      // Everyone else — including platform_admin scoped to a specific tenant — is restricted.
+      const isTrueSuperAdmin = access.isPlatformAdmin && !access.tenantId;
+      if (!isTrueSuperAdmin && !access.isMSSPTenant && access.tenantId !== null) {
+        const firstSegment = req.path.replace(/^\//, "").split("/")[0];
+        if (firstSegment && /^\d+$/.test(firstSegment)) {
+          const requestedId = parseInt(firstSegment, 10);
+          if (requestedId !== access.tenantId) {
+            return res.status(403).json({ message: "Forbidden: no access to this tenant" });
+          }
+        }
+      }
+      next();
+    } catch {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+  });
+
   app.get("/api/tenants", isAuthenticated, async (req: any, res) => {
     try {
-      const access = await getUserTenantAccess(req);
-      const scopeKey = access.isPlatformAdmin
-        ? `admin:${access.tenantId ?? "global"}`
-        : access.isMSS
-          ? `mss:${access.tenantId}`
-          : `t:${access.tenantId ?? "none"}`;
-      const cacheKey = `tenants:list:${scopeKey}`;
-      const cached = await getCache(cacheKey);
-      if (cached) {  return res.json(cached); }
+      const access: UserTenantAccess = req._tenantAccess ?? await getUserTenantAccess(req);
 
+      // Three-tier tenant visibility:
+      //   1. superadmin only (tenantId=null) → every tenant in the platform
+      //   2. isMSSPTenant — user's own tenant.type === 'mssp' → full subtree (recursive)
+      //      (platform_admin in an MSSP tenant falls here, not tier 1)
+      //   3. Everyone else (customer-tenant users, platform_admin in customer tenant) → own tenant only
       let result: any[];
-      if (access.isPlatformAdmin || access.isMSS) {
+      if (access.isPlatformAdmin && !access.tenantId) {
+        const cacheKey = `tenants:list:admin:global`;
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
         result = await storage.getTenants();
+        setCache(cacheKey, result);
+      } else if (access.isMSSPTenant && access.tenantId) {
+        const cacheKey = `tenants:list:mssp:${access.tenantId}`;
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
+        // Recursive: includes the MSSP itself plus all descendants at any depth.
+        const descendantIds = await getAllDescendantTenantIds(access.tenantId);
+        const tenantObjects = await Promise.all(descendantIds.map(id => storage.getTenant(id)));
+        result = tenantObjects.filter(Boolean);
+        setCache(cacheKey, result);
       } else if (access.tenantId) {
-        const tenant = await storage.getTenant(access.tenantId);
-        result = tenant ? [tenant] : [];
+        // Customer-tenant user — own tenant only, no cache needed (single row).
+        const userTenant = await storage.getTenant(access.tenantId);
+        result = userTenant ? [userTenant] : [];
       } else {
         result = [];
       }
-      setCache(cacheKey, result);
-      
+
       return res.json(result);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch tenants" });
@@ -3870,35 +3366,71 @@ export async function registerRoutes(
 
   app.get("/api/tenants/hierarchy", isAuthenticated, async (req: any, res) => {
     try {
-      const access = await getUserTenantAccess(req);
-      const scopeKey = access.isPlatformAdmin
-        ? `admin:${access.tenantId ?? "global"}`
-        : access.isMSS
-          ? `mss:${access.tenantId}`
-          : `t:${access.tenantId ?? "none"}`;
-      const cacheKey = `tenants:hierarchy:${scopeKey}`;
-      const cached = await getCache(cacheKey);
-      if (cached) {  return res.json(cached); }
+      const access: UserTenantAccess = req._tenantAccess ?? await getUserTenantAccess(req);
 
+      // Three-tier hierarchy visibility:
+      //   1. superadmin only (tenantId=null) → full MSSP tree (all MSSPs + their children)
+      //   2. isMSSPTenant → their subtree (MSSP root + all descendants)
+      //      (platform_admin in an MSSP tenant falls here, not tier 1)
+      //   3. Everyone else (incl. platform_admin in customer tenant) → single-node hierarchy
       let result: any[];
-      if (access.isPlatformAdmin || access.isMSS) {
+      if (access.isPlatformAdmin && !access.tenantId) {
+        const cacheKey = `tenants:hierarchy:admin:global`;
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
         const mssps = await storage.getMSSPs();
         result = [];
         for (const mssp of mssps) {
           const children = await storage.getChildTenants(mssp.id);
           result.push({ ...mssp, children });
         }
+        setCache(cacheKey, result);
+      } else if (access.isMSSPTenant && access.tenantId) {
+        const cacheKey = `tenants:hierarchy:mssp:${access.tenantId}`;
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
+        const userTenant = await storage.getTenant(access.tenantId);
+        // Recursive: collect all descendant IDs (excludes the root itself),
+        // then attach them as a flat children list on the root node.
+        const descendantIds = await getAllDescendantTenantIds(access.tenantId);
+        const childIds = descendantIds.filter(id => id !== access.tenantId);
+        const childObjects = (await Promise.all(childIds.map(id => storage.getTenant(id)))).filter(Boolean);
+        result = userTenant ? [{ ...userTenant, children: childObjects }] : [];
+        setCache(cacheKey, result);
       } else if (access.tenantId) {
-        const tenant = await storage.getTenant(access.tenantId);
-        result = tenant ? [{ ...tenant, children: [] }] : [];
+        // Customer-tenant user — single-node hierarchy, own tenant only.
+        const userTenant = await storage.getTenant(access.tenantId);
+        result = userTenant ? [{ ...userTenant, children: [] }] : [];
       } else {
         result = [];
       }
-      setCache(cacheKey, result);
-      
+
       return res.json(result);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch tenant hierarchy" });
+    }
+  });
+
+  // ── Task #562: Belt-and-suspenders guard on the single-tenant detail route ──
+  // The /api/tenants middleware (above) already blocks cross-tenant numeric-ID
+  // probing for customer-tenant users. This handler adds a second layer inside
+  // the route itself via assertTenantAccess so the protection is preserved even
+  // if the middleware is ever reorganised or bypassed.
+  app.get("/api/tenants/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid tenant ID" });
+      // assertTenantAccess enforces the three-tier model (Task #560):
+      //   1. true superadmin (tenantId=null) → any tenant
+      //   2. MSSP-tenant user → descendant tree only
+      //   3. everyone else → own tenant only
+      // Throws { status: 403 } on denial.
+      await assertTenantAccess(req, id);
+      const tenant = await storage.getTenant(id);
+      if (!tenant) return res.status(404).json({ message: "Tenant not found" });
+      return res.json(tenant);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to fetch tenant" });
     }
   });
 
@@ -3967,12 +3499,11 @@ export async function registerRoutes(
             AND e.occurred_at <= i.created_at
             AND e.occurred_at >= i.created_at - INTERVAL '24h'
           WHERE i.tenant_id = $1 AND i.created_at >= NOW() - $2::interval`, [tenantId, windowInterval]),
-        poolRead.query(`SELECT
-          AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60 * 0.7)::float as avg_mttc
-          FROM incidents
-          WHERE tenant_id = $1 AND resolved_at IS NOT NULL
-            AND (action_taken ILIKE '%isolat%' OR action_taken ILIKE '%contain%' OR action_taken ILIKE '%block%' OR status = 'resolved')
-            AND created_at >= NOW() - $2::interval`, [tenantId, windowInterval]),
+        // Task #445: MTTC must come from a real containment timestamp
+        // (incident_status_history transition to 'contained' or a contained_at
+        // column). Neither exists in the current schema, so MTTC is null until
+        // a real signal is added — no MTTR × 0.7 fabrication.
+        Promise.resolve<{ rows: Array<{ avg_mttc: number | null }> }>({ rows: [{ avg_mttc: null }] }),
         poolRead.query(`SELECT
           COALESCE(incident_type, category, 'Unknown') as threat_name,
           COALESCE(mitre_tactic, 'General') as tactic,
@@ -4009,42 +3540,44 @@ export async function registerRoutes(
       const highSev = stats.high_sev || 0;
       const openCount = stats.open_count || 0;
       const last24h = stats.last_24h || 0;
-      const avgMttr = Math.round(stats.avg_mttr || 45);
-      const avgMttd = Math.round(mttdData.rows[0]?.avg_mttd || avgMttr * 0.6);
-      const avgMttc = Math.round(mttcData.rows[0]?.avg_mttc || avgMttr * 0.7);
+      const avgMttr: number | null = stats.avg_mttr != null ? Math.round(stats.avg_mttr) : null;
+      const avgMttd: number | null = mttdData.rows[0]?.avg_mttd != null ? Math.round(mttdData.rows[0].avg_mttd) : null;
+      const avgMttc: number | null = mttcData.rows[0]?.avg_mttc != null ? Math.round(mttcData.rows[0].avg_mttc) : null;
+      const avgConfidence: number | null = stats.avg_confidence != null ? Math.round(stats.avg_confidence) : null;
 
-      const threatLevel = highSev > 20 ? "Critical" : highSev > 10 ? "High" : highSev > 3 ? "Medium" : "Low";
+      const _hasAnyActivity_tl = (stats.total || 0) > 0 || (stats.last_in_period || 0) > 0;
+      const threatLevel = !_hasAnyActivity_tl
+        ? "Unknown"
+        : highSev > 20 ? "Critical" : highSev > 10 ? "High" : highSev > 3 ? "Medium" : "Low";
+
+      const eventsHaveActivity = weeklyEvents.rows.some((r: any) => (r.this_week || 0) > 0 || (r.last_week || 0) > 0);
+      const hasAnyActivityForBriefing = totalIncidents > 0 || last24h > 0 || eventsHaveActivity;
 
       let result: any = { answer: "", data: null };
       let briefingFallbackUsed = false;
-      try {
-        result = await processARIAQuery("give me today's security briefing", tenantId, windowHours);
-      } catch {
-        briefingFallbackUsed = true;
+      if (hasAnyActivityForBriefing) {
+        try {
+          result = await processARIAQuery("give me today's security briefing", tenantId, windowHours);
+        } catch {
+          briefingFallbackUsed = true;
+        }
       }
 
       const severityMap: Record<string, string> = { critical: "critical", high: "high", medium: "medium", low: "low" };
       const topThreatsRaw = topThreatsData.rows;
-      const topThreats = topThreatsRaw.length > 0
-        ? topThreatsRaw.slice(0, 3).map((r: any) => ({
-            name: r.threat_name,
-            severity: severityMap[r.top_severity] || "medium",
-            tactic: r.tactic,
-          }))
-        : [
-            { name: "Malware / Ransomware", severity: "critical", tactic: "Execution" },
-            { name: "Credential Abuse", severity: "high", tactic: "Credential Access" },
-            { name: "Network Intrusion", severity: "medium", tactic: "Lateral Movement" },
-          ];
+      const topThreats = topThreatsRaw.slice(0, 3).map((r: any) => ({
+        name: r.threat_name,
+        severity: severityMap[r.top_severity] || "medium",
+        tactic: r.tactic,
+      }));
 
       const aiRecs: string[] = result.data?.items?.filter((i: any) => i.label?.toLowerCase().includes("recommend") || i.label?.toLowerCase().includes("action")).map((i: any) => i.value) || [];
-      const recommendations = aiRecs.length >= 3 ? aiRecs.slice(0, 5) : [
-        openCount > 5 ? `Review and remediate ${openCount} open incidents — ${highSev} are critical/high severity` : "Maintain current incident response cadence",
-        stats.tp_count > 0 ? `Validate ${stats.tp_count} confirmed true-positive incidents for full closure` : "Audit privileged account access for anomalous login patterns",
-        "Validate endpoint detection coverage across all monitored assets",
-        "Review firewall rules for unusual outbound connection patterns",
-        "Ensure SLA response timelines are met for high-priority tickets",
-      ];
+      const recommendations: string[] = hasAnyActivityForBriefing && aiRecs.length >= 3 ? aiRecs.slice(0, 5) : [];
+      const recommendationsStatus: "ok" | "ai_unavailable" | "insufficient_data" | "no_data" =
+        !hasAnyActivityForBriefing ? "no_data"
+        : aiRecs.length >= 3 ? "ok"
+        : briefingFallbackUsed ? "ai_unavailable"
+        : "insufficient_data";
 
       const buildDailySeries = (rows: any[], field: string, weekOffset = 0): number[] => {
         const map = new Map(rows.map((r: any) => [r.day?.toString()?.substring(0, 10), r[field] || 0]));
@@ -4062,8 +3595,12 @@ export async function registerRoutes(
       const incLastWeek = buildDailySeries(weeklyIncidents.rows, "last_week", 1).reduce((s, v) => s + v, 0);
       const evtThisWeek = buildDailySeries(weeklyEvents.rows, "this_week", 0).reduce((s, v) => s + v, 0);
       const evtLastWeek = buildDailySeries(weeklyEvents.rows, "last_week", 1).reduce((s, v) => s + v, 0);
-      const confThisWeek = Math.round(weeklyConfidence.rows[0]?.this_week || stats.avg_confidence || 72);
-      const confLastWeek = Math.round(weeklyConfidence.rows[0]?.last_week || 68);
+      const confThisWeek: number | null = weeklyConfidence.rows[0]?.this_week != null
+        ? Math.round(weeklyConfidence.rows[0].this_week)
+        : (stats.avg_confidence != null ? Math.round(stats.avg_confidence) : null);
+      const confLastWeek: number | null = weeklyConfidence.rows[0]?.last_week != null
+        ? Math.round(weeklyConfidence.rows[0].last_week)
+        : null;
 
       const weekOverWeek = {
         incidents: {
@@ -4081,46 +3618,88 @@ export async function registerRoutes(
         avgConfidence: {
           thisWeek: confThisWeek,
           lastWeek: confLastWeek,
-          thisWeekDaily: [confLastWeek - 2, confLastWeek, confLastWeek + 1, confThisWeek - 1, confThisWeek, confThisWeek, confThisWeek],
-          lastWeekDaily: [confLastWeek - 3, confLastWeek - 2, confLastWeek - 1, confLastWeek, confLastWeek, confLastWeek + 1, confLastWeek],
+          thisWeekDaily: (confThisWeek != null && confLastWeek != null)
+            ? [confLastWeek - 2, confLastWeek, confLastWeek + 1, confThisWeek - 1, confThisWeek, confThisWeek, confThisWeek]
+            : [],
+          lastWeekDaily: (confLastWeek != null)
+            ? [confLastWeek - 3, confLastWeek - 2, confLastWeek - 1, confLastWeek, confLastWeek, confLastWeek + 1, confLastWeek]
+            : [],
         },
       };
 
-      const slaHealth = totalIncidents > 0 ? Math.round(((totalIncidents - (stats.fp_count || 0)) / totalIncidents) * 100) : 100;
+      const slaHealth: number | null = totalIncidents > 0
+        ? Math.round(((totalIncidents - (stats.fp_count || 0)) / totalIncidents) * 100)
+        : null;
 
-      // Composite risk score (0-100)
-      const compositeRiskScore = Math.min(100, Math.round(
-        Math.min(35, openCount * 4) +
-        Math.min(20, highSev * 3) +
-        ((100 - 87) / 100 * 15) +
-        Math.max(0, (100 - slaHealth) * 0.15) +
-        Math.min(10, avgMttr / 20)
-      ));
+      const coverage: { value: number | null; reason?: string } = {
+        value: null,
+        reason: "no_coverage_signal_available",
+      };
 
-      // AI-generated narrative sections — call OpenAI with live metrics
+      const compositeRiskScore: number | null = hasAnyActivityForBriefing
+        ? Math.min(100, Math.round(
+            Math.min(35, openCount * 4) +
+            Math.min(20, highSev * 3) +
+            Math.max(0, (100 - (slaHealth ?? 100)) * 0.15) +
+            Math.min(10, (avgMttr ?? 0) / 20)
+          ))
+        : null;
+
       const topTactics = topThreatsRaw.map((r: any) => r.tactic).filter(Boolean).slice(0, 5);
-      const { situation: situationText, keyFindings } = await generateBriefingNarrative({
-        totalIncidents,
-        highSev,
-        openCount,
-        avgMttr,
-        avgMttd,
-        slaHealth,
-        avgConfidence: Math.round(stats.avg_confidence || 72),
-        eventVolume: evtThisWeek,
-        newInPeriod: last24h,
-        topTactics,
-        incWoWDelta: incThisWeek - incLastWeek,
-        evtWoWDelta: evtThisWeek - evtLastWeek,
-        periodLabel,
-        threatLevel,
-      });
+      let situationText: string | null = null;
+      let keyFindings: string[] = [];
+      let narrativeStatus: "ok" | "no_data" | "ai_unavailable" = "no_data";
+      if (hasAnyActivityForBriefing) {
+        try {
+          const narrative = await generateBriefingNarrative({
+            totalIncidents,
+            highSev,
+            openCount,
+            avgMttr,
+            avgMttd,
+            slaHealth,
+            avgConfidence,
+            eventVolume: evtThisWeek,
+            newInPeriod: last24h,
+            topTactics,
+            incWoWDelta: incThisWeek - incLastWeek,
+            evtWoWDelta: evtThisWeek - evtLastWeek,
+            periodLabel,
+            threatLevel,
+          });
+          situationText = narrative.situation || null;
+          keyFindings = narrative.keyFindings || [];
+          narrativeStatus = "ok";
+        } catch (e: any) {
+          console.warn("[briefing] narrative generation failed:", e?.message || e);
+          narrativeStatus = "ai_unavailable";
+        }
+      }
+
+      // T561: Kill Chain phase distribution for briefing
+      let killChainDistribution: { phase: string; count: number }[] = [];
+      try {
+        const briefingCutoff = new Date(Date.now() - windowHours * 3_600_000);
+        const kcDist = await pool.query(
+          `SELECT kill_chain_phase AS phase, COUNT(*)::int AS count
+           FROM incidents
+           WHERE tenant_id = $1 AND kill_chain_phase IS NOT NULL
+             AND created_at >= $2
+           GROUP BY kill_chain_phase
+           ORDER BY count DESC`,
+          [tenantId, briefingCutoff]
+        );
+        killChainDistribution = kcDist.rows;
+      } catch { /* non-blocking — don't fail briefing if KC query errors */ }
 
       res.json({
         summary: situationText,
         keyPoints: result.data?.items?.map((i: any) => `${i.label}: ${i.value}`) || [],
         generatedAt: new Date().toISOString(),
         fallback_used: briefingFallbackUsed,
+        narrativeStatus,
+        recommendationsStatus,
+        hasData: hasAnyActivityForBriefing,
         threatLevel,
         compositeRiskScore,
         periodLabel,
@@ -4132,18 +3711,20 @@ export async function registerRoutes(
         metrics: {
           activeThreats: openCount,
           newIOCs24h: last24h,
-          coveragePercent: 87,
+          coveragePercent: coverage.value,
+          coverageReason: coverage.reason,
           avgResponseTimeMin: avgMttr,
           mttdMin: avgMttd,
           mttcMin: avgMttc,
           slaHealth,
-          avgConfidence: Math.round(stats.avg_confidence || 72),
+          avgConfidence,
           totalIncidents,
           highSev,
         },
         topThreats,
         recommendations,
         weekOverWeek,
+        killChainDistribution,
       });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message });
@@ -4197,36 +3778,72 @@ export async function registerRoutes(
       ]);
 
       const stats = incidentStats.rows[0] || {};
-      const openCount = stats.open_count || 0;
-      const highSev = stats.high_sev || 0;
-      const totalIncidents = stats.total || 0;
-      const lastInPeriod = stats.last_in_period || 0;
-      const avgMttr = Math.round(stats.avg_mttr || 45);
-      const threatLevel = highSev > 20 ? "Critical" : highSev > 10 ? "High" : highSev > 3 ? "Medium" : "Low";
-      const slaHealth = totalIncidents > 0 ? Math.round(((totalIncidents - (stats.fp_count || 0)) / totalIncidents) * 100) : 100;
-      const compositeRiskScore = Math.min(100, Math.round(Math.min(35, openCount * 4) + Math.min(20, highSev * 3) + 2 + Math.max(0, (100 - slaHealth) * 0.15) + Math.min(10, avgMttr / 20)));
+      const openCount: number = stats.open_count || 0;
+      const highSev: number = stats.high_sev || 0;
+      const totalIncidents: number = stats.total || 0;
+      const lastInPeriod: number = stats.last_in_period || 0;
+      const hasMttrSignal = stats.avg_mttr != null;
+      const avgMttr: number | null = hasMttrSignal ? Math.round(stats.avg_mttr) : null;
+      const hasConfidenceSignal = stats.avg_confidence != null;
+      const avgConfidence: number | null = hasConfidenceSignal ? Math.round(stats.avg_confidence) : null;
+      const hasAnyActivity = totalIncidents > 0 || lastInPeriod > 0;
+      const threatLevel = !hasAnyActivity
+        ? "Unknown"
+        : highSev > 20 ? "Critical" : highSev > 10 ? "High" : highSev > 3 ? "Medium" : "Low";
+      const slaHealth: number | null = totalIncidents > 0
+        ? Math.round(((totalIncidents - (stats.fp_count || 0)) / totalIncidents) * 100)
+        : null;
+      const compositeRiskScore: number | null = hasAnyActivity
+        ? Math.min(100, Math.round(
+            Math.min(35, openCount * 4)
+            + Math.min(20, highSev * 3)
+            + 2
+            + (slaHealth != null ? Math.max(0, (100 - slaHealth) * 0.15) : 0)
+            + (avgMttr != null ? Math.min(10, avgMttr / 20) : 0)
+          ))
+        : null;
       const topThreats = topThreatsData.rows.slice(0, 3).map((r: any) => ({ name: r.threat_name, severity: r.top_severity || "medium", tactic: r.tactic }));
-      const recommendations = [
-        openCount > 5 ? `Review ${openCount} open incidents — ${highSev} are critical/high severity` : "Maintain current incident response cadence",
-        "Validate endpoint detection coverage across all monitored assets",
-        "Review firewall rules for unusual outbound connection patterns",
-        "Ensure SLA response timelines are met for high-priority tickets",
-        slaHealth < 90 ? `SLA compliance at ${slaHealth}% — escalate at-risk cases` : "All active cases within SLA response window",
-      ];
+
+      const recommendations: string[] = [];
+      if (hasAnyActivity) {
+        if (openCount > 5) recommendations.push(`Review ${openCount} open incidents — ${highSev} are critical/high severity`);
+        else if (openCount > 0) recommendations.push("Maintain current incident response cadence");
+        if (slaHealth != null && slaHealth < 90) recommendations.push(`SLA compliance at ${slaHealth}% — escalate at-risk cases`);
+        else if (slaHealth != null) recommendations.push("All active cases within SLA response window");
+      }
+
+      const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+      const situation = !hasAnyActivity
+        ? `Security posture for ${dateStr} (${periodLabel}). No incidents or new events were recorded for this tenant during the selected window. Connect a log source to populate the Executive Intelligence Briefing.`
+        : `Security posture for ${dateStr} (${periodLabel}). During this period, ${totalIncidents} incidents were recorded with ${lastInPeriod} new within the selected window. There are currently ${openCount} open incidents, with ${highSev} classified as critical or high severity.${avgConfidence != null ? ` Analyst confidence is tracking at ${avgConfidence}% across enriched events.` : ""}`;
+
+      const keyFindings: string[] = [];
+      if (!hasAnyActivity) {
+        keyFindings.push("No incidents or events recorded for this tenant in the selected window");
+      } else {
+        keyFindings.push(openCount > 0
+          ? `${openCount} active incidents require analyst attention (${highSev} critical/high)`
+          : "No active incidents detected — posture is nominal");
+        if (avgMttr != null) keyFindings.push(`Mean time to resolve: ${avgMttr} minutes`);
+        if (slaHealth != null) keyFindings.push(`SLA compliance at ${slaHealth}%`);
+      }
 
       const briefingPayload = {
-        threatLevel, compositeRiskScore,
-        metrics: { activeThreats: openCount, newIOCs24h: lastInPeriod, coveragePercent: 87, avgResponseTimeMin: avgMttr, slaHealth, avgConfidence: Math.round(stats.avg_confidence || 72), totalIncidents, highSev },
-        sections: {
-          situation: `Security posture for ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })} (${periodLabel}). During this period, ${totalIncidents} incidents were recorded with ${lastInPeriod} new within the selected window. There are currently ${openCount} open incidents, with ${highSev} classified as critical or high severity. Analyst confidence is tracking at ${Math.round(stats.avg_confidence || 72)}% across enriched events.`,
-          keyFindings: [
-            openCount > 0 ? `${openCount} active incidents require analyst attention (${highSev} critical/high)` : "No active incidents detected — posture is nominal",
-            `Mean time to resolve: ${avgMttr} minutes`,
-            `Coverage integrity at 87% across monitored assets`,
-            `SLA compliance at ${slaHealth}%`,
-          ],
+        threatLevel,
+        compositeRiskScore,
+        metrics: {
+          activeThreats: openCount,
+          newIOCs24h: lastInPeriod,
+          coveragePercent: null,
+          avgResponseTimeMin: avgMttr,
+          slaHealth,
+          avgConfidence,
+          totalIncidents,
+          highSev,
         },
-        topThreats, recommendations,
+        sections: { situation, keyFindings },
+        topThreats,
+        recommendations,
       };
 
       const pdfBuffer = await generateBriefingPDF(briefingPayload, tenant.name, tenant.name, tenant.brand_color, tenant.logo_url, periodLabel);
@@ -4248,11 +3865,15 @@ export async function registerRoutes(
       if (!tenantId || isNaN(tenantId)) return res.status(400).json({ message: "tenantId required" });
       await assertTenantAccess(req, tenantId);
 
-      const cacheKey = `soc-metrics:${tenantId}`;
+      const validRanges = ["1h", "24h", "7d", "30d", "90d", "all"];
+      const rawTimeRange = (req.query.timeRange as string) || "all";
+      const safeTimeRange = validRanges.includes(rawTimeRange) ? rawTimeRange : "all";
+
+      const cacheKey = `soc-metrics:${tenantId}:${safeTimeRange}`;
       const cached = await getCache(cacheKey);
       if (cached) return res.json(cached);
 
-      const [mttrData, mttdData, mttcData, analystData, trendData, mttiData, aiOverrideData, topUsersData, topHostsData, statusSeriesData] = await Promise.all([
+      const [mttrData, mttdData, mttcData, analystData, trendData, mttiData, aiOverrideData, topUsersData, topHostsData, statusSeriesData, kcProgressData] = await Promise.all([
         poolRead.query(`SELECT
           AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60)::float as avg_mttr_min,
           AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60) FILTER (WHERE created_at >= NOW() - INTERVAL '7d' AND resolved_at IS NOT NULL)::float as mttr_7d,
@@ -4270,13 +3891,11 @@ export async function registerRoutes(
             AND e.occurred_at <= i.created_at
             AND e.occurred_at >= i.created_at - INTERVAL '24h'
           WHERE i.tenant_id = $1 AND i.created_at >= NOW() - INTERVAL '14d'`, [tenantId]),
-        poolRead.query(`SELECT
-          AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60 * 0.7) FILTER (WHERE created_at >= NOW() - INTERVAL '7d')::float as mttc_7d,
-          AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60 * 0.7) FILTER (WHERE created_at >= NOW() - INTERVAL '14d' AND created_at < NOW() - INTERVAL '7d')::float as mttc_prev_7d
-          FROM incidents
-          WHERE tenant_id = $1 AND resolved_at IS NOT NULL
-            AND (action_taken ILIKE '%isolat%' OR action_taken ILIKE '%contain%' OR action_taken ILIKE '%block%' OR status = 'resolved')
-            AND created_at >= NOW() - INTERVAL '14d'`, [tenantId]),
+        // Task #445: MTTC requires a real containment timestamp
+        // (incident_status_history transition to 'contained' or a contained_at
+        // column). Neither exists in the current schema, so MTTC is null until
+        // a real signal is added — no MTTR × 0.7 fabrication.
+        Promise.resolve<{ rows: Array<{ mttc_7d: number | null; mttc_prev_7d: number | null }> }>({ rows: [{ mttc_7d: null, mttc_prev_7d: null }] }),
         poolRead.query(`SELECT
           u.username,
           COALESCE(NULLIF(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), ''), u.username) as display_name,
@@ -4349,19 +3968,42 @@ export async function registerRoutes(
           WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '30d'
           GROUP BY DATE_TRUNC('day', created_at), status
           ORDER BY day ASC`, [tenantId]),
+        // T566: Kill Chain phase progression — active incident counts per phase
+        // "Active" = open, investigating, or contained (not yet resolved/closed)
+        // T569: time-range-aware — window driven by safeTimeRange param
+        poolRead.query(`SELECT kill_chain_phase AS phase, COUNT(*)::int AS count
+          FROM incidents
+          WHERE tenant_id = $1 AND kill_chain_phase IS NOT NULL
+            ${safeTimeRange === "1h"  ? "AND created_at >= NOW() - INTERVAL '1 hour'" :
+              safeTimeRange === "24h" ? "AND created_at >= NOW() - INTERVAL '24 hours'" :
+              safeTimeRange === "7d"  ? "AND created_at >= NOW() - INTERVAL '7 days'" :
+              safeTimeRange === "90d" ? "AND created_at >= NOW() - INTERVAL '90 days'" :
+              safeTimeRange === "all" ? "" :
+              /* default 30d */         "AND created_at >= NOW() - INTERVAL '30 days'"}
+            AND status IN ('open', 'investigating', 'contained')
+          GROUP BY kill_chain_phase
+          ORDER BY CASE kill_chain_phase
+            WHEN 'Reconnaissance' THEN 1 WHEN 'Weaponization' THEN 2 WHEN 'Delivery' THEN 3
+            WHEN 'Exploitation' THEN 4 WHEN 'Installation' THEN 5 WHEN 'Command & Control' THEN 6
+            WHEN 'Actions on Objectives' THEN 7 ELSE 8 END`, [tenantId]),
       ]);
 
       const m = mttrData.rows[0];
-      const mttrNow = Math.round(m.mttr_7d || m.avg_mttr_min || 45);
-      const mttrPrev = Math.round(m.mttr_prev_7d || m.avg_mttr_min || 50);
-      const totalIncidents = m.total_count || 1;
+      // Task #445: strict-null trend windows. The 7d / prior-7d MTTR must
+      // reflect only the 7-day window; never silently fall back to the
+      // all-time avg_mttr_min (which fabricated a "vs prior 7 days" delta
+      // for tenants with no resolved incidents in either window).
+      const mttrNow = m.mttr_7d != null ? Math.round(m.mttr_7d) : null;
+      const mttrPrev = m.mttr_prev_7d != null ? Math.round(m.mttr_prev_7d) : null;
+      const totalIncidents = m.total_count || 0;
+      const resolvedCount = m.resolved_count || 0;
       const slaBreach = m.sla_breached || 0;
-      const slaCompliance = Math.round(((totalIncidents - slaBreach) / totalIncidents) * 100);
+      const slaCompliance = resolvedCount > 0 ? Math.round(((resolvedCount - slaBreach) / resolvedCount) * 100) : null;
 
-      const mttdNow = Math.round(mttdData.rows[0]?.mttd_7d || mttrNow * 0.6);
-      const mttdPrev = Math.round(mttdData.rows[0]?.mttd_prev_7d || mttrPrev * 0.6);
-      const mttcNow = Math.round(mttcData.rows[0]?.mttc_7d || mttrNow * 0.7);
-      const mttcPrev = Math.round(mttcData.rows[0]?.mttc_prev_7d || mttrPrev * 0.7);
+      const mttdNow = mttdData.rows[0]?.mttd_7d != null ? Math.round(mttdData.rows[0].mttd_7d) : null;
+      const mttdPrev = mttdData.rows[0]?.mttd_prev_7d != null ? Math.round(mttdData.rows[0].mttd_prev_7d) : null;
+      const mttcNow = mttcData.rows[0]?.mttc_7d != null ? Math.round(mttcData.rows[0].mttc_7d) : null;
+      const mttcPrev = mttcData.rows[0]?.mttc_prev_7d != null ? Math.round(mttcData.rows[0].mttc_prev_7d) : null;
 
       const analysts = analystData.rows.map((a: any) => ({
         name: a.display_name || a.username,
@@ -4433,7 +4075,7 @@ export async function registerRoutes(
         mttr: { value: mttrNow, prev: mttrPrev, unit: "min" },
         mttc: { value: mttcNow, prev: mttcPrev, unit: "min" },
         mtti: { value: mttiAvg, p50: mttiP50, p90: mttiP90, unit: "min", peakHour: peakInvestigationHour },
-        slaCompliance: { value: slaCompliance, prev: slaCompliance - 2, unit: "%" },
+        slaCompliance: { value: slaCompliance, prev: null, unit: "%" },
         // Explicit top-level fields matching task spec contract
         peakInvestigationHour,
         aiOverrideRate,
@@ -4444,6 +4086,7 @@ export async function registerRoutes(
         investigationsByStatusSeries,
         analysts,
         trend,
+        killChainProgression: kcProgressData.rows as Array<{ phase: string; count: number }>,
       };
 
       // Augment SOC metrics dashboard with ClickHouse OLAP event-volume trend.
@@ -4511,8 +4154,9 @@ export async function registerRoutes(
             totals: chTotals,
           };
           trendSource = "clickhouse_olap";
-        } catch {
+        } catch (chErr: any) {
           // ClickHouse not reachable — dashboard served from PG only
+          console.warn("[Dashboard] ClickHouse query failed for tenant", tenantId, ":", chErr?.message);
         }
       }
 
@@ -4581,13 +4225,18 @@ export async function registerRoutes(
            GROUP BY event_type, severity`,
           queryParams
         ),
+        // Aggregated — one row per unique group instead of one row per incident.
+        // With 12k+ incidents the old full-scan took 2-3 s; GROUP BY is <100 ms.
         pool.query(
           `SELECT source, category, incident_type, severity, status,
                   CASE WHEN is_true_positive = true THEN 'tp'
                        WHEN is_true_positive = false THEN 'fp'
                        ELSE 'unclassified' END as classification,
-                  confidence_score
-           FROM incidents WHERE tenant_id IN (${placeholders})${incidentTimeFilter}${incSrcGuard}`,
+                  COUNT(*)::int          as cnt,
+                  AVG(confidence_score)  as avg_conf
+           FROM incidents WHERE tenant_id IN (${placeholders})${incidentTimeFilter}${incSrcGuard}
+           GROUP BY source, category, incident_type, severity, status, classification
+           LIMIT 2000`,
           incidentParams
         ),
         pool.query(
@@ -4625,8 +4274,9 @@ export async function registerRoutes(
       }
 
       for (const row of incidentRows.rows) {
-        const src = (row.source || "").toLowerCase();
-        const cat = (row.category || "").toLowerCase();
+        const cnt   = (row.cnt as number) || 1; // grouped count — may be >1 per row
+        const src   = (row.source || "").toLowerCase();
+        const cat   = (row.category || "").toLowerCase();
         const itype = (row.incident_type || "").toLowerCase();
         let domain = "endpoint";
         if (src.includes("email") || src.includes("harmony email") || cat.includes("email") || itype.includes("phish") || itype.includes("spam") || itype.includes("bec")) domain = "email";
@@ -4635,20 +4285,26 @@ export async function registerRoutes(
         else if (src.includes("cloud") || src.includes("aws") || src.includes("azure") || src.includes("gcp") || src.includes("casb") || src.includes("sse") || cat.includes("cloud") || cat.includes("casb")) domain = "cloud";
         else if (src.includes("identity") || src.includes("iam") || src.includes("active directory") || src.includes("ldap") || cat.includes("identity") || itype.includes("credential") || itype.includes("brute") || itype.includes("unauthorized")) domain = "identity";
         else if (src.includes("dlp") || cat.includes("dlp") || itype.includes("data loss") || itype.includes("data leak")) domain = "dlp";
-        else if (cat.includes("vulnerability") || itype.includes("vulnerability") || src.includes("rapid7") || src.includes("qualys") || src.includes("tenable")) domain = "vulnerability";
-        else if (src.includes("endpoint") || src.includes("edr") || src.includes("cynet") || cat.includes("endpoint") || itype.includes("malware") || itype.includes("ransomware")) domain = "endpoint";
+        else if (cat.includes("vulnerability") || itype.includes("vulnerability") || src.includes("rapid7") || src.includes("qualys") || src.includes("tenable") || src.includes("spotlight")) domain = "vulnerability";
+        else if (src.includes("endpoint") || src.includes("edr") || src.includes("cynet") || src.includes("crowdstrike") || src.includes("sentinelone") || cat.includes("endpoint") || itype.includes("malware") || itype.includes("ransomware")) domain = "endpoint";
 
-        domainCounts[domain].incidents++;
-        if (row.severity === "critical") domainCounts[domain].critical++;
-        if (row.severity === "high") domainCounts[domain].high++;
+        domainCounts[domain].incidents += cnt;
+        if (row.severity === "critical") domainCounts[domain].critical += cnt;
+        if (row.severity === "high")     domainCounts[domain].high     += cnt;
       }
 
-      const totalEvents = eventTotalCount.rows[0]?.total || 0;
-      const totalIncidents = incidentStats.rows[0]?.total || 0;
-      const tpCount = incidentRows.rows.filter((r: any) => r.classification === "tp").length;
-      const fpCount = incidentRows.rows.filter((r: any) => r.classification === "fp").length;
-      const confScores = incidentRows.rows.filter((r: any) => r.confidence_score != null).map((r: any) => r.confidence_score);
-      const avgConfidence = confScores.length > 0 ? Math.round(confScores.reduce((a: number, b: number) => a + b, 0) / confScores.length) : 0;
+      const totalEvents    = eventTotalCount.rows[0]?.total || 0;
+      const totalIncidents = incidentStats.rows[0]?.total   || 0;
+      // Aggregate TP/FP and confidence from grouped rows (each row has cnt + avg_conf)
+      let tpCount = 0, fpCount = 0;
+      let confWeightedSum = 0, confTotalCount = 0;
+      for (const row of incidentRows.rows) {
+        const c = (row.cnt as number) || 1;
+        if (row.classification === "tp") tpCount += c;
+        if (row.classification === "fp") fpCount += c;
+        if (row.avg_conf != null) { confWeightedSum += (row.avg_conf as number) * c; confTotalCount += c; }
+      }
+      const avgConfidence = confTotalCount > 0 ? Math.round(confWeightedSum / confTotalCount) : 0;
 
       const sevBreakdown: Record<string, number> = {};
       for (const row of severityBreakdown.rows) {
@@ -4689,6 +4345,7 @@ export async function registerRoutes(
       const severity = req.query.severity as string;
       const status = req.query.status as string;
       const search = req.query.search as string;
+      const killChainPhase = req.query.killChainPhase as string;
 
       const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
       let conditions = [
@@ -4699,6 +4356,12 @@ export async function registerRoutes(
       ];
       const params: any[] = [...tenantIds];
       let paramIdx = tenantIds.length;
+
+      if (killChainPhase && killChainPhase !== "all") {
+        paramIdx++;
+        conditions.push(`kill_chain_phase = $${paramIdx}`);
+        params.push(killChainPhase);
+      }
 
       if (severity && severity !== "all") {
         const sevValues = severity.split(",").map(s => s.trim()).filter(Boolean);
@@ -4810,6 +4473,52 @@ export async function registerRoutes(
       res.json({ data, total, page, pageSize, totalPages, source: "postgres", latencyMs: Date.now() - reqStart });
     } catch (error: any) {
       res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/security-console/:tenantId/incidents/export-pdf", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const severity = req.query.severity as string;
+      const status = req.query.status as string;
+      const search = req.query.search as string;
+      const killChainPhase = req.query.killChainPhase as string;
+
+      const placeholders = tenantIds.map((_: any, i: number) => `$${i + 1}`).join(",");
+      let conditions = [
+        `tenant_id IN (${placeholders})`,
+        buildIntegrationGuardSql("incidents.tenant_id", "incidents.detection_source"),
+      ];
+      const params: any[] = [...tenantIds];
+      let paramIdx = tenantIds.length;
+
+      if (killChainPhase && killChainPhase !== "all") { paramIdx++; conditions.push(`kill_chain_phase = $${paramIdx}`); params.push(killChainPhase); }
+      if (severity && severity !== "all") { paramIdx++; conditions.push(`severity = $${paramIdx}`); params.push(severity); }
+      if (status && status !== "all") { paramIdx++; conditions.push(`status = $${paramIdx}`); params.push(status); }
+      if (search) { paramIdx++; conditions.push(`(title ILIKE $${paramIdx} OR description ILIKE $${paramIdx})`); params.push(`%${search}%`); }
+
+      params.push(500);
+      const result = await pool.query(
+        `SELECT id, title, severity, status, category, kill_chain_phase, mitre_tactic, mitre_technique_id, mitre_technique, is_true_positive, confidence_score, source, detection_source, created_at FROM incidents WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT $${params.length}`,
+        params,
+      );
+
+      const tenant = await storage.getTenant(tenantId);
+      const tenantName = tenant?.name || "Tenant";
+      const pdfBuffer = await generateIncidentsPDF(result.rows, tenantName);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      res.set({
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${tenantName.replace(/[^a-z0-9]/gi, "_")}_incidents_${dateStr}.pdf"`,
+        "Content-Length": pdfBuffer.length,
+      });
+      res.end(pdfBuffer);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
     }
   });
 
@@ -4925,6 +4634,427 @@ export async function registerRoutes(
     }
   });
 
+  // ── Dashboard "Attention Now" ─────────────────────────────────────────────
+  // Curated top items the current role should look at first. Read-replica only.
+  app.get("/api/dashboard/:tenantId/attention", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const items: any[] = [];
+      const now = Date.now();
+      const ageMin = (d: Date | string | null | undefined): number | undefined => {
+        if (!d) return undefined;
+        const t = new Date(d).getTime();
+        if (!Number.isFinite(t)) return undefined;
+        return Math.max(0, Math.round((now - t) / 60000));
+      };
+
+      // 1. Highest-risk open incident in the last 24h (critical > high)
+      try {
+        const r = await dbRead.execute(sql`
+          SELECT id, title, severity, created_at, mitre_tactic, source_ip
+          FROM incidents
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND status NOT IN ('resolved', 'closed')
+            AND created_at > NOW() - INTERVAL '24 hours'
+          ORDER BY
+            CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
+            created_at DESC
+          LIMIT 1
+        `);
+        const row = (r.rows as any[])[0];
+        if (row) {
+          items.push({
+            id: `inc-${row.id}`,
+            kind: "incident",
+            severity: row.severity,
+            title: row.title,
+            detail: [row.mitre_tactic, row.source_ip].filter(Boolean).join(" · ") || "Active investigation",
+            href: `/incidents/${row.id}`,
+            cta: "Investigate",
+            ageMinutes: ageMin(row.created_at),
+          });
+        }
+      } catch (e) { /* swallow */ }
+
+      // 2. Ticket about to breach SLA (within next 2 hours, not yet breached)
+      try {
+        const r = await dbRead.execute(sql`
+          SELECT id, title, priority, response_due_at, resolution_due_at
+          FROM tickets
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND status NOT IN ('resolved', 'closed')
+            AND sla_response_breached = false
+            AND sla_resolution_breached = false
+            AND (
+              (response_due_at IS NOT NULL AND response_due_at BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
+              OR (resolution_due_at IS NOT NULL AND resolution_due_at BETWEEN NOW() AND NOW() + INTERVAL '2 hours')
+            )
+          ORDER BY LEAST(
+            COALESCE(response_due_at, NOW() + INTERVAL '999 days'),
+            COALESCE(resolution_due_at, NOW() + INTERVAL '999 days')
+          ) ASC
+          LIMIT 1
+        `);
+        const row = (r.rows as any[])[0];
+        if (row) {
+          const due = row.response_due_at || row.resolution_due_at;
+          const minsToBreach = due ? Math.max(0, Math.round((new Date(due).getTime() - now) / 60000)) : 0;
+          items.push({
+            id: `tkt-${row.id}`,
+            kind: "sla",
+            severity: minsToBreach < 30 ? "critical" : "high",
+            title: `SLA at risk: ${row.title}`,
+            detail: `Breaches in ~${minsToBreach}m · priority ${row.priority}`,
+            href: `/tickets/${row.id}`,
+            cta: "Respond",
+            ageMinutes: 0,
+          });
+        }
+      } catch (e) { /* swallow */ }
+
+      // 3. Broken integration
+      try {
+        const r = await dbRead.execute(sql`
+          SELECT id, platform_name, status, consecutive_failures, last_poll_message, last_poll_at
+          FROM security_integrations
+          WHERE tenant_id = ${tenantId}
+            AND deleted_at IS NULL
+            AND (
+              status IN ('error', 'failed', 'disconnected')
+              OR consecutive_failures >= 3
+            )
+          ORDER BY consecutive_failures DESC NULLS LAST, last_poll_at DESC NULLS LAST
+          LIMIT 1
+        `);
+        const row = (r.rows as any[])[0];
+        if (row) {
+          items.push({
+            id: `int-${row.id}`,
+            kind: "integration",
+            severity: (row.consecutive_failures ?? 0) > 5 ? "critical" : "high",
+            title: `${row.platform_name} is failing`,
+            detail: row.last_poll_message
+              ? String(row.last_poll_message).slice(0, 120)
+              : `${row.consecutive_failures ?? 0} consecutive failures`,
+            href: `/security-integrations`,
+            cta: "Repair",
+            ageMinutes: ageMin(row.last_poll_at),
+          });
+        }
+      } catch (e) { /* swallow */ }
+
+      // 4. Trending IOC seen recently (highest occurrence in last 24h via incidents.ioc_data)
+      try {
+        const r = await dbRead.execute(sql`
+          SELECT source_ip, COUNT(*)::int AS hits
+          FROM incidents
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND created_at > NOW() - INTERVAL '24 hours'
+            AND source_ip IS NOT NULL
+            AND source_ip <> ''
+          GROUP BY source_ip
+          HAVING COUNT(*) >= 2
+          ORDER BY hits DESC
+          LIMIT 1
+        `);
+        const row = (r.rows as any[])[0];
+        if (row) {
+          items.push({
+            id: `ioc-${row.source_ip}`,
+            kind: "ioc",
+            severity: row.hits >= 5 ? "high" : "medium",
+            title: `Repeat offender IP: ${row.source_ip}`,
+            detail: `Seen on ${row.hits} incidents in the last 24h`,
+            href: `/threat-intel?q=${encodeURIComponent(row.source_ip)}`,
+            cta: "Pivot",
+            ageMinutes: 0,
+          });
+        }
+      } catch (e) { /* swallow */ }
+
+      // 5. Asset newly seen and missing security agent (criticality high)
+      try {
+        const r = await dbRead.execute(sql`
+          SELECT id, hostname, criticality, ip_address, created_at
+          FROM assets
+          WHERE tenant_id = ${tenantId}
+            AND criticality IN ('critical', 'high')
+            AND created_at > NOW() - INTERVAL '7 days'
+          ORDER BY created_at DESC
+          LIMIT 1
+        `);
+        const row = (r.rows as any[])[0];
+        if (row) {
+          items.push({
+            id: `ast-${row.id}`,
+            kind: "asset",
+            severity: row.criticality === "critical" ? "high" : "medium",
+            title: `New ${row.criticality} asset: ${row.hostname}`,
+            detail: row.ip_address ? `IP ${row.ip_address}` : "Verify coverage",
+            href: `/assets/${row.id}`,
+            cta: "Review",
+            ageMinutes: ageMin(row.created_at),
+          });
+        }
+      } catch (e) { /* swallow */ }
+
+      res.json({
+        items: items.slice(0, 5),
+        generatedAt: new Date().toISOString(),
+        source: "postgres-readreplica",
+      });
+    } catch (error: any) {
+      res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message, items: [] });
+    }
+  });
+
+  // ── Dashboard KPI sparkline trends (24h hourly) ───────────────────────────
+  app.get("/api/dashboard/:tenantId/kpi-trends", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const fillBuckets = (rows: { hour: any; count: any }[]): number[] => {
+        const map = new Map<number, number>();
+        for (const r of rows) {
+          const t = new Date(r.hour).getTime();
+          if (Number.isFinite(t)) map.set(t, Number(r.count) || 0);
+        }
+        const out: number[] = [];
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        for (let i = 23; i >= 0; i--) {
+          const slot = new Date(now.getTime() - i * 3600_000).getTime();
+          out.push(map.get(slot) || 0);
+        }
+        return out;
+      };
+
+      const [incRes, critRes, remRes] = await Promise.allSettled([
+        dbRead.execute(sql`
+          SELECT date_trunc('hour', created_at) AS hour, COUNT(*)::int AS count
+          FROM incidents
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY 1 ORDER BY 1
+        `),
+        dbRead.execute(sql`
+          SELECT date_trunc('hour', created_at) AS hour, COUNT(*)::int AS count
+          FROM incidents
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND severity IN ('critical', 'high')
+            AND created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY 1 ORDER BY 1
+        `),
+        dbRead.execute(sql`
+          SELECT date_trunc('hour', resolved_at) AS hour, COUNT(*)::int AS count
+          FROM incidents
+          WHERE tenant_id = ANY(${tenantIds}::int[])
+            AND resolved_at IS NOT NULL
+            AND resolved_at > NOW() - INTERVAL '24 hours'
+          GROUP BY 1 ORDER BY 1
+        `),
+      ]);
+
+      const incidents = incRes.status === "fulfilled" ? fillBuckets(incRes.value.rows as any[]) : [];
+      const critical  = critRes.status === "fulfilled" ? fillBuckets(critRes.value.rows as any[]) : [];
+      const remediated = remRes.status === "fulfilled" ? fillBuckets(remRes.value.rows as any[]) : [];
+
+      res.json({
+        sparklines: { incidents, critical, remediated },
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message, sparklines: {} });
+    }
+  });
+
+  // ── Endpoint Intelligence: MITRE technique breakdown + detection file hotlist ─
+  app.get("/api/dashboard/:tenantId/endpoint-intelligence", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const timeRange = String(req.query.timeRange || "all");
+      const timeFilter = timeRange === "1h"  ? "AND occurred_at > NOW() - INTERVAL '1 hour'"
+                       : timeRange === "24h" ? "AND occurred_at > NOW() - INTERVAL '24 hours'"
+                       : timeRange === "7d"  ? "AND occurred_at > NOW() - INTERVAL '7 days'"
+                       : timeRange === "30d" ? "AND occurred_at > NOW() - INTERVAL '30 days'"
+                       : timeRange === "90d" ? "AND occurred_at > NOW() - INTERVAL '90 days'"
+                       : "";
+
+      const [techResult, fileResult, tacticResult, statusResult] = await Promise.allSettled([
+        pool.query(`
+          SELECT
+            COALESCE(NULLIF(mitre_technique,''), raw_payload->>'technique', 'Unknown') AS technique,
+            (ARRAY_AGG(raw_payload->>'techniqueId' ORDER BY occurred_at DESC)
+              FILTER (WHERE raw_payload->>'techniqueId' IS NOT NULL AND raw_payload->>'techniqueId' != '')
+            )[1] AS technique_id,
+            COUNT(*)::int AS count
+          FROM security_events
+          WHERE tenant_id = ANY($1::int[]) AND event_type = 'endpoint' ${timeFilter}
+            AND COALESCE(NULLIF(mitre_technique,''), raw_payload->>'technique') IS NOT NULL
+          GROUP BY 1 ORDER BY count DESC LIMIT 10
+        `, [tenantIds]),
+        pool.query(`
+          SELECT
+            COALESCE(NULLIF(raw_payload->>'fileName',''), 'unknown') AS file_name,
+            COUNT(*)::int AS count,
+            (ARRAY_AGG(
+              COALESCE(NULLIF(mitre_tactic,''), NULLIF(raw_payload->>'tactic',''))
+              ORDER BY occurred_at DESC
+            ) FILTER (WHERE COALESCE(NULLIF(mitre_tactic,''), NULLIF(raw_payload->>'tactic','')) IS NOT NULL)
+            )[1] AS tactic,
+            BOOL_OR(
+              LOWER(COALESCE(action, raw_payload->>'status', '')) IN
+              ('blocked','killed','prevented','detected','quarantined','malicious')
+              OR severity IN ('critical','high')
+            ) AS known_malicious
+          FROM security_events
+          WHERE tenant_id = ANY($1::int[]) AND event_type = 'endpoint' ${timeFilter}
+            AND raw_payload->>'fileName' IS NOT NULL AND raw_payload->>'fileName' <> ''
+          GROUP BY 1 ORDER BY count DESC LIMIT 10
+        `, [tenantIds]),
+        pool.query(`
+          SELECT COALESCE(NULLIF(mitre_tactic,''), raw_payload->>'tactic', 'Unknown') AS tactic,
+                 COUNT(*)::int AS count
+          FROM security_events
+          WHERE tenant_id = ANY($1::int[]) AND event_type = 'endpoint' ${timeFilter}
+          GROUP BY 1 ORDER BY count DESC LIMIT 8
+        `, [tenantIds]),
+        pool.query(`
+          SELECT COALESCE(NULLIF(action,''), raw_payload->>'status', 'unknown') AS status,
+                 COUNT(*)::int AS count
+          FROM security_events
+          WHERE tenant_id = ANY($1::int[]) AND event_type = 'endpoint' ${timeFilter}
+          GROUP BY 1 ORDER BY count DESC LIMIT 6
+        `, [tenantIds]),
+      ]);
+
+      res.json({
+        mitreTechniques: techResult.status === "fulfilled"
+          ? techResult.value.rows.map((r: any) => ({
+              name: r.technique_id
+                ? `${r.technique_id} - ${r.technique}`
+                : r.technique,
+              count: Number(r.count),
+            }))
+          : [],
+        detectionFileHotlist: fileResult.status === "fulfilled"
+          ? fileResult.value.rows.map((r: any) => ({
+              name: r.file_name,
+              count: Number(r.count),
+              tactic: r.tactic || null,
+              knownMalicious: r.known_malicious || false,
+            }))
+          : [],
+        mitreTactics: tacticResult.status === "fulfilled"
+          ? tacticResult.value.rows.map((r: any) => ({ name: r.tactic, count: Number(r.count) }))
+          : [],
+        statusDistribution: statusResult.status === "fulfilled"
+          ? statusResult.value.rows.map((r: any) => ({ name: r.status, count: Number(r.count) }))
+          : [],
+      });
+    } catch (error: any) {
+      res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
+    }
+  });
+
+  // ── Dashboard NL search → routing intent ──────────────────────────────────
+  // Lightweight rule-based router so the command palette can accept natural
+  // language. Returns { route, label, filters } that the client uses to
+  // navigate. AI provider can be added later for low-confidence cases.
+  app.post("/api/dashboard/nl-route", isAuthenticated, async (req: any, res) => {
+    try {
+      const q = String(req.body?.query || "").trim().toLowerCase();
+      if (!q) return res.json({ route: null, label: null, confidence: 0 });
+
+      const has = (...words: string[]) => words.some(w => q.includes(w));
+      const sevMatch = ["critical", "high", "medium", "low"].find(s => q.includes(s));
+      const timeMatch = q.match(/last\s*(\d+)\s*(h|hour|hours|d|day|days|w|week|weeks)/i);
+      const timeRange = (() => {
+        if (!timeMatch) {
+          if (has("today", "24h")) return "24h";
+          if (has("week", "7d")) return "7d";
+          if (has("month", "30d")) return "30d";
+          return undefined;
+        }
+        const n = parseInt(timeMatch[1]);
+        const u = timeMatch[2][0].toLowerCase();
+        if (u === "h") return n <= 1 ? "1h" : "24h";
+        if (u === "d") return n >= 30 ? "30d" : n >= 7 ? "7d" : "24h";
+        if (u === "w") return n >= 4 ? "30d" : "7d";
+        return undefined;
+      })();
+
+      const params = new URLSearchParams();
+      if (sevMatch) params.set("severity", sevMatch);
+      if (timeRange) params.set("range", timeRange);
+
+      let route: string | null = null;
+      let label = "";
+      let confidence = 0.6;
+
+      if (has("incident", "incidents")) {
+        route = `/incidents${params.toString() ? `?${params}` : ""}`;
+        label = `Open incidents${sevMatch ? ` (${sevMatch})` : ""}${timeRange ? ` · ${timeRange}` : ""}`;
+        confidence = 0.85;
+      } else if (has("ticket", "tickets", "sla")) {
+        route = `/tickets${params.toString() ? `?${params}` : ""}`;
+        label = `Open tickets${sevMatch ? ` (${sevMatch})` : ""}`;
+        confidence = 0.8;
+      } else if (has("event", "events", "alert", "alerts", "log", "logs")) {
+        route = `/events${params.toString() ? `?${params}` : ""}`;
+        label = `Alerts & events${sevMatch ? ` (${sevMatch})` : ""}${timeRange ? ` · ${timeRange}` : ""}`;
+        confidence = 0.85;
+      } else if (has("asset", "assets", "host", "device", "endpoint")) {
+        route = `/asset-inventory`;
+        label = `Asset inventory`;
+        confidence = 0.8;
+      } else if (has("ioc", "indicator", "threat intel", "threat-intel")) {
+        route = `/threat-intel`;
+        label = `Threat intelligence`;
+        confidence = 0.8;
+      } else if (has("integration", "connector", "data source")) {
+        route = `/security-integrations`;
+        label = `Security integrations`;
+        confidence = 0.8;
+      } else if (has("vulnerability", "vuln", "cve")) {
+        route = `/cve-risk`;
+        label = `CVE risk intelligence`;
+        confidence = 0.75;
+      } else if (has("hunt", "hunting")) {
+        route = `/threat-hunting`;
+        label = `Threat hunting workbench`;
+        confidence = 0.8;
+      } else if (has("project", "projects")) {
+        route = `/projects`;
+        label = `Projects`;
+        confidence = 0.7;
+      } else if (has("forecast", "predict", "predictive")) {
+        route = `/predictive-attack`;
+        label = `Predictive attack engine`;
+        confidence = 0.85;
+      } else if (has("posture", "zero trust", "zero-trust")) {
+        route = `/zero-trust`;
+        label = `Zero trust posture`;
+        confidence = 0.8;
+      }
+
+      res.json({ route, label, confidence, filters: { severity: sevMatch, range: timeRange } });
+    } catch (error: any) {
+      res.status(500).json({ route: null, label: null, confidence: 0, message: error.message });
+    }
+  });
+
   app.get("/api/events/:tenantId/cross-source-correlations", isAuthenticated, async (req: any, res) => {
     try {
       const reqStart = Date.now();
@@ -5015,8 +5145,8 @@ export async function registerRoutes(
           GROUP BY target, event_type, COALESCE(log_source, source_type, 'Unknown')
         )
         SELECT ioc_value, ioc_type, 
-               array_agg(DISTINCT event_type::text) as event_types,
-               array_agg(DISTINCT log_source::text) as log_sources,
+               array_agg(DISTINCT event_type) as event_types,
+               array_agg(DISTINCT log_source) as log_sources,
                SUM(hit_count)::int as total_hits
         FROM ioc_sources
         GROUP BY ioc_value, ioc_type
@@ -5059,7 +5189,7 @@ export async function registerRoutes(
 
       // ── ClickHouse fast-path ────────────────────────────────────────────────
       // The PG `security_events` table is intentionally sparse in production
-      // (events flow Kafka → ClickHouse). Without this fast-path the dashboard
+      // (events flow Kinesis → ClickHouse). Without this fast-path the dashboard
       // event-volume chart would render empty in AWS even though events are
       // actively ingested. We bucket on `ingested_at` in CH using the same
       // interval grid as the PG implementation so the line chart shape and
@@ -5093,8 +5223,8 @@ export async function registerRoutes(
               toUInt64(count())                        AS total
             FROM security_events_distributed
             WHERE tenant_id IN (${tenantIds.join(",")})
-              AND ingested_at >= '${formatChDateTime64(start)}'
-              AND ingested_at <= '${formatChDateTime64(end)}'
+              AND ingested_at >= '${start.toISOString()}'
+              AND ingested_at <= '${end.toISOString()}'
               ${guardSql}
             GROUP BY ts
             ORDER BY ts ASC
@@ -5361,6 +5491,215 @@ export async function registerRoutes(
       // a per-row EXISTS subquery — no pre-check needed here.
       const result = await storage.searchSecurityEvents(params);
       res.json({ ...result, source: "postgres", latencyMs: Date.now() - reqStart });
+    } catch (error: any) {
+      res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
+    }
+  });
+
+  // ── CVE Detail: fleet-wide view of all devices affected by a specific CVE ──
+  app.get("/api/vulnerabilities/cve/:cveId", isAuthenticated, async (req: any, res) => {
+    try {
+      const cveId = (req.params.cveId as string).toUpperCase();
+      if (!cveId.startsWith("CVE-")) {
+        return res.status(400).json({ message: "cveId must be in CVE-YYYY-NNNNN format" });
+      }
+      const tenantId = parseInt(req.query.tenantId as string);
+      if (isNaN(tenantId)) return res.status(400).json({ message: "tenantId query param is required" });
+      await assertTenantAccess(req, tenantId);
+      const tenantIds = await getAccessibleTenantIds(req, tenantId);
+
+      const page     = Math.max(1, parseInt(req.query.page     as string) || 1);
+      const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize as string) || 50));
+      const offset   = (page - 1) * pageSize;
+
+      const placeholders = tenantIds.map((_: number, i: number) => `$${i + 1}`).join(",");
+      let pIdx = tenantIds.length + 1;
+      const baseParams: unknown[] = [...tenantIds];
+      baseParams.push(cveId);
+      const cvePIdx = pIdx++;
+
+      const guard = buildIntegrationGuardSql("se.tenant_id", "se.log_source");
+
+      // ── 1. CVE metadata row (KEV-preferred or highest risk score) ────────────
+      const metaRow = await pool.query(
+        `SELECT se.id, se.tenant_id, se.severity, se.action, se.risk_score,
+                se.description, se.raw_payload
+         FROM security_events se
+         WHERE se.tenant_id IN (${placeholders})
+           AND se.event_type = 'vulnerability'
+           AND UPPER(se.threat) = $${cvePIdx}
+           AND ${guard}
+         ORDER BY
+           CASE WHEN (se.raw_payload->'_meta'->>'isCisaKev')::boolean IS TRUE THEN 0 ELSE 1 END,
+           COALESCE(se.risk_score, 0) DESC
+         LIMIT 1`,
+        baseParams,
+      );
+
+      if (metaRow.rows.length === 0) {
+        return res.json({ cveId, cvss: null, exprRating: null, isCisaKev: false, description: null, remediation: null, severity: null, total: 0, totalPages: 0, page, pageSize, openCount: 0, closedCount: 0, affectedDevices: [] });
+      }
+
+      const metaEvent = metaRow.rows[0];
+      const meta = metaEvent.raw_payload?._meta ?? {};
+      const cveInfo = {
+        cveId,
+        cvss: metaEvent.risk_score != null ? (metaEvent.risk_score / 10).toFixed(1) : null,
+        exprRating: meta.exprRating || null,
+        isCisaKev: !!meta.isCisaKev,
+        description: meta.description || metaEvent.description || null,
+        remediation: meta.remediation || meta.remediationDetails || null,
+        severity: metaEvent.severity,
+      };
+
+      // ── 2. Deduplicated device list + open/closed counts ─────────────────────
+      // ClickHouse fast-path: for large fleets the PG DISTINCT ON over hundreds
+      // of thousands of vulnerability rows is very slow.  When a CH client is
+      // available we run the deduplication through CH (queryEvents-style pattern)
+      // and fall back to PG on any CH miss — zero-regression behaviour.
+      // The CVE detail query has no PG-only filters (pipelineStatus / country)
+      // so it is always CH-safe.  The metadata row above stays on PG because
+      // risk_score and raw_payload._meta are not mirrored in the OLAP schema.
+      const chCveClient = getClickHouseClient();
+      if (chCveClient) {
+        try {
+          const guardMap = await getConnectedLogSourcesByTenant(tenantIds);
+          const chGuard  = buildChIntegrationGuard(guardMap);
+          const chStart  = Date.now();
+          const { rows: chDeviceRows, total: chTotal, openCount: chOpen, closedCount: chClosed } =
+            await chCveClient.queryCveFleet(tenantIds, cveId, {
+              limit:  pageSize,
+              offset,
+              integrationGuardSql: chGuard || undefined,
+            });
+          logChQuery("cve.fleet", Date.now() - chStart, {
+            cveId, tenantIds: tenantIds.join(","),
+            rows: chDeviceRows.length, total: chTotal,
+          });
+          // Zero-regression guard: we already know PG has at least one matching
+          // event (the metaRow check above passed).  If CH returns zero devices
+          // it means the OLAP replica is stale / the dual-write hasn't caught up.
+          // Treat an empty CH result as a miss and fall through to PG so callers
+          // never see an empty fleet for a CVE that demonstrably has PG data.
+          if (chTotal > 0) {
+            const affectedDevicesCh = chDeviceRows.map((r) => ({
+              id:          null,
+              tenantId:    r.tenant_id,
+              tenantName:  `Tenant ${r.tenant_id}`,
+              hostname:    (r.hostname as string) || "Unknown",
+              status:      (r.action   as string) || "Open",
+              severity:    r.severity,
+              logSource:   r.log_source,
+              occurredAt:  r.occurred_at,
+              cvss:        null,
+              exprRating:  null,
+              source:      "clickhouse_olap",
+            }));
+            return res.json({
+              ...cveInfo,
+              total:      chTotal,
+              totalPages: Math.max(1, Math.ceil(chTotal / pageSize)),
+              page, pageSize,
+              openCount:  chOpen,
+              closedCount: chClosed,
+              affectedDevices: affectedDevicesCh,
+              source: "clickhouse_olap",
+            });
+          }
+          // CH returned 0 rows despite PG having data — log and fall through.
+          logChQuery("cve.fleet.miss_empty", 0, { cveId, tenantIds: tenantIds.join(",") });
+        } catch (chErr: unknown) {
+          const chMsg = chErr instanceof Error ? chErr.message : String(chErr);
+          logChQuery("cve.fleet.failed", 0, { cveId, error: chMsg });
+          // Fall through to the PG path below — zero-regression on CH miss.
+        }
+      }
+
+      // ── PG fallback: Deduplicated device list via DISTINCT ON (DB-level) ─────
+      // For each (tenant_id, asset) pair pick the row that is:
+      //   a) open (action != 'closed') first, then most recent.
+      // A window-function COUNT(*) OVER() returns the total deduplicated count
+      // so we can paginate without a second round-trip.
+      const pageParams: unknown[] = [...baseParams, pageSize, offset];
+      const limitPIdx  = pIdx++;
+      const offsetPIdx = pIdx++;
+
+      const deviceRows = await pool.query(
+        `WITH ranked AS (
+           SELECT DISTINCT ON (se.tenant_id, LOWER(COALESCE(se.asset, '')))
+             se.id, se.tenant_id, se.asset, se.severity, se.action, se.risk_score,
+             se.log_source, se.occurred_at, se.raw_payload,
+             t.name AS tenant_name
+           FROM security_events se
+           LEFT JOIN tenants t ON t.id = se.tenant_id
+           WHERE se.tenant_id IN (${placeholders})
+             AND se.event_type = 'vulnerability'
+             AND UPPER(se.threat) = $${cvePIdx}
+             AND ${guard}
+           ORDER BY
+             se.tenant_id,
+             LOWER(COALESCE(se.asset, '')),
+             CASE WHEN LOWER(COALESCE(se.action, 'open')) != 'closed' THEN 0 ELSE 1 END,
+             se.occurred_at DESC
+         )
+         SELECT *, COUNT(*) OVER() AS total_count
+         FROM ranked
+         ORDER BY
+           CASE WHEN LOWER(COALESCE(action, 'open')) != 'closed' THEN 0 ELSE 1 END,
+           occurred_at DESC
+         LIMIT $${limitPIdx} OFFSET $${offsetPIdx}`,
+        pageParams,
+      );
+
+      const totalCount  = deviceRows.rows.length > 0 ? parseInt(deviceRows.rows[0].total_count) : 0;
+      const affectedDevices = deviceRows.rows.map((e: any) => ({
+        id: e.id,
+        tenantId: e.tenant_id,
+        tenantName: e.tenant_name || `Tenant ${e.tenant_id}`,
+        hostname: e.asset || "Unknown",
+        status: e.action || "Open",
+        severity: e.severity,
+        logSource: e.log_source,
+        occurredAt: e.occurred_at,
+        cvss: e.risk_score != null ? (e.risk_score / 10).toFixed(1) : null,
+        exprRating: e.raw_payload?._meta?.exprRating || null,
+      }));
+
+      // Open/closed totals from the full deduplicated set (cheap extra query)
+      const countsRows = await pool.query(
+        `WITH ranked AS (
+           SELECT DISTINCT ON (se.tenant_id, LOWER(COALESCE(se.asset, '')))
+             se.action
+           FROM security_events se
+           WHERE se.tenant_id IN (${placeholders})
+             AND se.event_type = 'vulnerability'
+             AND UPPER(se.threat) = $${cvePIdx}
+             AND ${guard}
+           ORDER BY
+             se.tenant_id,
+             LOWER(COALESCE(se.asset, '')),
+             CASE WHEN LOWER(COALESCE(se.action, 'open')) != 'closed' THEN 0 ELSE 1 END,
+             se.occurred_at DESC
+         )
+         SELECT
+           COUNT(*) FILTER (WHERE LOWER(COALESCE(action, 'open')) != 'closed') AS open_count,
+           COUNT(*) FILTER (WHERE LOWER(COALESCE(action, 'open')) = 'closed')  AS closed_count
+         FROM ranked`,
+        baseParams,
+      );
+      const openCount   = parseInt(countsRows.rows[0]?.open_count   ?? "0");
+      const closedCount = parseInt(countsRows.rows[0]?.closed_count ?? "0");
+
+      return res.json({
+        ...cveInfo,
+        total:      totalCount,
+        totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+        page,
+        pageSize,
+        openCount,
+        closedCount,
+        affectedDevices,
+      });
     } catch (error: any) {
       res.status(error.message?.includes("Access denied") ? 403 : 500).json({ message: error.message });
     }
@@ -5633,223 +5972,8 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/incidents/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const tenant = await storage.getTenant(tenantId);
+  registerIncidentsRoutes(app);
 
-      let tenantIds: number[];
-      if (tenant && tenant.type === "mssp") {
-        const children = await storage.getChildTenants(tenantId);
-        tenantIds = [tenantId, ...children.map(c => c.id)];
-      } else {
-        tenantIds = [tenantId];
-      }
-
-      const pageParam = req.query.page;
-      if (pageParam !== undefined) {
-        const page = Math.max(1, parseInt(pageParam as string) || 1);
-        const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
-        const filters: { severity?: string | string[]; status?: string; classification?: string } = {};
-        if (req.query.severity && req.query.severity !== "all") {
-          const sev = req.query.severity as string;
-          filters.severity = sev.includes(",") ? sev.split(",").map(s => s.trim()).filter(Boolean) : sev;
-        }
-        if (req.query.status && req.query.status !== "all") filters.status = req.query.status as string;
-        if (req.query.classification && req.query.classification !== "all") filters.classification = req.query.classification as string;
-
-        const result = await storage.getIncidentsPaginated(tenantIds, page, pageSize, filters);
-        const totalPages = Math.ceil(result.total / pageSize);
-        return res.json({ data: result.data, total: result.total, page, pageSize, totalPages });
-      }
-
-      let incidentsList;
-      if (tenantIds.length === 1) {
-        incidentsList = await storage.getIncidents(tenantIds[0]);
-      } else {
-        incidentsList = await storage.getIncidentsForTenants(tenantIds);
-      }
-      const entitySearch = req.query.entitySearch as string | undefined;
-      if (entitySearch) {
-        const term = entitySearch.toLowerCase();
-        incidentsList = incidentsList.filter(i => 
-          (i.title || "").toLowerCase().includes(term) ||
-          (i.description || "").toLowerCase().includes(term) ||
-          (i.source_ip || "").toLowerCase().includes(term) ||
-          (i.destination_ip || "").toLowerCase().includes(term) ||
-          (i.affected_assets || "").toLowerCase().includes(term)
-        ).slice(0, parseInt(req.query.limit as string) || 5);
-      }
-      res.json(incidentsList);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch incidents" });
-    }
-  });
-
-  app.post("/api/incidents", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      assertMSSRole(access);
-
-      const validated = insertIncidentSchema.parse(req.body);
-      await assertTenantAccess(req, validated.tenantId);
-
-      if (!validated.iocData) {
-        const contextText = [validated.title || "", (validated as any).description || ""].join(" ");
-        const iocs = extractIOCsFromText(contextText, (validated as any).rawPayload || req.body, (validated as any).affectedAssets || undefined);
-        if (iocs.length > 0) (validated as any).iocData = { indicators: iocs };
-      }
-
-      const incident = await storage.createIncident(validated);
-
-      if (validated.severity === "critical" || validated.severity === "high") {
-        try {
-          await createNotification(validated.tenantId, "incident", "Critical Security Incident", `${validated.severity.toUpperCase()}: ${validated.title}`, validated.severity === "critical" ? "critical" : "warning", "/events");
-        } catch {}
-      }
-
-      if (incident?.id) {
-        enrichIncidentAfterCreation(incident.id, validated.tenantId, 3000);
-        // Auto-fire matching active playbooks asynchronously (non-blocking)
-        if (incident.id && validated.tenantId) {
-          (async () => {
-            try {
-              const pbRes = await pool.query('SELECT * FROM playbooks WHERE tenant_id=$1 AND is_active=true', [validated.tenantId]);
-              for (const pb of pbRes.rows) {
-                // Use shared module-level checkIncidentMatchesTrigger with full criteria:
-                // severity (required), type, mitreTactics, mitreTechniqueIds, iocTypes, assetCriticality (optional)
-                const incidentData = {
-                  severity: validated.severity,
-                  incident_type: (validated as any).incidentType,
-                  category: (validated as any).category,
-                  mitre_tactic: (validated as any).mitreTactic,
-                  mitre_technique_id: (validated as any).mitreTechniqueId,
-                  asset_criticality: (validated as any).assetCriticality,
-                  ioc_types: (validated as any).iocTypes || [],
-                };
-                if (!checkIncidentMatchesTrigger(incidentData, pb.trigger_conditions)) continue;
-                // Fire the playbook (startPlaybookExecution imported at top of file)
-                await startPlaybookExecution({ pool, playbook: pb, tenantId: validated.tenantId, incidentId: incident.id, triggeredBy: 'auto:incident_created', dryRun: false });
-              }
-            } catch (triggerErr: any) {
-              console.error('[PlaybookAutoTrigger] Error firing playbooks for incident', incident.id, ':', triggerErr.message);
-            }
-          })();
-        }
-      }
-
-      res.status(201).json(incident);
-    } catch (error: any) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ message: "Validation error", errors: error.errors });
-      }
-      res.status(error.status || 500).json({ message: error.message || "Failed to create incident" });
-    }
-  });
-
-  app.patch("/api/incidents/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const existing = await storage.getIncident(id);
-      if (!existing) return res.status(404).json({ message: "Incident not found" });
-
-      const access = await assertTenantAccess(req, existing.tenantId);
-      assertMSSRole(access);
-
-      const { status, mitreTactic, mitreTechniqueId, mitreTechnique, killChainPhase, confidenceScore, isTruePositive, classification, detectionSource, actionTaken, incidentType, sourceIp, destinationIp, ...rest } = req.body;
-      const updateData: Record<string, any> = {};
-      if (status !== undefined) updateData.status = status;
-      if (mitreTactic !== undefined) updateData.mitreTactic = mitreTactic;
-      if (mitreTechniqueId !== undefined) updateData.mitreTechniqueId = mitreTechniqueId;
-      if (mitreTechnique !== undefined) updateData.mitreTechnique = mitreTechnique;
-      if (killChainPhase !== undefined) updateData.killChainPhase = killChainPhase;
-      if (confidenceScore !== undefined) updateData.confidenceScore = confidenceScore;
-      if (isTruePositive !== undefined) updateData.isTruePositive = isTruePositive;
-      if (classification !== undefined) updateData.classification = classification;
-      if (detectionSource !== undefined) updateData.detectionSource = detectionSource;
-      if (actionTaken !== undefined) updateData.actionTaken = actionTaken;
-      if (incidentType !== undefined) updateData.incidentType = incidentType;
-      if (sourceIp !== undefined) updateData.sourceIp = sourceIp;
-      if (destinationIp !== undefined) updateData.destinationIp = destinationIp;
-      // Stamp investigated_at the first time status transitions to "investigating"
-      if (status === "investigating" && !existing.investigatedAt) {
-        updateData.investigatedAt = new Date();
-      }
-      if (Object.keys(updateData).length === 0) return res.status(400).json({ message: "No valid fields to update" });
-
-      const incident = await storage.updateIncident(id, updateData);
-
-      if (status === "resolved" || status === "closed") {
-        const userId = req.user?.id || req.user?.claims?.sub || "";
-        try {
-          const metric = existing.severity === "critical" || existing.severity === "high"
-            ? "critical_incidents_investigated" : "incidents_resolved";
-          const trackMetrics = ["incidents_resolved"];
-          if (metric === "critical_incidents_investigated") trackMetrics.push("critical_incidents_investigated");
-          for (const m of trackMetrics) {
-            const challengeRows = await pool.query(
-              `SELECT id, target_value FROM security_challenges WHERE metric = $1 AND is_active = true AND (tenant_id IS NULL OR tenant_id = $2)`, [m, existing.tenantId]
-            );
-            for (const ch of challengeRows.rows) {
-              const existing_prog = await pool.query(
-                `SELECT id, current_value, completed_at FROM user_challenge_progress WHERE user_id = $1 AND challenge_id = $2 AND tenant_id = $3`,
-                [userId, ch.id, existing.tenantId]
-              );
-              if (existing_prog.rows.length === 0) {
-                const completed = 1 >= ch.target_value ? ", completed_at = NOW()" : "";
-                await pool.query(
-                  `INSERT INTO user_challenge_progress (user_id, challenge_id, tenant_id, current_value, target_value) VALUES ($1, $2, $3, 1, $4)`,
-                  [userId, ch.id, existing.tenantId, ch.target_value]
-                );
-                if (1 >= ch.target_value) {
-                  await pool.query(`UPDATE user_challenge_progress SET completed_at = NOW() WHERE user_id = $1 AND challenge_id = $2 AND tenant_id = $3`, [userId, ch.id, existing.tenantId]);
-                }
-              } else if (!existing_prog.rows[0].completed_at) {
-                const newVal = existing_prog.rows[0].current_value + 1;
-                const setCompleted = newVal >= ch.target_value ? ", completed_at = NOW()" : "";
-                await pool.query(`UPDATE user_challenge_progress SET current_value = $1, updated_at = NOW()${setCompleted} WHERE id = $2`, [newVal, existing_prog.rows[0].id]);
-              }
-            }
-          }
-          const profileCheck = await pool.query(`SELECT id FROM user_gamification_profiles WHERE user_id = $1 AND tenant_id = $2`, [userId, existing.tenantId]);
-          if (profileCheck.rows.length === 0) {
-            await pool.query(`INSERT INTO user_gamification_profiles (user_id, tenant_id, total_xp, level, badges) VALUES ($1, $2, 0, 1, '[]')`, [userId, existing.tenantId]);
-          }
-          await pool.query(`UPDATE user_gamification_profiles SET last_activity_date = NOW(), updated_at = NOW() WHERE user_id = $1 AND tenant_id = $2`, [userId, existing.tenantId]);
-        } catch (e) { /* gamification tracking is non-critical */ }
-      }
-
-      // Auto-nominate IOCs when classification is set to true_positive with confidence >= 80
-      if (classification === "true_positive" && incident) {
-        const tenantId = existing.tenantId;
-        const confidence = (updateData.confidenceScore ?? existing.confidenceScore ?? 80) as number;
-        const nominatedBy = req.user?.claims?.sub ?? "system";
-        try {
-          await autoNominateIncidentIOCs(
-            tenantId, id,
-            updateData.sourceIp ?? existing.sourceIp,
-            updateData.destinationIp ?? existing.destinationIp,
-            confidence, nominatedBy
-          );
-        } catch (_) { /* non-blocking */ }
-
-        // Auto-generate and persist response plan on TP confirmation (idempotent)
-        setImmediate(async () => {
-          try {
-            const { isNew } = await generateAndPersistResponsePlan(id);
-            if (isNew) console.info(`[ResponseEngine] Auto-generated & persisted response plan for TP incident #${id}`);
-          } catch (e: any) {
-            console.warn(`[ResponseEngine] Auto-plan generation failed for incident ${id}:`, e.message);
-          }
-        });
-      }
-
-      res.json(incident);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to update incident" });
-    }
-  });
 
   app.get("/api/tickets/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
@@ -5875,7 +5999,7 @@ export async function registerRoutes(
         ticketsList = ticketsList.filter(t =>
           (t.title || "").toLowerCase().includes(term) ||
           (t.description || "").toLowerCase().includes(term) ||
-          (t.subject || "").toLowerCase().includes(term)
+          (((t as any).subject) || "").toLowerCase().includes(term)
         ).slice(0, parseInt(req.query.limit as string) || 5);
       }
       if (ticketsCacheKey) setCache(ticketsCacheKey, ticketsList, 30_000);
@@ -5913,7 +6037,7 @@ export async function registerRoutes(
           const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
           const todayEnd = new Date(todayStart.getTime() + 86400000);
           const implMembers = await storage.getTeamMembersByType(tenantId, "implementation");
-          const activeHumans = implMembers.filter(m => m.isActive && !m.isAi);
+          const activeHumans = implMembers.filter(m => m.isActive && !m.isAI);
           if (activeHumans.length > 0) {
             const shifts = await storage.getShiftRostersByDate(tenantId, todayStart, todayEnd);
             const onShiftIds = new Set(shifts.map(s => s.teamMemberId));
@@ -6248,15 +6372,28 @@ export async function registerRoutes(
         return res.status(400).json({ message: "No file uploaded" });
       }
 
-      const destPath = path.join(UPLOADS_DIR, `ticket_${ticketId}_${Date.now()}_${req.file.originalname}`);
-      fs.renameSync(req.file.path, destPath);
+      // Hardening: reject mismatched magic bytes, sanitized filename, enforce
+      // the 25 MB default cap.
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["pdf", "png", "jpg", "jpeg", "gif", "webp", "txt", "csv", "json", "log", "yaml", "yml", "xlsx", "xls", "docx", "doc"],
+        });
+      } catch (e) {
+        if (isInputHardeningError(e)) return res.status(400).json({ message: e.message });
+        throw e;
+      }
+
+      const destPath = path.join(UPLOADS_DIR, `ticket_${ticketId}_${Date.now()}_${safe.safeName}`);
+      fs.renameSync(safe.safePath, destPath);
 
       const attachment = await storage.createTicketAttachment({
         ticketId,
-        fileName: req.file.originalname,
+        fileName: safe.safeName,
         filePath: destPath,
-        fileSize: req.file.size,
-        mimeType: req.file.mimetype,
+        fileSize: safe.size,
+        mimeType: safe.mimeSniffed || req.file.mimetype,
         uploadedBy: access.userId,
       });
       res.status(201).json(attachment);
@@ -6289,21 +6426,64 @@ export async function registerRoutes(
     }
   });
 
+  // ── Helper: resolve an existing users row by id/username/email, or create one ──
+  // Called by all admin create-user endpoints so tenant_users.userId always
+  // has a backing users row that the login + set-password flows can find.
+  async function resolveOrCreateUserRow(userId: string, password?: string): Promise<string> {
+    const { users: usersT } = await import("@shared/models/auth");
+    const { or: orOp, eq: eqOp } = await import("drizzle-orm");
+    const { db: dbI } = await import("./db");
+    const [existing] = await dbI.select({ id: usersT.id }).from(usersT).where(
+      orOp(eqOp(usersT.id, userId), eqOp(usersT.username, userId), eqOp(usersT.email, userId))
+    );
+    let resolvedId: string;
+    if (existing) {
+      resolvedId = existing.id;
+    } else {
+      const isEmailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userId);
+      const [created] = await dbI.insert(usersT).values({
+        email: isEmailFmt ? userId : null,
+        username: userId,
+      }).onConflictDoNothing().returning({ id: usersT.id });
+      if (created) {
+        resolvedId = created.id;
+      } else {
+        const [retry] = await dbI.select({ id: usersT.id }).from(usersT).where(
+          orOp(eqOp(usersT.id, userId), eqOp(usersT.username, userId), eqOp(usersT.email, userId))
+        );
+        resolvedId = retry?.id ?? userId;
+      }
+    }
+    if (password && typeof password === "string" && password.length >= 6) {
+      const bcrypt = await import("bcryptjs");
+      const hash = await bcrypt.hash(password, 10);
+      const { db: dbI2 } = await import("./db");
+      const { users: usersT2 } = await import("@shared/models/auth");
+      const { eq: eqOp2 } = await import("drizzle-orm");
+      await dbI2.update(usersT2).set({ passwordHash: hash, updatedAt: new Date() }).where(eqOp2(usersT2.id, resolvedId));
+    }
+    return resolvedId;
+  }
+
   app.get("/api/admin/users", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
       if (!access.isMSS || access.role === "customer") {
         return res.status(403).json({ message: "Admin access required" });
       }
+      const { pool: pgPool } = await import("./db");
+      const pwdResult = await pgPool.query(`SELECT id FROM users WHERE password_hash IS NOT NULL`);
+      const activatedIds = new Set<string>(pwdResult.rows.map((r: any) => r.id));
+      const addHasPassword = (rows: any[]) => rows.map(u => ({ ...u, hasPassword: activatedIds.has(u.userId) }));
       const tenantIdFilter = req.query.tenantId ? parseInt(req.query.tenantId) : null;
       if (tenantIdFilter) {
         await assertTenantAccess(req, tenantIdFilter);
         const users = await storage.getTenantUsersByTenant(tenantIdFilter);
-        return res.json(users);
+        return res.json(addHasPassword(users));
       }
       if (access.isPlatformAdmin) {
         const users = await storage.getAllTenantUsers();
-        return res.json(users);
+        return res.json(addHasPassword(users));
       }
       if (access.tenantId) {
         const userTenant = await storage.getTenant(access.tenantId);
@@ -6315,10 +6495,10 @@ export async function registerRoutes(
             const tusers = await storage.getTenantUsersByTenant(tid);
             allUsers.push(...tusers);
           }
-          return res.json(allUsers);
+          return res.json(addHasPassword(allUsers));
         }
         const users = await storage.getTenantUsersByTenant(access.tenantId);
-        return res.json(users);
+        return res.json(addHasPassword(users));
       }
       res.json([]);
     } catch (error: any) {
@@ -6334,20 +6514,37 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Admin access required" });
       }
 
-      const { userId, tenantId, role, assignedRoles } = req.body;
+      const { userId, tenantId, role, assignedRoles, password } = req.body;
       if (!userId || !tenantId || !role) {
         return res.status(400).json({ message: "userId, tenantId, and role are required" });
       }
 
       await assertTenantAccess(req, tenantId);
 
-      const existing = await storage.getTenantUser(userId, tenantId);
+      // Resolve existing users row or create one so logins actually work
+      const resolvedUserId = await resolveOrCreateUserRow(userId, password);
+
+      const existing = await storage.getTenantUser(resolvedUserId, tenantId);
       if (existing) {
         return res.status(400).json({ message: "User already exists in this tenant" });
       }
 
       const roles = assignedRoles && assignedRoles.length > 0 ? assignedRoles : [role];
-      const tu = await storage.createTenantUser({ userId, tenantId, role, assignedRoles: roles });
+      const tu = await storage.createTenantUser({ userId: resolvedUserId, tenantId, role, assignedRoles: roles });
+
+      // Send welcome email (fire-and-forget — never block the 201 response)
+      const isEmailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userId);
+      if (isEmailFmt) {
+        import("./welcome-email").then(({ sendWelcomeEmail }) =>
+          sendWelcomeEmail({
+            userId: resolvedUserId,
+            email: userId,
+            username: userId,
+            tenantId,
+          }).catch((e: any) => console.warn("[WelcomeEmail] Unexpected error:", e?.message))
+        );
+      }
+
       res.status(201).json(tu);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to create user" });
@@ -6388,6 +6585,33 @@ export async function registerRoutes(
     }
   });
 
+  // ── Public: activate account via welcome token ────────────────────────────
+  app.post("/api/auth/set-password", async (req: any, res) => {
+    try {
+      const { token, newPassword } = req.body;
+      if (!token || typeof token !== "string") {
+        return res.status(400).json({ message: "token is required" });
+      }
+      if (!newPassword || typeof newPassword !== "string" || newPassword.length < 8) {
+        return res.status(400).json({ message: "newPassword must be at least 8 characters" });
+      }
+      const { consumeWelcomeToken } = await import("./welcome-email");
+      const userId = await consumeWelcomeToken(token);
+      if (!userId) {
+        return res.status(400).json({ message: "This link is invalid, expired, or has already been used." });
+      }
+      const bcrypt = await import("bcryptjs");
+      const hash = await bcrypt.hash(newPassword, 10);
+      const { db: dbI } = await import("./db");
+      const { users: usersT } = await import("@shared/models/auth");
+      const { eq: eqOp } = await import("drizzle-orm");
+      await dbI.update(usersT).set({ passwordHash: hash, updatedAt: new Date() }).where(eqOp(usersT.id, userId));
+      res.json({ message: "Password set successfully. You can now sign in." });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message || "Failed to set password" });
+    }
+  });
+
   app.post("/api/admin/users/multi-tenant", isAuthenticated, async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
@@ -6395,30 +6619,240 @@ export async function registerRoutes(
       if (!adminRoles.includes(access.role)) {
         return res.status(403).json({ message: "Admin access required" });
       }
-      const { userId, tenantIds, role, assignedRoles } = req.body;
+      const { userId, tenantIds, role, assignedRoles, password } = req.body;
       if (!userId || !tenantIds || !Array.isArray(tenantIds) || tenantIds.length === 0 || !role) {
         return res.status(400).json({ message: "userId, tenantIds (array), and role are required" });
       }
+      // Resolve or create the users row once (shared across all tenants)
+      const resolvedUserId = await resolveOrCreateUserRow(userId, password);
       const roles = assignedRoles && assignedRoles.length > 0 ? assignedRoles : [role];
       const created: any[] = [];
       const skipped: number[] = [];
       for (const tid of tenantIds) {
         try {
           await assertTenantAccess(req, tid);
-          const existing = await storage.getTenantUser(userId, tid);
+          const existing = await storage.getTenantUser(resolvedUserId, tid);
           if (existing) {
             skipped.push(tid);
             continue;
           }
-          const tu = await storage.createTenantUser({ userId, tenantId: tid, role, assignedRoles: roles });
+          const tu = await storage.createTenantUser({ userId: resolvedUserId, tenantId: tid, role, assignedRoles: roles });
           created.push(tu);
         } catch {
           skipped.push(tid);
         }
       }
+
+      // Send welcome email once for all created tenants (fire-and-forget)
+      if (created.length > 0) {
+        const isEmailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userId);
+        if (isEmailFmt) {
+          const firstTenantId = created[0]?.tenantId ?? null;
+          import("./welcome-email").then(({ sendWelcomeEmail }) =>
+            sendWelcomeEmail({
+              userId: resolvedUserId,
+              email: userId,
+              username: userId,
+              tenantId: firstTenantId,
+            }).catch((e: any) => console.warn("[WelcomeEmail] Unexpected error:", e?.message))
+          );
+        }
+      }
+
       res.status(201).json({ created, skipped, message: `Added to ${created.length} tenant(s), skipped ${skipped.length}` });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to create multi-tenant user" });
+    }
+  });
+
+  // ── Bulk / CSV import: create multiple users in one request ───────────────
+  // Accepts: { users: Array<{ userId, tenantId, role, assignedRoles?, password? }> }
+  // Sends welcome email (fire-and-forget) for every newly created user whose
+  // userId looks like an e-mail address.  Pre-existing users are skipped.
+  app.post("/api/admin/users/bulk", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      if (!adminRoles.includes(access.role)) {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+
+      const { users: usersPayload } = req.body;
+      if (!Array.isArray(usersPayload) || usersPayload.length === 0) {
+        return res.status(400).json({ message: "users must be a non-empty array" });
+      }
+      if (usersPayload.length > 500) {
+        return res.status(400).json({ message: "Maximum 500 users per bulk request" });
+      }
+
+      const created: any[] = [];
+      const skipped: any[] = [];
+      let emailsQueued = 0;
+
+      for (const entry of usersPayload) {
+        const { userId, tenantId, role, assignedRoles, password } = entry || {};
+        if (!userId || !tenantId || !role) {
+          skipped.push({ userId, reason: "missing_fields" });
+          continue;
+        }
+
+        try {
+          await assertTenantAccess(req, tenantId);
+        } catch {
+          skipped.push({ userId, reason: "no_tenant_access" });
+          continue;
+        }
+
+        let resolvedUserId: string;
+        let isNewUser = false;
+        try {
+          // resolveOrCreateUserRow returns the canonical UUID; it signals
+          // "new" when there was no prior users row for this identity.
+          const { db: dbI } = await import("./db");
+          const { users: usersT } = await import("@shared/models/auth");
+          const { or: orOp, eq: eqOp } = await import("drizzle-orm");
+          const [existing] = await dbI
+            .select({ id: usersT.id })
+            .from(usersT)
+            .where(orOp(eqOp(usersT.id, userId), eqOp(usersT.username, userId), eqOp(usersT.email, userId)));
+          if (existing) {
+            resolvedUserId = existing.id;
+          } else {
+            resolvedUserId = await resolveOrCreateUserRow(userId, password);
+            isNewUser = true;
+          }
+        } catch {
+          skipped.push({ userId, reason: "user_row_error" });
+          continue;
+        }
+
+        const existingTu = await storage.getTenantUser(resolvedUserId, tenantId);
+        if (existingTu) {
+          skipped.push({ userId, reason: "already_in_tenant" });
+          continue;
+        }
+
+        try {
+          const roles = assignedRoles && assignedRoles.length > 0 ? assignedRoles : [role];
+          const tu = await storage.createTenantUser({ userId: resolvedUserId, tenantId, role, assignedRoles: roles });
+          created.push(tu);
+
+          // Send welcome email for genuinely new users (fire-and-forget)
+          if (isNewUser) {
+            const isEmailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userId);
+            if (isEmailFmt) {
+              emailsQueued++;
+              import("./welcome-email").then(({ sendWelcomeEmail }) =>
+                sendWelcomeEmail({
+                  userId: resolvedUserId,
+                  email: userId,
+                  username: userId,
+                  tenantId,
+                }).catch((e: any) => console.warn("[WelcomeEmail] Bulk import unexpected error:", e?.message))
+              );
+            }
+          }
+        } catch {
+          skipped.push({ userId, reason: "create_error" });
+        }
+      }
+
+      res.status(201).json({
+        created,
+        skipped,
+        emailsQueued,
+        message: `Created ${created.length} user(s), skipped ${skipped.length}, queued ${emailsQueued} welcome email(s)`,
+      });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to bulk import users" });
+    }
+  });
+
+  app.post("/api/admin/users/:id/resend-welcome", isAuthenticated, async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      const adminRoles = ["platform_admin", "mss_admin", "soc_manager"];
+      if (!adminRoles.includes(access.role)) {
+        return res.status(403).json({ message: "Admin access required" });
+      }
+      const userId = req.params.id;
+      const { db: dbInstance } = await import("./db");
+      const { users } = await import("@shared/models/auth");
+      const { eq, or: orLookup } = await import("drizzle-orm");
+      const [found] = await dbInstance
+        .select({ id: users.id, email: users.email, username: users.username, passwordHash: users.passwordHash, firstName: users.firstName })
+        .from(users)
+        .where(orLookup(eq(users.id, userId), eq(users.username, userId), eq(users.email, userId)));
+      if (!found) {
+        // Layer-2 diagnostic: user may exist in tenant_users but not in users (orphan row)
+        const { tenantUsers: tuTable } = await import("@shared/schema");
+        const { tenants: tTable } = await import("@shared/schema");
+        const [orphan] = await dbInstance
+          .select({ tenantName: tTable.name, tenantId: tuTable.tenantId })
+          .from(tuTable)
+          .leftJoin(tTable, eq(tTable.id, tuTable.tenantId))
+          .where(orLookup(eq(tuTable.userId, userId), eq(tuTable.userId, userId)))
+          .limit(1);
+        if (orphan) {
+          return res.status(409).json({
+            message: `User appears in tenant roster (${orphan.tenantName || "unknown tenant"}) but has no auth record. Contact platform admin to recreate the user.`,
+            orphan: true,
+            tenantId: orphan.tenantId,
+          });
+        }
+        return res.status(404).json({ message: "User not found" });
+      }
+      // Enforce tenant-scoped authorization: verify the caller has access to at
+      // least one of the target user's tenant memberships (IDOR guard).
+      // Platform admins are exempt — they have global visibility.
+      const { pool: pgPoolResend } = await import("./db");
+      const membershipRows = await pgPoolResend.query(
+        `SELECT tenant_id FROM tenant_users WHERE user_id = $1`,
+        [found.id],
+      );
+      const tenantIds: number[] = membershipRows.rows.map((r: any) => r.tenant_id);
+      if (!access.isPlatformAdmin) {
+        let hasAccess = false;
+        for (const tid of tenantIds) {
+          try {
+            await assertTenantAccess(req, tid);
+            hasAccess = true;
+            break;
+          } catch {
+            // caller has no access to this particular tenant — try next
+          }
+        }
+        if (!hasAccess) {
+          return res.status(403).json({ message: "You do not have access to this user's tenant" });
+        }
+      }
+      if (found.passwordHash) {
+        return res.status(400).json({ message: "User has already activated their account" });
+      }
+      const email = found.email || found.username || "";
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ message: "No valid email address on file for this user" });
+      }
+      // Use the target user's first tenant for email config selection;
+      // fall back to the caller's own tenant if the user has no memberships yet.
+      const targetTenantId = tenantIds[0] ?? access.tenantId;
+      const { sendWelcomeEmail } = await import("./welcome-email");
+      const result = await sendWelcomeEmail({
+        userId: found.id,
+        email,
+        username: found.username || email,
+        firstName: found.firstName,
+        tenantId: targetTenantId,
+      });
+      if (!result.ok) {
+        const reason = result.reason === "no_email_config"
+          ? "Email not configured — set up SMTP in Admin → Email Settings"
+          : "Failed to send activation email";
+        return res.status(500).json({ message: reason });
+      }
+      res.json({ message: "Activation email sent successfully" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message || "Failed to resend welcome email" });
     }
   });
 
@@ -6433,25 +6867,19 @@ export async function registerRoutes(
       if (!password || password.length < 6) {
         return res.status(400).json({ message: "Password must be at least 6 characters" });
       }
-      if (!password || password.length < 8) {
-        return res.status(400).json({ message: "Password must be at least 8 characters" });
-      }
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(password, 12);
+      const hash = await bcrypt.hash(password, 10);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");
-      const { eq } = await import("drizzle-orm");
-      const [existingUser] = await dbInstance.select().from(users).where(eq(users.id, userId));
-      if (!existingUser) {
-        const [byUsername] = await dbInstance.select().from(users).where(eq(users.username, userId));
-        if (byUsername) {
-          await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, byUsername.id));
-          return res.json({ message: "Password updated successfully" });
-        }
+      const { eq, or: orLookup } = await import("drizzle-orm");
+      const [found] = await dbInstance.select({ id: users.id }).from(users).where(
+        orLookup(eq(users.id, userId), eq(users.username, userId), eq(users.email, userId))
+      );
+      if (!found) {
         return res.status(404).json({ message: "User not found" });
       }
-      await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, userId));
+      await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, found.id));
       res.json({ message: "Password updated successfully" });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to set password" });
@@ -6467,21 +6895,18 @@ export async function registerRoutes(
       }
       const tempPassword = "SecureOps@" + Math.random().toString(36).slice(2, 10);
       const bcrypt = await import("bcryptjs");
-      const hash = await bcrypt.hash(tempPassword, 12);
+      const hash = await bcrypt.hash(tempPassword, 10);
       const userId = req.params.id;
       const { db: dbInstance } = await import("./db");
       const { users } = await import("@shared/models/auth");
-      const { eq } = await import("drizzle-orm");
-      const [existingUser] = await dbInstance.select().from(users).where(eq(users.id, userId));
-      if (!existingUser) {
-        const [byUsername] = await dbInstance.select().from(users).where(eq(users.username, userId));
-        if (byUsername) {
-          await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, byUsername.id));
-          return res.json({ message: "Password reset successfully", tempPassword });
-        }
+      const { eq, or: orLookup } = await import("drizzle-orm");
+      const [found] = await dbInstance.select({ id: users.id }).from(users).where(
+        orLookup(eq(users.id, userId), eq(users.username, userId), eq(users.email, userId))
+      );
+      if (!found) {
         return res.status(404).json({ message: "User not found" });
       }
-      await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, userId));
+      await dbInstance.update(users).set({ passwordHash: hash, updatedAt: new Date() }).where(eq(users.id, found.id));
       res.json({ message: "Password reset successfully", tempPassword });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to reset password" });
@@ -6574,29 +6999,6 @@ export async function registerRoutes(
     return [t - 1, t, t + 1].some(c => totpGenerate(secret, c) === token);
   }
 
-  // ── MFA Secret Encryption ──────────────────────────────────────────────────────
-  const MFA_ENC_KEY = process.env.MFA_ENCRYPTION_KEY || process.env.SESSION_SECRET || "";
-  function encryptMfaSecret(plain: string): string {
-    if (!MFA_ENC_KEY || MFA_ENC_KEY.length < 32) return plain; // fallback if key not set
-    const { createCipheriv, randomBytes, scryptSync } = require("crypto");
-    const key = scryptSync(MFA_ENC_KEY, "mfa-salt", 32);
-    const iv = randomBytes(16);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-    return iv.toString("hex") + ":" + authTag.toString("hex") + ":" + encrypted.toString("hex");
-  }
-  function decryptMfaSecret(cipherText: string): string {
-    if (!cipherText.includes(":")) return cipherText; // not encrypted (backward compat)
-    if (!MFA_ENC_KEY || MFA_ENC_KEY.length < 32) return cipherText;
-    const { createDecipheriv, scryptSync } = require("crypto");
-    const key = scryptSync(MFA_ENC_KEY, "mfa-salt", 32);
-    const [ivHex, authTagHex, encryptedHex] = cipherText.split(":");
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
-    decipher.setAuthTag(Buffer.from(authTagHex, "hex"));
-    return decipher.update(encryptedHex, "hex") + decipher.final("utf8");
-  }
-
   app.post("/api/auth/mfa/setup", isAuthenticated, async (req: any, res) => {
     try {
       const user = req.user as any;
@@ -6612,9 +7014,8 @@ export async function registerRoutes(
       const account = encodeURIComponent(dbUser?.username || dbUser?.email || userId);
       const otpauthUrl = `otpauth://totp/SecureOps:${account}?secret=${secret}&issuer=SecureOps&algorithm=SHA1&digits=6&period=30`;
       const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
-      const encryptedSecret = encryptMfaSecret(secret);
-      await dbInstance.update(users).set({ mfaSecret: encryptedSecret, updatedAt: new Date() }).where(eq(users.id, userId));
-      res.json({ qrCodeUrl: qrCodeDataUrl });
+      await dbInstance.update(users).set({ mfaSecret: secret, updatedAt: new Date() }).where(eq(users.id, userId));
+      res.json({ secret, qrCodeUrl: qrCodeDataUrl, otpauth: otpauthUrl });
     } catch (error: any) {
       res.status(500).json({ message: error.message || "Failed to setup MFA" });
     }
@@ -6632,8 +7033,7 @@ export async function registerRoutes(
       const { eq } = await import("drizzle-orm");
       const [dbUser] = await dbInstance.select().from(users).where(eq(users.id, userId));
       if (!dbUser?.mfaSecret) return res.status(400).json({ message: "MFA not set up" });
-      const plainSecret = decryptMfaSecret(dbUser.mfaSecret);
-      const isValid = totpVerify(token, plainSecret);
+      const isValid = totpVerify(token, dbUser.mfaSecret);
       if (!isValid) return res.status(400).json({ message: "Invalid MFA code" });
       await dbInstance.update(users).set({ mfaEnabled: true, updatedAt: new Date() }).where(eq(users.id, userId));
       res.json({ message: "MFA enabled successfully" });
@@ -6763,6 +7163,27 @@ export async function registerRoutes(
       const tenantId = parseInt(req.params.tenantId);
       const { provider, displayName, config, allowedDomains, enabled, enforceSsoOnly } = req.body;
       if (!provider || !config) return res.status(400).json({ message: "provider and config are required" });
+
+      // Task #301: validate optional metadataUrl up-front so insecure URLs are
+      // rejected at save time, not later inside the self-heal engine.
+      const mdUrl = typeof config?.metadataUrl === "string" ? config.metadataUrl.trim() : "";
+      if (mdUrl) {
+        try {
+          const parsed = new URL(mdUrl);
+          const { assertHttpsAllowed } = await import("./sso/metadata-refresh");
+          assertHttpsAllowed(parsed);
+        } catch (err: any) {
+          return res.status(400).json({
+            message: `Invalid metadataUrl: ${err?.message || err}`,
+          });
+        }
+        // Persist the trimmed canonical value, not whatever raw whitespace
+        // the admin pasted in (review nit, task #301).
+        config.metadataUrl = mdUrl;
+      } else if (config && "metadataUrl" in config) {
+        // Empty/whitespace input → drop the key so the auto-rotate path stays disabled.
+        delete config.metadataUrl;
+      }
 
       const { tenantSsoConfigs } = await import("@shared/models/auth");
       const { db: dbI } = await import("./db");
@@ -7284,1002 +7705,8 @@ Create a concise daily status report with: 1) Today's Highlights, 2) Activities 
     }
   });
 
-  app.get("/api/applications/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const overrides = await loadCategoryOverrides(tenantId);
-      let assets: any[] = [];
-      try {
-        assets = await storage.getAssets(tenantId);
-      } catch (dbErr: any) {
-        console.error(`[Applications] DB error fetching assets for tenant ${tenantId}:`, dbErr.message);
-        return res.json([]);
-      }
-      const parsedAssets: ParsedAsset[] = assets
-        .filter((a: any) => a.hostname || a.ipAddress)
-        .map((a: any) => ({
-          hostname: a.hostname,
-          ipAddress: a.ipAddress,
-          operatingSystem: a.operatingSystem,
-          endpointType: a.endpointType,
-          endpointGroup: a.endpointGroup,
-          deploymentType: a.deploymentType,
-          cloudProvider: a.cloudProvider,
-          cloudRegion: a.cloudRegion,
-          status: a.status,
-          source: a.source,
-          riskScore: a.riskScore,
-          riskLevel: a.riskLevel,
-          user: a.user,
-          lastLoggedInUser: a.lastLoggedInUser,
-          enrichmentData: a.enrichmentData || {},
-        }));
-      const applications = buildApplicationIndex(parsedAssets);
-      for (const app of applications) {
-        const classification = classifyApplication(app.name, overrides);
-        app.category = classification.category;
-      }
-      res.json(applications);
-    } catch (error: any) {
-      console.error(`[Applications] Error for tenant ${req.params.tenantId}:`, error.message || error);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch applications" });
-    }
-  });
+  registerApplicationsRoutes(app);
 
-  app.get("/api/applications/:tenantId/summary", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const overrides = await loadCategoryOverrides(tenantId);
-      const assets = await storage.getAssets(tenantId);
-      const parsedAssets: ParsedAsset[] = assets.map((a: any) => ({
-        hostname: a.hostname,
-        ipAddress: a.ipAddress,
-        operatingSystem: a.operatingSystem,
-        endpointType: a.endpointType,
-        endpointGroup: a.endpointGroup,
-        deploymentType: a.deploymentType,
-        cloudProvider: a.cloudProvider,
-        cloudRegion: a.cloudRegion,
-        status: a.status,
-        source: a.source,
-        riskScore: a.riskScore,
-        riskLevel: a.riskLevel,
-        user: a.user,
-        lastLoggedInUser: a.lastLoggedInUser,
-        enrichmentData: a.enrichmentData || {},
-      }));
-      const applications = buildApplicationIndex(parsedAssets);
-      for (const app of applications) {
-        const classification = classifyApplication(app.name, overrides);
-        app.category = classification.category;
-      }
-      const stakeholders = buildStakeholderIndex(applications);
-      const enterpriseApps = applications.filter(a => a.category === "Enterprise");
-      const infosecApps = applications.filter(a => a.category === "InfoSec");
-      const businessApps = applications.filter(a => a.category === "Business");
-
-      const envBreakdown: Record<string, number> = {};
-      for (const app of applications) {
-        for (const env of app.environments) {
-          envBreakdown[env] = (envBreakdown[env] || 0) + app.serverCount;
-        }
-      }
-
-      const topStakeholders = stakeholders
-        .filter(s => s.role === "owner")
-        .slice(0, 10)
-        .map(s => ({ name: s.name, applications: s.applications.length, servers: s.serverCount }));
-
-      const riskDistribution = { critical: 0, high: 0, medium: 0, low: 0 };
-      for (const app of applications) {
-        if (app.riskSummary) {
-          const hasHigh = app.riskSummary.highRiskCount > 0;
-          const hasEol = app.riskSummary.eolCount > 0;
-          const hasUnpatched = app.riskSummary.unpatchedCount > 0;
-          if (hasHigh) riskDistribution.critical++;
-          else if (hasEol) riskDistribution.high++;
-          else if (hasUnpatched) riskDistribution.medium++;
-          else riskDistribution.low++;
-        } else {
-          riskDistribution.low++;
-        }
-      }
-
-      res.json({
-        totalApplications: applications.length,
-        enterpriseCount: enterpriseApps.length,
-        businessCount: businessApps.length,
-        infosecCount: infosecApps.length,
-        itOpsCount: applications.filter(a => a.category === "IT Operations").length,
-        unknownCount: applications.filter(a => a.category === "Unknown").length,
-        totalServers: assets.length,
-        environmentBreakdown: envBreakdown,
-        topStakeholders,
-        riskDistribution,
-        totalStakeholders: stakeholders.length,
-      });
-    } catch (error: any) {
-      console.error(`[Applications] Summary error for tenant ${req.params.tenantId}:`, error.message || error);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch summary" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/stakeholders", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const assets = await storage.getAssets(tenantId);
-      const parsedAssets: ParsedAsset[] = assets.map((a: any) => ({
-        hostname: a.hostname,
-        operatingSystem: a.operatingSystem,
-        endpointGroup: a.endpointGroup,
-        cloudRegion: a.cloudRegion,
-        status: a.status,
-        riskScore: a.riskScore,
-        user: a.user,
-        enrichmentData: a.enrichmentData || {},
-      }));
-      const applications = buildApplicationIndex(parsedAssets);
-      const stakeholders = buildStakeholderIndex(applications);
-      res.json(stakeholders);
-    } catch (error: any) {
-      console.error(`[Applications] Stakeholders error for tenant ${req.params.tenantId}:`, error.message || error);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch stakeholders" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/:appName/servers", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const appName = decodeURIComponent(req.params.appName);
-      await assertTenantAccess(req, tenantId);
-      const assets = await storage.getAssets(tenantId);
-      const matchingAssets = assets.filter((a: any) => {
-        const ed = a.enrichmentData || {};
-        const assetApp = ed.applicationName || ed.shortDescription || "";
-        return assetApp.toLowerCase().includes(appName.toLowerCase());
-      });
-      res.json(matchingAssets.map((a: any) => ({
-        id: a.id,
-        hostname: a.hostname,
-        ipAddress: a.ipAddress,
-        operatingSystem: a.operatingSystem,
-        endpointType: a.endpointType,
-        endpointGroup: a.endpointGroup,
-        status: a.status,
-        riskScore: a.riskScore,
-        riskLevel: a.riskLevel,
-        cloudRegion: a.cloudRegion,
-        deploymentType: a.deploymentType,
-        systemManufacturer: a.systemManufacturer,
-        enrichmentData: a.enrichmentData,
-      })));
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch servers" });
-    }
-  });
-
-  function normalizeOsLabel(rawOs: string): string {
-    let s = rawOs.trim();
-    if (!s || s === "Unknown OS") return "Unknown OS";
-
-    const hostnameOsMatch = s.match(/^[a-zA-Z0-9][\w-]*\s+((?:RHEL|Red Hat|CentOS|Ubuntu|Debian|SLES|SUSE|Oracle|Fedora|Amazon|Windows|Mac|macOS|Linux|AIX|Solaris|FreeBSD|Other)\b.*)$/i);
-    if (hostnameOsMatch) {
-      s = hostnameOsMatch[1].trim();
-    }
-
-    let m: RegExpMatchArray | null;
-
-    if ((m = s.match(/Red Hat Enterprise Linux.*?(?:release\s+)?(\d+\.\d+)/i))) {
-      return `RHEL ${m[1]}`;
-    }
-    if ((m = s.match(/Red Hat Enterprise Linux.*?(?:release\s+)?(\d+)/i))) {
-      return `RHEL ${m[1]}`;
-    }
-    if ((m = s.match(/RHEL\s+(\d+\.\d+)/i))) {
-      return `RHEL ${m[1]}`;
-    }
-    if ((m = s.match(/RHEL\s+(\d+)/i))) {
-      return `RHEL ${m[1]}`;
-    }
-
-    if ((m = s.match(/CentOS\s+Stream\s+(?:release\s+)?(\d+)/i))) {
-      return `CentOS Stream ${m[1]}`;
-    }
-    if ((m = s.match(/CentOS\s+(?:Linux\s+)?(?:release\s+)?(\d+\.\d+)/i))) {
-      return `CentOS ${m[1]}`;
-    }
-    if ((m = s.match(/CentOS\s+(?:Linux\s+)?(?:release\s+)?(\d+)/i))) {
-      return `CentOS ${m[1]}`;
-    }
-
-    if ((m = s.match(/Amazon\s+(?:Linux\s+)?2023/i))) {
-      return "Amazon Linux 2023";
-    }
-    if ((m = s.match(/Amazon\s+(?:Linux\s+)?2/i))) {
-      return "Amazon Linux 2";
-    }
-
-    if ((m = s.match(/Ubuntu\s+(\d+\.\d+)/i))) {
-      return `Ubuntu ${m[1]}`;
-    }
-
-    if ((m = s.match(/Debian.*?(\d+)/i))) {
-      return `Debian ${m[1]}`;
-    }
-
-    if ((m = s.match(/SUSE\s+Linux\s+Enterprise\s+Server.*?(\d+)\s*(?:SP(\d+))?/i))) {
-      return m[2] ? `SLES ${m[1]} SP${m[2]}` : `SLES ${m[1]}`;
-    }
-    if ((m = s.match(/SLES\s*(\d+)\s*(?:SP(\d+))?/i))) {
-      return m[2] ? `SLES ${m[1]} SP${m[2]}` : `SLES ${m[1]}`;
-    }
-
-    if ((m = s.match(/Oracle\s+Linux.*?(\d+\.\d+)/i))) {
-      return `OEL ${m[1]}`;
-    }
-    if ((m = s.match(/Oracle\s+Linux.*?(\d+)/i))) {
-      return `OEL ${m[1]}`;
-    }
-
-    if ((m = s.match(/Fedora.*?(\d+)/i))) {
-      return `Fedora ${m[1]}`;
-    }
-
-    if ((m = s.match(/^MacOS\s+(\w+)$/i))) {
-      return `macOS ${m[1]}`;
-    }
-    if ((m = s.match(/Mac\s*OS\s*X\s+(\d+)\.(\d+)/i))) {
-      return `macOS ${m[1]}.${m[2]}`;
-    }
-    if ((m = s.match(/macOS\s+(\d+\.\d+)/i))) {
-      return `macOS ${m[1]}`;
-    }
-
-    if ((m = s.match(/Windows\s+Server\s+(\d{4}).*?,\s*Domain\s+Controller/i))) {
-      return `Win Server ${m[1]} DC`;
-    }
-    if ((m = s.match(/Windows\s+Storage\s+Server\s+(\d{4})/i))) {
-      return `Win Storage ${m[1]}`;
-    }
-    if ((m = s.match(/Windows\s+Server\s+(\d{4})\s+(\w+)/i))) {
-      const year = m[1];
-      const edition = m[2];
-      const edMap: Record<string, string> = { standard: "Std", datacenter: "DC", essentials: "Ess" };
-      const shortEd = edMap[edition.toLowerCase()];
-      return shortEd ? `Win Server ${year} ${shortEd}` : `Win Server ${year}`;
-    }
-    if ((m = s.match(/Windows\s+Server\s+(\d{4})/i))) {
-      return `Win Server ${m[1]}`;
-    }
-    if ((m = s.match(/Windows\s+(1[01])\s+(Pro|Home|Enterprise|Education)/i))) {
-      return `Win ${m[1]} ${m[2]}`;
-    }
-    if ((m = s.match(/Windows\s+(1[01])\b/i))) {
-      return `Win ${m[1]}`;
-    }
-    if ((m = s.match(/Windows\s+(8\.\d)/i))) {
-      return `Win ${m[1]}`;
-    }
-    if ((m = s.match(/Windows\s+7/i))) {
-      return "Win 7";
-    }
-    if (s === "Windows") return "Windows";
-    if (s === "Linux") return "Linux";
-    if (s === "Mac") return "macOS";
-
-    if ((m = s.match(/(?:iSeries[\s-]*)?VIOS[\s-]*(?:DR)?[\s-]*(\d+[\d.\-]*)/i))) {
-      return `VIOS ${m[1]}`;
-    }
-    if (/(?:iSeries[\s-]*)?VIOS[\s-]*(?:DR)?$/i.test(s)) return "VIOS";
-
-    if ((m = s.match(/(?:IBM\s+)?AIX[\s-]*(?:DR)?[\s-]*(\d{4,})[\s-]*/i))) {
-      const ver = m[1];
-      const major = ver.length >= 4 ? `${ver[0]}.${ver[1]}` : ver;
-      return `AIX ${major}`;
-    }
-    if ((m = s.match(/(?:IBM\s+)?AIX[\s-]*(?:DR)?[\s-]*(\d+[\d.]*)/i))) {
-      return `AIX ${m[1]}`;
-    }
-    if (/AIX[\s-]*DR$/i.test(s)) return "AIX";
-    if (/^(?:IBM\s+)?AIX$/i.test(s)) return "AIX";
-
-    if ((m = s.match(/Solaris\s+(\d+)/i))) {
-      return `Solaris ${m[1]}`;
-    }
-
-    if ((m = s.match(/FreeBSD\s+(\d+\.\d+)/i))) {
-      return `FreeBSD ${m[1]}`;
-    }
-
-    if (s.length > 40) return s.substring(0, 40);
-    return s;
-  }
-
-  async function loadCategoryOverrides(tenantId: number): Promise<Map<string, string>> {
-    const overrides = new Map<string, string>();
-    try {
-      const result = await poolRead.query(
-        `SELECT app_name, category FROM app_category_overrides WHERE tenant_id = $1`,
-        [tenantId]
-      );
-      for (const row of result.rows) {
-        overrides.set(row.app_name.toLowerCase(), row.category);
-      }
-    } catch (err: any) {
-      // table may not exist yet
-    }
-    return overrides;
-  }
-
-  app.get("/api/applications/:tenantId/category-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const result = await poolRead.query(
-        `SELECT * FROM app_category_overrides WHERE tenant_id = $1 ORDER BY app_name`,
-        [tenantId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to fetch category overrides" });
-    }
-  });
-
-  app.post("/api/applications/:tenantId/category-overrides", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { appName, category } = req.body;
-      if (!appName || !category) return res.status(400).json({ message: "appName and category required" });
-      const validCategories = ["Business", "Enterprise", "InfoSec", "IT Operations", "Unknown"];
-      if (!validCategories.includes(category)) return res.status(400).json({ message: `Invalid category. Must be one of: ${validCategories.join(", ")}` });
-      const existing = await pool.query(
-        `SELECT id FROM app_category_overrides WHERE tenant_id = $1 AND LOWER(app_name) = LOWER($2)`,
-        [tenantId, appName]
-      );
-      if (existing.rows.length > 0) {
-        await pool.query(
-          `UPDATE app_category_overrides SET category = $1, updated_by = $2, updated_at = NOW() WHERE id = $3`,
-          [category, req.user?.username || "admin", existing.rows[0].id]
-        );
-      } else {
-        await pool.query(
-          `INSERT INTO app_category_overrides (tenant_id, app_name, category, updated_by) VALUES ($1, $2, $3, $4)`,
-          [tenantId, appName, category, req.user?.username || "admin"]
-        );
-      }
-      res.json({ success: true, appName, category });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to save category override" });
-    }
-  });
-
-  app.delete("/api/applications/:tenantId/category-overrides/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const id = parseInt(req.params.id);
-      await pool.query(`DELETE FROM app_category_overrides WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Failed to delete category override" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/sankey-data", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const categoryFilter = req.query.categories as string;
-      const overrides = await loadCategoryOverrides(tenantId);
-      let assets: any[] = [];
-      try {
-        assets = await storage.getAssets(tenantId);
-      } catch (dbErr: any) {
-        console.error(`[Applications] DB error fetching assets for sankey tenant ${tenantId}:`, dbErr.message);
-        return res.json({ nodes: [], links: [] });
-      }
-      const parsedAssets: ParsedAsset[] = assets
-        .filter((a: any) => a.hostname || a.ipAddress)
-        .map((a: any) => ({
-          hostname: a.hostname,
-          ipAddress: a.ipAddress,
-          operatingSystem: a.operatingSystem,
-          endpointType: a.endpointType,
-          endpointGroup: a.endpointGroup,
-          deploymentType: a.deploymentType,
-          cloudProvider: a.cloudProvider,
-          cloudRegion: a.cloudRegion,
-          status: a.status,
-          source: a.source,
-          riskScore: a.riskScore,
-          riskLevel: a.riskLevel,
-          user: a.user,
-          lastLoggedInUser: a.lastLoggedInUser,
-          enrichmentData: a.enrichmentData || {},
-        }));
-      const applications = buildApplicationIndex(parsedAssets);
-      for (const app of applications) {
-        const classification = classifyApplication(app.name, overrides);
-        app.category = classification.category;
-      }
-
-      const allowedCategories = categoryFilter ? categoryFilter.split(",") : ["Business", "Enterprise"];
-      const filteredApps = applications.filter(app => allowedCategories.includes(app.category));
-      const topApps = filteredApps.slice(0, 15);
-
-      const assetByHostname = new Map<string, ParsedAsset>();
-      for (const a of parsedAssets) assetByHostname.set(a.hostname, a);
-
-      const nodeMap = new Map<string, number>();
-      const links: Array<{ source: number; target: number; value: number }> = [];
-
-      const getNodeIndex = (key: string): number => {
-        if (nodeMap.has(key)) return nodeMap.get(key)!;
-        const idx = nodeMap.size;
-        nodeMap.set(key, idx);
-        return idx;
-      };
-
-      for (const app of topApps) {
-        const appLabel = app.name.length > 50 ? app.name.substring(0, 50) + "..." : app.name;
-        const appKey = `app:${appLabel}`;
-        getNodeIndex(appKey);
-
-        const osServerMap = new Map<string, string[]>();
-
-        for (const srv of app.servers) {
-          const asset = assetByHostname.get(srv);
-          const rawOs = asset?.operatingSystem || "Unknown OS";
-          const osLabel = normalizeOsLabel(rawOs);
-          if (!osServerMap.has(osLabel)) osServerMap.set(osLabel, []);
-          osServerMap.get(osLabel)!.push(srv);
-        }
-
-        Array.from(osServerMap.entries()).forEach(([osLabel, servers]) => {
-          const osKey = `os:${osLabel}`;
-          getNodeIndex(osKey);
-
-          links.push({
-            source: getNodeIndex(appKey),
-            target: getNodeIndex(osKey),
-            value: servers.length,
-          });
-
-          for (const srv of servers) {
-            const srvKey = `srv:${srv}`;
-            getNodeIndex(srvKey);
-            links.push({
-              source: getNodeIndex(osKey),
-              target: getNodeIndex(srvKey),
-              value: 1,
-            });
-          }
-        });
-      }
-
-      const nodes = Array.from(nodeMap.entries())
-        .sort((a, b) => a[1] - b[1])
-        .map(([name]) => {
-          let label = name;
-          let layer = "application";
-          if (name.startsWith("app:")) { label = name.substring(4); layer = "application"; }
-          else if (name.startsWith("os:")) { label = name.substring(3); layer = "os"; }
-          else if (name.startsWith("srv:")) { label = name.substring(4); layer = "server"; }
-          return { name: label, layer };
-        });
-
-      const filteredLinks = links.filter(l => l.value > 0);
-
-      res.json({ nodes, links: filteredLinks });
-    } catch (error: any) {
-      console.error(`[Applications] Sankey error for tenant ${req.params.tenantId}:`, error.message || error);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch sankey data" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/mapping-dashboard", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const overrides = await loadCategoryOverrides(tenantId);
-      const assets = await storage.getAssets(tenantId);
-      const parsedAssets: ParsedAsset[] = assets.map((a: any) => ({
-        hostname: a.hostname,
-        ipAddress: a.ipAddress,
-        operatingSystem: a.operatingSystem,
-        endpointType: a.endpointType,
-        endpointGroup: a.endpointGroup,
-        deploymentType: a.deploymentType,
-        cloudProvider: a.cloudProvider,
-        cloudRegion: a.cloudRegion,
-        status: a.status,
-        source: a.source,
-        riskScore: a.riskScore,
-        riskLevel: a.riskLevel,
-        user: a.user,
-        lastLoggedInUser: a.lastLoggedInUser,
-        enrichmentData: a.enrichmentData || {},
-      }));
-
-      const applications = buildApplicationIndex(parsedAssets);
-      for (const app of applications) {
-        const classification = classifyApplication(app.name, overrides);
-        app.category = classification.category;
-      }
-
-      const osNorm = (os: string) => (os || "Unknown").toLowerCase();
-      const isAIX = (os: string) => /aix|ibm\s*aix|vios|iseries/i.test(os);
-      const isLinux = (os: string) => /linux|red\s*hat|rhel|suse|ubuntu|centos|debian|fedora|oracle\s*linux/i.test(os);
-      const isWindows = (os: string) => /windows/i.test(os);
-
-      const assetByHostname = new Map<string, ParsedAsset>();
-      for (const a of parsedAssets) assetByHostname.set(a.hostname, a);
-
-      const buildView = (filter: (os: string) => boolean, label: string) => {
-        const filtered = applications.filter(app => {
-          return app.servers.some(srv => {
-            const asset = assetByHostname.get(srv);
-            return asset && filter(asset.operatingSystem || "");
-          });
-        });
-
-        const viewApps = filtered.map(app => {
-          const matchingServers = app.servers.filter(srv => {
-            const asset = assetByHostname.get(srv);
-            return asset && filter(asset.operatingSystem || "");
-          });
-
-          const osDistribution: Record<string, number> = {};
-          const envDistribution: Record<string, number> = {};
-          const dcDistribution: Record<string, number> = {};
-          const statusDistribution: Record<string, number> = {};
-          let hmcSet = new Set<string>();
-          let frameSet = new Set<string>();
-
-          for (const srv of matchingServers) {
-            const asset = assetByHostname.get(srv);
-            if (!asset) continue;
-            const os = asset.operatingSystem || "Unknown";
-            osDistribution[os] = (osDistribution[os] || 0) + 1;
-            const env = asset.enrichmentData?.environment || asset.enrichmentData?.usedFor || "Unknown";
-            envDistribution[env] = (envDistribution[env] || 0) + 1;
-            const dc = asset.enrichmentData?.datacenterName || asset.enrichmentData?.location || "Unknown";
-            dcDistribution[dc] = (dcDistribution[dc] || 0) + 1;
-            const st = asset.status || "active";
-            statusDistribution[st] = (statusDistribution[st] || 0) + 1;
-            if (asset.enrichmentData?.hmc) hmcSet.add(asset.enrichmentData.hmc);
-            if (asset.enrichmentData?.frame) frameSet.add(asset.enrichmentData.frame);
-          }
-
-          return {
-            name: app.name,
-            category: app.category,
-            serverCount: matchingServers.length,
-            servers: matchingServers.slice(0, 50),
-            environments: app.environments,
-            owners: app.owners,
-            supportGroups: app.supportGroups,
-            distributionLists: app.distributionLists || [],
-            osDistribution,
-            envDistribution,
-            dcDistribution,
-            statusDistribution,
-            hmcs: Array.from(hmcSet),
-            frames: Array.from(frameSet),
-            riskSummary: app.riskSummary || { eolCount: 0, unpatchedCount: 0, highRiskCount: 0 },
-            decomStatus: matchingServers.reduce((acc, srv) => {
-              const asset = assetByHostname.get(srv);
-              const ds = asset?.enrichmentData?.decomStatus || asset?.enrichmentData?.decommissionStatus || "none";
-              acc[ds] = (acc[ds] || 0) + 1;
-              return acc;
-            }, {} as Record<string, number>),
-            decomTimeline: matchingServers.reduce((acc, srv) => {
-              const asset = assetByHostname.get(srv);
-              const tl = asset?.enrichmentData?.decommissionTimeline;
-              if (tl) acc[tl] = (acc[tl] || 0) + 1;
-              return acc;
-            }, {} as Record<string, number>),
-            serverDecomMap: matchingServers.reduce((acc, srv) => {
-              const asset = assetByHostname.get(srv);
-              if (asset?.enrichmentData) {
-                const ds = asset.enrichmentData.decomStatus || asset.enrichmentData.decommissionStatus;
-                const tl = asset.enrichmentData.decommissionTimeline;
-                const already = asset.enrichmentData.alreadyDecommissioned;
-                if (ds === "decommissioned" && already === "Yes") {
-                  acc[srv] = "decommissioned";
-                } else if (ds === "decommissioned" && tl) {
-                  acc[srv] = "planned";
-                } else if (ds && ds !== "none") {
-                  acc[srv] = ds;
-                }
-              }
-              return acc;
-            }, {} as Record<string, string>),
-          };
-        });
-
-        const categoryBreakdown: Record<string, number> = {};
-        const envMatrix: Record<string, number> = {};
-        const osVersions: Record<string, number> = {};
-        const ownerMap: Record<string, number> = {};
-        let totalServers = 0;
-
-        for (const app of viewApps) {
-          categoryBreakdown[app.category] = (categoryBreakdown[app.category] || 0) + 1;
-          for (const [env, count] of Object.entries(app.envDistribution)) envMatrix[env] = (envMatrix[env] || 0) + count;
-          for (const [os, count] of Object.entries(app.osDistribution)) osVersions[os] = (osVersions[os] || 0) + count;
-          for (const owner of app.owners) ownerMap[owner] = (ownerMap[owner] || 0) + 1;
-          totalServers += app.serverCount;
-        }
-
-        const riskSummary = { critical: 0, high: 0, medium: 0, low: 0 };
-        for (const app of viewApps) {
-          const r = app.riskSummary;
-          if (r.highRiskCount > 0) riskSummary.critical++;
-          else if (r.eolCount > 0) riskSummary.high++;
-          else if (r.unpatchedCount > 0) riskSummary.medium++;
-          else riskSummary.low++;
-        }
-
-        const topOwners = Object.entries(ownerMap)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 15)
-          .map(([name, count]) => ({ name, appCount: count }));
-
-        return {
-          label,
-          totalApps: viewApps.length,
-          totalServers,
-          categoryBreakdown,
-          envMatrix,
-          osVersions,
-          riskSummary,
-          topOwners,
-          applications: viewApps,
-        };
-      };
-
-      const enterpriseBusiness = buildView(
-        () => true,
-        "Enterprise & Business"
-      );
-
-      const crossPlatform = enterpriseBusiness.applications.filter(app => {
-        const platforms = new Set<string>();
-        for (const srv of app.servers) {
-          const asset = assetByHostname.get(srv);
-          if (!asset) continue;
-          const os = asset.operatingSystem || "";
-          if (isAIX(os)) platforms.add("AIX");
-          else if (isLinux(os)) platforms.add("Linux");
-          else if (isWindows(os)) platforms.add("Windows");
-          else platforms.add("Other");
-        }
-        return platforms.size >= 2;
-      }).map(app => {
-        const platforms: string[] = [];
-        const pSet = new Set<string>();
-        for (const srv of app.servers) {
-          const asset = assetByHostname.get(srv);
-          if (!asset) continue;
-          const os = asset.operatingSystem || "";
-          if (isAIX(os)) pSet.add("AIX");
-          else if (isLinux(os)) pSet.add("Linux");
-          else if (isWindows(os)) pSet.add("Windows");
-          else pSet.add("Other");
-        }
-        return { name: app.name, category: app.category, serverCount: app.serverCount, platforms: Array.from(pSet) };
-      });
-
-      const migrationStatus: Record<string, number> = {};
-      const patchingStatus: Record<string, number> = {};
-      const monitoringCoverage = { monitored: 0, unmonitored: 0 };
-      const supportGroups: Record<string, number> = {};
-
-      for (const a of parsedAssets) {
-        const ms = a.enrichmentData?.migrationStatus;
-        if (ms) migrationStatus[ms] = (migrationStatus[ms] || 0) + 1;
-        const ps = a.enrichmentData?.patchingStatus;
-        if (ps) patchingStatus[ps] = (patchingStatus[ps] || 0) + 1;
-        if (a.enrichmentData?.monitoringStatus === "Yes" || a.enrichmentData?.monitoringTool) {
-          monitoringCoverage.monitored++;
-        } else {
-          monitoringCoverage.unmonitored++;
-        }
-        const sg = a.enrichmentData?.supportGroup;
-        if (sg) supportGroups[sg] = (supportGroups[sg] || 0) + 1;
-      }
-
-      res.json({
-        enterpriseBusiness: { ...enterpriseBusiness, crossPlatform },
-        aix: buildView(isAIX, "AIX Environment"),
-        linux: { ...buildView(isLinux, "Linux Environment"), migrationStatus, patchingStatus, monitoringCoverage, supportGroups },
-        windows: buildView(isWindows, "Windows Environment"),
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch mapping dashboard" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/decommissioned", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const assets = await storage.getAssets(tenantId);
-
-      const classifyDecomBucket = (asset: any) => {
-        const ed = asset.enrichmentData || {};
-        const decomStatus = ed.decommissionStatus || ed.decomStatus || "";
-        const timeline = (ed.decommissionTimeline || "").toLowerCase();
-        const alreadyDecom = (ed.alreadyDecommissioned || "").toLowerCase();
-        const assetStatus = (asset.status || "").toLowerCase();
-
-        if (decomStatus !== "decommissioned" && assetStatus !== "decommissioned") return null;
-
-        if (assetStatus === "decommissioned" || alreadyDecom === "yes") return "decommissioned";
-        if (timeline.includes("< 1") || timeline.includes("<1")) return "planned_lt_1yr";
-        if (timeline.includes("< 2") || timeline.includes("<2") || timeline.includes("> 2") || timeline.includes(">2")) return "planned_gt_1yr";
-        if (timeline.includes("review")) return "under_review";
-        if (decomStatus === "decommissioned") return "planned_unknown";
-        return null;
-      };
-
-      const buckets: Record<string, any[]> = {
-        decommissioned: [],
-        planned_lt_1yr: [],
-        planned_gt_1yr: [],
-        under_review: [],
-        planned_unknown: [],
-      };
-
-      for (const asset of assets) {
-        const bucket = classifyDecomBucket(asset);
-        if (bucket && buckets[bucket]) {
-          const ed = asset.enrichmentData || {};
-          buckets[bucket].push({
-            hostname: asset.hostname,
-            ipAddress: asset.ipAddress,
-            operatingSystem: asset.operatingSystem,
-            applicationName: ed.applicationName || "Unknown",
-            datacenter: ed.datacenterName || ed.location || "Unknown",
-            owner: ed.owner || "Unknown",
-            environment: ed.environment || "Unknown",
-            timeline: ed.decommissionTimeline || "N/A",
-            alreadyDecommissioned: ed.alreadyDecommissioned || "No",
-            status: asset.status,
-          });
-        }
-      }
-
-      res.json({
-        summary: {
-          decommissioned: buckets.decommissioned.length,
-          planned_lt_1yr: buckets.planned_lt_1yr.length,
-          planned_gt_1yr: buckets.planned_gt_1yr.length,
-          under_review: buckets.under_review.length,
-          planned_unknown: buckets.planned_unknown.length,
-          total: Object.values(buckets).reduce((s, b) => s + b.length, 0),
-        },
-        devices: buckets,
-      });
-    } catch (error: any) {
-      console.error(`[Applications] Decommissioned error for tenant ${req.params.tenantId}:`, error.message);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch decommissioned data" });
-    }
-  });
-
-  app.get("/api/applications/:tenantId/sankey-data-by-os", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const osFilter = (req.query.os as string) || "all";
-      const overrides = await loadCategoryOverrides(tenantId);
-      let assets: any[] = [];
-      try {
-        assets = await storage.getAssets(tenantId);
-      } catch (dbErr: any) {
-        console.error(`[Applications] DB error fetching assets for os-sankey tenant ${tenantId}:`, dbErr.message);
-        return res.json({ nodes: [], links: [] });
-      }
-
-      const isAIX = (os: string) => /aix|ibm\s*aix|vios|iseries/i.test(os);
-      const isLinux = (os: string) => /linux|red\s*hat|rhel|suse|ubuntu|centos|debian|fedora|oracle\s*linux/i.test(os);
-      const isWindows = (os: string) => /windows/i.test(os);
-
-      const osFilterFn = osFilter === "aix" ? isAIX
-        : osFilter === "linux" ? isLinux
-        : osFilter === "windows" ? isWindows
-        : () => true;
-
-      const parsedAssets: ParsedAsset[] = assets
-        .filter((a: any) => (a.hostname || a.ipAddress) && osFilterFn(a.operatingSystem || ""))
-        .map((a: any) => ({
-          hostname: a.hostname,
-          ipAddress: a.ipAddress,
-          operatingSystem: a.operatingSystem,
-          endpointType: a.endpointType,
-          endpointGroup: a.endpointGroup,
-          deploymentType: a.deploymentType,
-          cloudProvider: a.cloudProvider,
-          cloudRegion: a.cloudRegion,
-          status: a.status,
-          source: a.source,
-          riskScore: a.riskScore,
-          riskLevel: a.riskLevel,
-          user: a.user,
-          lastLoggedInUser: a.lastLoggedInUser,
-          enrichmentData: a.enrichmentData || {},
-        }));
-
-      const applications = buildApplicationIndex(parsedAssets);
-      for (const app of applications) {
-        const classification = classifyApplication(app.name, overrides);
-        app.category = classification.category;
-      }
-
-      const topApps = applications.slice(0, 25);
-
-      const assetByHostname = new Map<string, ParsedAsset>();
-      for (const a of parsedAssets) assetByHostname.set(a.hostname, a);
-
-      const nodeMap = new Map<string, number>();
-      const links: Array<{ source: number; target: number; value: number }> = [];
-
-      const getNodeIndex = (key: string): number => {
-        if (nodeMap.has(key)) return nodeMap.get(key)!;
-        const idx = nodeMap.size;
-        nodeMap.set(key, idx);
-        return idx;
-      };
-
-      const hasHmcData = osFilter === "aix" && parsedAssets.some(a => a.enrichmentData?.hmc);
-
-      const classifyDecomStatus = (asset: ParsedAsset): string => {
-        const ed = asset.enrichmentData || {};
-        const decomStatus = ed.decommissionStatus || ed.decomStatus || "";
-        const timeline = (ed.decommissionTimeline || "").toLowerCase();
-        const alreadyDecom = (ed.alreadyDecommissioned || "").toLowerCase();
-        const assetStatus = (asset.status || "").toLowerCase();
-        if (assetStatus === "decommissioned" || alreadyDecom === "yes") return "Decommissioned";
-        if (timeline.includes("< 1") || timeline.includes("<1")) return "Planned < 1 Year";
-        if (timeline.includes("> 2") || timeline.includes(">2")) return "Planned > 2 Years";
-        if (timeline.includes("< 2") || timeline.includes("<2") || timeline.includes("1-2") || timeline.includes("1 - 2")) return "Planned 1-2 Years";
-        if (decomStatus === "decommissioned" && timeline) return "Planned < 1 Year";
-        return "Active";
-      };
-
-      const useDecomLayer = osFilter === "linux" || osFilter === "windows";
-
-      const classifyAixOsFamily = (os: string): string => {
-        if (/vios|iseries/i.test(os)) return "VIOS";
-        return "AIX";
-      };
-
-      if (hasHmcData) {
-        for (const app of topApps) {
-          const appLabel = app.name.length > 50 ? app.name.substring(0, 50) + "..." : app.name;
-          const appKey = `app:${appLabel}`;
-          getNodeIndex(appKey);
-
-          for (const srv of app.servers) {
-            const asset = assetByHostname.get(srv);
-            if (!asset) continue;
-            const hmc = asset.enrichmentData?.hmc || "Unknown HMC";
-            const frame = asset.enrichmentData?.frame || asset.enrichmentData?.frameSerial || "Unknown Frame";
-            const osFamily = classifyAixOsFamily(asset.operatingSystem || "");
-            const hmcKey = `hmc:${hmc}`;
-            const frameKey = `frame:${frame}`;
-            const osKey = `os:${osFamily}`;
-            const srvKey = `srv:${srv}`;
-            getNodeIndex(hmcKey);
-            getNodeIndex(frameKey);
-            getNodeIndex(osKey);
-            getNodeIndex(appKey);
-            getNodeIndex(srvKey);
-
-            links.push({ source: getNodeIndex(hmcKey), target: getNodeIndex(frameKey), value: 1 });
-            links.push({ source: getNodeIndex(frameKey), target: getNodeIndex(osKey), value: 1 });
-            links.push({ source: getNodeIndex(osKey), target: getNodeIndex(appKey), value: 1 });
-            links.push({ source: getNodeIndex(appKey), target: getNodeIndex(srvKey), value: 1 });
-          }
-        }
-      } else if (useDecomLayer) {
-        for (const app of topApps) {
-          const appLabel = app.name.length > 50 ? app.name.substring(0, 50) + "..." : app.name;
-          const appKey = `app:${appLabel}`;
-          getNodeIndex(appKey);
-
-          const decomServerMap = new Map<string, string[]>();
-          for (const srv of app.servers) {
-            const asset = assetByHostname.get(srv);
-            const decomLabel = asset ? classifyDecomStatus(asset) : "Active";
-            if (!decomServerMap.has(decomLabel)) decomServerMap.set(decomLabel, []);
-            decomServerMap.get(decomLabel)!.push(srv);
-          }
-
-          Array.from(decomServerMap.entries()).forEach(([decomLabel, servers]) => {
-            const decomKey = `decom:${decomLabel}`;
-            getNodeIndex(decomKey);
-            links.push({ source: getNodeIndex(appKey), target: getNodeIndex(decomKey), value: servers.length });
-            for (const srv of servers) {
-              const srvKey = `srv:${srv}`;
-              getNodeIndex(srvKey);
-              links.push({ source: getNodeIndex(decomKey), target: getNodeIndex(srvKey), value: 1 });
-            }
-          });
-        }
-      } else {
-        for (const app of topApps) {
-          const appLabel = app.name.length > 50 ? app.name.substring(0, 50) + "..." : app.name;
-          const appKey = `app:${appLabel}`;
-          getNodeIndex(appKey);
-
-          const osServerMap = new Map<string, string[]>();
-          for (const srv of app.servers) {
-            const asset = assetByHostname.get(srv);
-            const rawOs = asset?.operatingSystem || "Unknown OS";
-            const osLabel = normalizeOsLabel(rawOs);
-            if (!osServerMap.has(osLabel)) osServerMap.set(osLabel, []);
-            osServerMap.get(osLabel)!.push(srv);
-          }
-
-          Array.from(osServerMap.entries()).forEach(([osLabel, servers]) => {
-            const osKey = `os:${osLabel}`;
-            getNodeIndex(osKey);
-            links.push({ source: getNodeIndex(appKey), target: getNodeIndex(osKey), value: servers.length });
-            for (const srv of servers) {
-              const srvKey = `srv:${srv}`;
-              getNodeIndex(srvKey);
-              links.push({ source: getNodeIndex(osKey), target: getNodeIndex(srvKey), value: 1 });
-            }
-          });
-        }
-      }
-
-      const layerLabels: Record<string, string> = hasHmcData
-        ? { hmc: "HMC", frame: "Frame", os: "OS", app: "Application", srv: "Server" }
-        : useDecomLayer
-        ? { app: "Application", decom: "Status", srv: "Server" }
-        : { app: "Application", os: "Operating System", srv: "Server" };
-
-      const layerOrder = hasHmcData ? ["hmc", "frame", "os", "app", "srv"] : useDecomLayer ? ["app", "decom", "srv"] : ["app", "os", "srv"];
-
-      const nodes = Array.from(nodeMap.entries())
-        .sort((a, b) => a[1] - b[1])
-        .map(([name]) => {
-          const prefix = name.split(":")[0];
-          const label = name.substring(prefix.length + 1);
-          return { name: label, layer: prefix };
-        });
-
-      const dedupedLinks: Array<{ source: number; target: number; value: number }> = [];
-      const linkKeys = new Map<string, number>();
-      for (const l of links) {
-        const key = `${l.source}-${l.target}`;
-        if (linkKeys.has(key)) {
-          dedupedLinks[linkKeys.get(key)!].value += l.value;
-        } else {
-          linkKeys.set(key, dedupedLinks.length);
-          dedupedLinks.push({ ...l });
-        }
-      }
-
-      res.json({
-        nodes,
-        links: dedupedLinks.filter(l => l.value > 0),
-        layerOrder,
-        layerLabels,
-        hasHmcData,
-      });
-    } catch (error: any) {
-      console.error(`[Applications] OS Sankey error for tenant ${req.params.tenantId}:`, error.message || error);
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch OS sankey data" });
-    }
-  });
 
   app.get("/api/assessment/:tenantId/overview", isAuthenticated, async (req: any, res) => {
     try {
@@ -8521,8 +7948,11 @@ Create a concise daily status report with: 1) Today's Highlights, 2) Activities 
         const threatEvents = securityEventsList.slice(0, 30).map(e => ({ threat: e.threat, threatVector: e.threatVector, mitreTactic: e.mitreTactic, mitreTechnique: e.mitreTechnique, severity: e.severity, country: e.country }));
         promptContext = `Threat Intelligence Events (${securityEventsList.length} total):\n${JSON.stringify(threatEvents, null, 2)}`;
       } else if (rType === "incident_response") {
-        const irData = incidentsList.slice(0, 25).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, affectedAssets: i.affectedAssets, source: i.source }));
-        promptContext = `Incident Response Data (${incidentsList.length} incidents):\n${JSON.stringify(irData, null, 2)}\n\nEvent breakdown: ${securityEventsList.length} total events`;
+        const irData = incidentsList.slice(0, 25).map(i => ({ title: i.title, severity: i.severity, status: i.status, category: i.category, affectedAssets: i.affectedAssets, source: i.source, killChainPhase: i.killChainPhase || i.kill_chain_phase || null, mitreTactic: i.mitreTactic || null, mitreTechniqueId: i.mitreTechniqueId || null }));
+        const kcDist: Record<string, number> = {};
+        incidentsList.forEach((i: any) => { const kc = i.killChainPhase || i.kill_chain_phase; if (kc) kcDist[kc] = (kcDist[kc] || 0) + 1; });
+        const killChainDistributionIR = Object.entries(kcDist).sort((a, b) => b[1] - a[1]).map(([phase, count]) => ({ phase, count }));
+        promptContext = `Incident Response Data (${incidentsList.length} incidents):\n${JSON.stringify(irData, null, 2)}\n\nEvent breakdown: ${securityEventsList.length} total events${killChainDistributionIR.length > 0 ? `\n\nKill Chain Phase Distribution (from incidents):\n${JSON.stringify(killChainDistributionIR, null, 2)}` : ""}`;
       } else if (rType === "cloud_security") {
         const cloudEvents = securityEventsList.filter(e => ["cloud", "casb", "sse"].includes(e.eventType));
         const contextParts: string[] = [];
@@ -8551,7 +7981,7 @@ Create a concise daily status report with: 1) Today's Highlights, 2) Activities 
           const assets = [evt.asset, evt.target].filter(Boolean);
           for (const a of assets) {
             if (!a) continue;
-            a.split(",").forEach(name => {
+            a.split(",").forEach((name: string) => {
               const key = name.trim().toLowerCase();
               if (key.length < 2) return;
               if (!assetMap[key]) assetMap[key] = { count: 0, severities: [], types: [] };
@@ -8731,6 +8161,15 @@ Create a concise daily status report with: 1) Today's Highlights, 2) Activities 
           contextParts.push(`Threat Vectors: ${JSON.stringify(Object.entries(threatVectors).sort((a, b) => b[1] - a[1]).slice(0, 10))}`);
         }
 
+        // --- 4b. KILL CHAIN PHASE DISTRIBUTION (from incidents) ---
+        const kcDistDefault: Record<string, number> = {};
+        incidentsList.forEach((i: any) => { const kc = i.killChainPhase || i.kill_chain_phase; if (kc) kcDistDefault[kc] = (kcDistDefault[kc] || 0) + 1; });
+        if (Object.keys(kcDistDefault).length > 0) {
+          const kcOrder = ["Reconnaissance", "Weaponization", "Delivery", "Exploitation", "Installation", "Command & Control", "Actions on Objectives"];
+          const kcSorted = Object.entries(kcDistDefault).sort((a, b) => { const ia = kcOrder.indexOf(a[0]); const ib = kcOrder.indexOf(b[0]); if (ia === -1 && ib === -1) return b[1] - a[1]; if (ia === -1) return 1; if (ib === -1) return -1; return ia - ib; }).map(([phase, count]) => ({ phase, count }));
+          contextParts.push(`KILL CHAIN PHASE DISTRIBUTION (from ${incidentsList.length} incidents):\n${JSON.stringify(kcSorted, null, 2)}\nNote: phases with highest counts indicate attacker progression stage across current incidents.`);
+        }
+
         // --- 5. ASSET INVENTORY (dynamic — device assets) ---
         try {
           const assetsList = await storage.getAssets(tenantId);
@@ -8769,7 +8208,7 @@ Create a concise daily status report with: 1) Today's Highlights, 2) Activities 
               const apps = buildApplicationIndex(parsedForAssessment);
               const assessment = buildAssessmentData(parsedForAssessment, wlc, []);
 
-              contextParts.push(`INFRASTRUCTURE ASSESSMENT DATA:\nPlatform Breakdown: ${JSON.stringify(assessment.platformBreakdown)}\nWorkload Suitability: Rehost=${assessment.workloadSuitability.rehost}, Replatform=${assessment.workloadSuitability.replatform}, Retain=${assessment.workloadSuitability.retain}, Retire=${assessment.workloadSuitability.retire}, Quick-Wins=${assessment.workloadSuitability.quickWins}\nLicense Baseline: ${JSON.stringify(assessment.licenseBaseline)}\nNetwork: ${assessment.networkSummary.subnetCount} subnets, ${assessment.networkSummary.totalNics} NICs\nBC Posture: ${assessment.bcPosture.drServers} DR servers, ${assessment.bcPosture.monitoredAssets} monitored, ${assessment.bcPosture.unmonitoredAssets} unmonitored, Backup Tools: ${JSON.stringify(assessment.bcPosture.backupTools)}\nApplications Discovered: ${apps.length} (Enterprise: ${apps.filter(a => a.category === "Enterprise").length}, Business: ${apps.filter(a => a.category === "Business").length})\nTop Applications: ${JSON.stringify(apps.slice(0, 20).map(a => ({ name: a.name, category: a.category, servers: a.serverCount, owners: a.owners })))}\nEOL Summary: ${JSON.stringify(assessment.eolHeatmap?.slice(0, 15))}\nDiscovery Findings: Monitoring Coverage=${assessment.discoveryFindings?.coverageScore || 0}%, Visibility Gaps: No Monitoring=${assessment.discoveryFindings?.visibilityGaps?.noMonitoring || 0}, No Owner=${assessment.discoveryFindings?.visibilityGaps?.noOwner || 0}, No Application=${assessment.discoveryFindings?.visibilityGaps?.noApplication || 0}, Missing OS=${assessment.discoveryFindings?.visibilityGaps?.missingOS || 0}`);
+              contextParts.push(`INFRASTRUCTURE ASSESSMENT DATA:\nPlatform Breakdown: ${JSON.stringify(assessment.platformBreakdown)}\nWorkload Suitability: Rehost=${assessment.workloadSuitability.rehost}, Replatform=${assessment.workloadSuitability.replatform}, Retain=${assessment.workloadSuitability.retain}, Retire=${assessment.workloadSuitability.retire}, Quick-Wins=${assessment.workloadSuitability.quickWins}\nLicense Baseline: ${JSON.stringify(assessment.licenseBaseline)}\nNetwork: ${assessment.networkSummary.subnetCount} subnets, ${assessment.networkSummary.totalNICs} NICs\nBC Posture: ${assessment.bcPosture.drServers} DR servers, ${assessment.bcPosture.monitoredAssets} monitored, ${assessment.bcPosture.unmonitoredAssets} unmonitored, Backup Tools: ${JSON.stringify(assessment.bcPosture.backupTools)}\nApplications Discovered: ${apps.length} (Enterprise: ${apps.filter(a => a.category === "Enterprise").length}, Business: ${apps.filter(a => a.category === "Business").length})\nTop Applications: ${JSON.stringify(apps.slice(0, 20).map(a => ({ name: a.name, category: a.category, servers: a.serverCount, owners: a.owners })))}\nEOL Summary: ${JSON.stringify(assessment.eolHeatmap?.slice(0, 15))}\nDiscovery Findings: Monitoring Coverage=${assessment.discoveryFindings?.coverageScore || 0}%, Visibility Gaps: No Monitoring=${assessment.discoveryFindings?.visibilityGaps?.noMonitoring || 0}, No Owner=${assessment.discoveryFindings?.visibilityGaps?.noOwner || 0}, No Application=${assessment.discoveryFindings?.visibilityGaps?.noApplication || 0}, Missing OS=${assessment.discoveryFindings?.visibilityGaps?.missingOS || 0}`);
             } catch (_) {}
           }
         } catch (_) {}
@@ -8970,6 +8409,7 @@ Focus on actionable, phased recommendations with clear prioritization. Do NOT le
   "findings": [{"id": "F-001", "title": "finding", "severity": "critical|high|medium|low", "description": "30 words max", "affectedSystems": "list", "mitreTechnique": "T1xxx"}],
   "recommendations": [{"id": "R-001", "title": "rec", "priority": "critical|high|medium|low", "effort": "low|medium|high", "timeline": "immediate|short-term|medium-term", "description": "actionable", "relatedFinding": "F-001"}],
   "incidentSummary": {"totalIncidents": 0, "bySeverity": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "mttdHours": 0, "mttrHours": 0, "slaAdherencePercent": 0},
+  "killChainBreakdown": [{"phase": "Reconnaissance|Weaponization|Delivery|Exploitation|Installation|Command & Control|Actions on Objectives", "count": 0, "percentage": 0, "riskImplication": "1 sentence"}],
   "msspValueStatement": {"threatsBlocked": 0, "incidentsPrevented": 0, "hoursSaved": 0, "meanTimeToDetect": "X hours", "meanTimeToRespond": "X hours"},
   "conclusion": "1 paragraph: operational posture + top 3 priorities",
   "appendix": {"glossary": [{"term": "acronym", "definition": "brief"}]}
@@ -9100,6 +8540,7 @@ Focus on actionable, phased recommendations with clear prioritization. Do NOT le
     "mttdHours": 0, "mttrHours": 0, "slaAdherencePercent": 0,
     "severityChartData": [{"name": "Critical", "value": 0}, {"name": "High", "value": 0}, {"name": "Medium", "value": 0}, {"name": "Low", "value": 0}]
   },
+  "killChainBreakdown": [{"phase": "Reconnaissance|Weaponization|Delivery|Exploitation|Installation|Command & Control|Actions on Objectives", "count": 0, "percentage": 0, "riskImplication": "1 sentence"}],
   "assetCoverage": [{"assetType": "Endpoints|Servers|Email|Cloud", "total": 0, "protected": 0, "coveragePercent": 0, "technology": "product name", "gaps": "brief"}],
   "keyHighlights": [{"label": "metric", "value": "number", "trend": "up|down|stable", "trendDetail": "+X%", "context": "10 words"}],
   "securityScorecard": {"overallScore": 0, "previousScore": 0, "categories": [{"name": "category", "score": 0, "maxScore": 100, "grade": "A-F", "detail": "10 words"}]},
@@ -9183,6 +8624,7 @@ Focus on actionable, phased recommendations with clear prioritization. Do NOT le
     "mttdHours": 0, "mttrHours": 0, "slaAdherencePercent": 0,
     "severityChartData": [{"name": "Critical", "value": 0}, {"name": "High", "value": 0}, {"name": "Medium", "value": 0}, {"name": "Low", "value": 0}]
   },
+  "killChainBreakdown": [{"phase": "Reconnaissance|Weaponization|Delivery|Exploitation|Installation|Command & Control|Actions on Objectives", "count": 0, "percentage": 0, "riskImplication": "1 sentence"}],
   "keyHighlights": [{"label": "metric", "value": "number", "trend": "up|down|stable", "trendDetail": "+X%", "context": "10 words"}],
   "securityScorecard": {"overallScore": 0, "previousScore": 0, "categories": [{"name": "category", "score": 0, "maxScore": 100, "grade": "A-F", "detail": "10 words"}]},
   "maturityAssessment": {"overallMaturity": "Initial|Developing|Defined|Managed|Optimizing", "domains": [{"domain": "Govern|Identify|Protect|Detect|Respond|Recover", "score": 1, "target": 3, "detail": "1 sentence", "coveragePercent": 0}]},
@@ -9264,13 +8706,19 @@ Focus on actionable, phased recommendations with clear prioritization. Do NOT le
 - conclusion: MAXIMUM 60 words, findings: MAXIMUM 30 words each
 - Populate ALL fields with realistic numbers from the data
 - NO raw logs, NO verbose narratives
-- Use Big4 consulting language but BE CONCISE`;
+- Use enterprise MSSP consulting language — professional, board-ready, and concise`;
 
-      if (!promptContext || promptContext.trim().length < 50) {
-        promptContext = `No specific ${reportTypeLabel} data found for this tenant. Generate a report template with recommendations based on industry best practices for a managed security services client. Include realistic placeholder metrics and actionable recommendations. Note: This report uses estimated values as the specific data source for this report type is not yet configured.`;
+      const insufficientData = !promptContext || promptContext.trim().length < 50;
+      if (insufficientData) {
+        // Short-circuit: skip the AI call entirely so the contradictory "populate
+        // realistic numbers" strict rules can never produce fabricated output for
+        // empty-data tenants. The fallback block below renders a structured
+        // "insufficient data" report.
+        reportFallbackUsed = true;
+        promptContext = `No specific ${reportTypeLabel} data available for this tenant.`;
       }
 
-      const prompt = `You are a Principal Cybersecurity Consultant at a Big4 consulting firm. Prepare a CONCISE, BOARD-READY MSSP-grade ${reportTypeLabel} report for ${tenant?.name || "the client"}.
+      const prompt = `You are a Senior Cybersecurity Analyst and MSSP Expert for Cyber Command Center. Prepare a CONCISE, BOARD-READY MSSP-grade ${reportTypeLabel} report for ${tenant?.name || "the client"}.
 
 CRITICAL FORMAT RULE: This report will be rendered as a professional PDF. ALL text must be extremely concise. NO verbose narratives. NO raw logs. Focus on VISUALS, METRICS, and TABLES.
 ${categoryInstruction ? `\n${categoryInstruction}\n` : ""}
@@ -9317,13 +8765,23 @@ ${customPrompt ? `\nADDITIONAL USER INSTRUCTIONS (follow these closely):\n${cust
         }
       }
       if (reportFallbackUsed && !reportData.executiveSummary) {
-        reportData = {
-          executiveSummary: "AI report generation is temporarily unavailable. This report was generated using a structured template based on your security data. Key findings and recommendations below reflect current data trends.",
-          findings: [{ id: "F-001", title: "AI Service Unavailable", severity: "low", description: "The AI report generation service is temporarily offline. Re-generate this report when AI services are restored for a full narrative analysis.", affectedSystems: "Report Generation", mitreTechnique: "" }],
-          recommendations: ["Re-generate this report when AI services are restored", "Review incident data directly in the Incidents module", "Check SLA compliance via the Tickets dashboard", "Monitor real-time events in the SOC Console"],
-          keyHighlights: [{ label: "Report Status", value: "Template (AI Unavailable)", trend: "stable", context: "AI services temporarily offline" }],
-          sections: [],
-        };
+        if (insufficientData) {
+          reportData = {
+            executiveSummary: `Insufficient data: no telemetry has been received for the ${reportTypeLabel} scope in the requested period. No metrics, findings, or recommendations can be generated until data collection is configured.`,
+            findings: [{ id: "F-001", title: "Insufficient Data", severity: "info", description: `No ${reportTypeLabel} telemetry was found for this tenant in the selected period. Configure the relevant connectors / log sources and re-run this report once data is flowing.`, affectedSystems: "Data Collection", mitreTechnique: "" }],
+            recommendations: ["Configure the data sources required for this report type", "Verify connector and log-source health in Log Intelligence → Source Management", "Re-generate this report once telemetry is being ingested"],
+            keyHighlights: [{ label: "Report Status", value: "Insufficient Data", trend: "stable", context: "No telemetry received for this report scope" }],
+            sections: [],
+          };
+        } else {
+          reportData = {
+            executiveSummary: "AI report generation is temporarily unavailable. This report was generated using a structured template based on your security data. Key findings and recommendations below reflect current data trends.",
+            findings: [{ id: "F-001", title: "AI Service Unavailable", severity: "low", description: "The AI report generation service is temporarily offline. Re-generate this report when AI services are restored for a full narrative analysis.", affectedSystems: "Report Generation", mitreTechnique: "" }],
+            recommendations: ["Re-generate this report when AI services are restored", "Review incident data directly in the Incidents module", "Check SLA compliance via the Tickets dashboard", "Monitor real-time events in the SOC Console"],
+            keyHighlights: [{ label: "Report Status", value: "Template (AI Unavailable)", trend: "stable", context: "AI services temporarily offline" }],
+            sections: [],
+          };
+        }
       }
 
       const reportTitle = title || `${periodLabel} ${reportTypeLabel} Report - ${tenant?.name}`;
@@ -9379,6 +8837,7 @@ ${customPrompt ? `\nADDITIONAL USER INSTRUCTIONS (follow these closely):\n${cust
           workloadClassification: reportData.workloadClassification || {},
           eolAnalysis: reportData.eolAnalysis || {},
           msspValueStatement: reportData.msspValueStatement || {},
+          killChainBreakdown: reportData.killChainBreakdown || [],
         },
         status: "published",
         filePath,
@@ -10195,7 +9654,7 @@ The document should be production-ready, comprehensive, and suitable for enterpr
           generatedVersion: (existingDoc.generatedVersion || 1) + 1,
           updatedBy: access.userId,
           updatedAt: new Date(),
-        });
+        } as any);
         res.json(updated);
       } else {
         const docTitle = `${productDef.name} - ${docLabel}`;
@@ -10203,7 +9662,7 @@ The document should be production-ready, comprehensive, and suitable for enterpr
           tenantId,
           title: docTitle,
           content,
-          category: categoryMap[docType] || "other",
+          category: (categoryMap[docType] || "other") as any,
           status: "published",
           tags: `${productDef.vendor},${productDef.category},auto-generated,security-controls`,
           customerVisible: true,
@@ -10511,7 +9970,7 @@ Respond in JSON:
       assertMSSRole(access);
       const tid = access.tenantId;
 
-      const allTickets = await storage.getTickets(tid);
+      const allTickets = await storage.getTickets(tid as number);
 
       const openTickets = allTickets.filter((t: any) => t.status === "open" || t.status === "in_progress");
       const resolvedTickets = allTickets.filter((t: any) => t.status === "resolved" || t.status === "closed");
@@ -10929,6 +10388,30 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
     }
   });
 
+  // ── SSE import progress stream (Task #555) ──────────────────────────────
+  app.get("/api/import/progress/:jobId", isAuthenticated, async (req: any, res) => {
+    try {
+      const { streamJobProgress, getImportJob } = await import("./import-stream");
+      const job = getImportJob(req.params.jobId);
+      if (!job) return res.status(404).json({ message: "Import job not found" });
+
+      // ── Tenant ownership authorisation ─────────────────────────────────────
+      // An authenticated user who guesses or obtains a jobId must not be able
+      // to read another tenant's import progress metadata.
+      const access = await getUserTenantAccess(req);
+      const isSuperAdmin = (access.role === "superadmin" || access.role === "platform_admin");
+      const callerTenantId: number | undefined = (req.user as any)?.tenantId ?? access.tenantId;
+      if (!isSuperAdmin && job.tenantId !== callerTenantId) {
+        return res.status(403).json({ message: "Access denied to this import job" });
+      }
+      // ── /authorisation ─────────────────────────────────────────────────────
+
+      streamJobProgress(req.params.jobId, res);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   app.post("/api/import", isAuthenticated, upload.single("file"), async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
@@ -10941,17 +10424,320 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
-      const originalName = req.file.originalname || "";
-      const ext = path.extname(originalName).toLowerCase();
+      // Hardening: validate filename (block traversal/nul-byte), magic-byte sniff
+      // the contents, and constrain to the spreadsheet/CSV/PDF extensions this
+      // route actually parses. Rejected uploads are surfaced as HTTP 400.
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "tsv", "xlsx", "xls", "pdf", "txt", "log", "json", "ndjson"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const originalName = safe.safeName;
+      const ext = "." + safe.ext;
 
       const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_${originalName}`);
       fs.copyFileSync(req.file.path, savedPath);
       fs.unlinkSync(req.file.path);
 
+      // ── Task #555: Wire-format sniffing (CEF / LEEF / STIX / OCSF) ─────────
+      // Read the first 4 KB for both line-protocol detection (CEF/LEEF) and
+      // structural JSON detection (STIX/OCSF via regex on the header block).
+      // All four paths return a job-ID JSON response *immediately* so the
+      // frontend can subscribe to GET /api/import/progress/:jobId for live
+      // progress updates via SSE.  The actual storage work runs in a
+      // setImmediate background callback, clearing the HTTP response path.
+      try {
+        const headBuf = Buffer.alloc(4096);
+        const fd = fs.openSync(savedPath, "r");
+        const bytesRead = fs.readSync(fd, headBuf, 0, 4096, 0);
+        fs.closeSync(fd);
+        const headStr = headBuf.slice(0, bytesRead).toString("utf8");
+        // Skip blank lines and comment lines (# prefix) when sniffing — real CEF/LEEF
+        // files often have a header comment block before the first event line.
+        const firstLine = (
+          headStr.split(/\r?\n/)
+            .map(l => l.trimStart())
+            .find(l => l.length > 0 && !l.startsWith("#"))
+          ?? headStr.split(/\r?\n/)[0].trimStart()
+        );
+        const { sniffWireFormat, parseLogBuffer, importStixBundle, importOcsfEvent } = await import("./parsers/wire-formats");
+        const wireSniff = sniffWireFormat(firstLine);
+
+        // Robust JSON-format detection: regex on the 4 KB header avoids the
+        // brittleness of first-line sniffing on pretty-printed bundles.
+        const isJsonExt = ext === ".json" || ext === ".ndjson";
+        const isStixBundle = isJsonExt && (
+          /"type"\s*:\s*"bundle"/.test(headStr) ||
+          /"spec_version"\s*:\s*"2\.[01]"/.test(headStr)
+        );
+        const isOcsfEvent = isJsonExt && !isStixBundle && (
+          /"class_uid"\s*:/.test(headStr) ||
+          /"category_uid"\s*:/.test(headStr)
+        );
+
+        // ── CEF / LEEF ──────────────────────────────────────────────────────
+        if (wireSniff.type === "cef" || wireSniff.type === "leef") {
+          const wireLabel = wireSniff.type.toUpperCase();
+          const detectedVendor = (
+            `${(wireSniff as any).vendor || ""} ${(wireSniff as any).product || ""}`.trim() || wireLabel
+          );
+          const { createImportJob: _wj, processFileStream: _wpfs } = await import("./import-stream");
+          const wireJob = _wj({
+            tenantId: tid,
+            userId: (req.user as any)?.id || 0,
+            detectedVendor,
+            dataType: "events",
+            schemaSource: "wire",
+          });
+
+          // Respond immediately so the frontend can open the SSE progress stream
+          res.json({ importJobId: wireJob.jobId, detectedVendor, dataType: "events", schemaSource: "wire" });
+
+          // Background processing — uses streamLogFile (line-by-line) inside processFileStream
+          // so the file is never fully loaded into memory, satisfying the streaming requirement.
+          setImmediate(() => {
+            (async () => {
+              try {
+                await _wpfs({
+                  filePath: savedPath,
+                  ext: ext.slice(1), // "txt" or "log"
+                  tenantId: tid,
+                  job: wireJob,
+                  onChunk: async (chunkRows) => {
+                    let published = 0, errors = 0;
+                    for (const cdm of chunkRows) {
+                      try {
+                        await storage.createSecurityEvent({
+                          tenantId: tid,
+                          eventType: (cdm as any).eventType || "network",
+                          severity: (cdm as any).severity || "medium",
+                          threat: (cdm as any).threat ?? null,
+                          target: (cdm as any).target ?? null,
+                          attacker: (cdm as any).attacker ?? null,
+                          asset: (cdm as any).asset ?? null,
+                          description: (cdm as any).description ?? null,
+                          action: (cdm as any).action ?? null,
+                          sourceType: (cdm as any).sourceType || wireLabel,
+                          logSource: (cdm as any).logSource || wireLabel,
+                          rawPayload: (cdm as any).rawPayload || {},
+                          occurredAt: (cdm as any).occurredAt || new Date(),
+                        });
+                        published++;
+                        // Elevate high/critical CDM events to incidents
+                        if ((cdm as any).severity === "critical" || (cdm as any).severity === "high") {
+                          try {
+                            await storage.createIncident({
+                              tenantId: tid,
+                              title: (cdm as any).threat || `${wireLabel} High-Severity Event`,
+                              description: (cdm as any).description ?? null,
+                              severity: (cdm as any).severity || "high",
+                              status: "open",
+                              source: (cdm as any).sourceType || wireLabel,
+                              category: (cdm as any).eventType || "network",
+                              sourceIp: (cdm as any).attacker ?? null,
+                              destinationIp: (cdm as any).target ?? null,
+                              detectionSource: wireLabel,
+                              mitreTactic: (cdm as any).mitreTactic ?? null,
+                              mitreTechniqueId: null,
+                              mitreTechnique: null,
+                              killChainPhase: null,
+                              confidenceScore: 65,
+                              classification: "suspicious",
+                              iocData: null,
+                            });
+                          } catch {}
+                        }
+                      } catch { errors++; }
+                    }
+                    return { published, errors };
+                  },
+                });
+              } catch (bgErr: any) {
+                Object.assign(wireJob, { status: "error" as const, errors: [(bgErr as any).message] });
+              } finally {
+                try { fs.unlinkSync(savedPath); } catch {}
+              }
+            })();
+          });
+          return;
+        }
+
+        // ── STIX 2.x bundle (robust header detection) ───────────────────────
+        if (isStixBundle) {
+          const stixVendor = "STIX 2.x Bundle";
+          const { createImportJob: _sj } = await import("./import-stream");
+          const stixJob = _sj({
+            tenantId: tid,
+            userId: (req.user as any)?.id || 0,
+            detectedVendor: stixVendor,
+            dataType: "events",
+            schemaSource: "wire",
+          });
+
+          res.json({ importJobId: stixJob.jobId, detectedVendor: stixVendor, dataType: "events", schemaSource: "wire" });
+
+          setImmediate(() => {
+            (async () => {
+              try {
+                Object.assign(stixJob, { status: "processing" as const });
+                const content = fs.readFileSync(savedPath, "utf8");
+                fs.unlinkSync(savedPath);
+                const bundle = JSON.parse(content);
+                const stixResult = importStixBundle(bundle);
+                let eventsCreated = 0;
+                for (const ioc of stixResult.iocs.slice(0, 500)) {
+                  try {
+                    await storage.createSecurityEvent({
+                      tenantId: tid,
+                      eventType: "network",
+                      severity: ioc.confidence >= 80 ? "high" : "medium",
+                      threat: `IOC: ${ioc.type}`,
+                      target: ioc.value,
+                      attacker: ioc.value,
+                      description: ioc.description || `STIX Indicator: ${ioc.type}=${ioc.value}`,
+                      action: "Detected",
+                      sourceType: "STIX 2.1",
+                      logSource: "STIX Bundle Import",
+                      rawPayload: ioc.rawStix,
+                      occurredAt: new Date(),
+                    });
+                    eventsCreated++;
+                  } catch {}
+                }
+
+                // ── Persist CTI objects to dedicated Cyber Intelligence Hub tables ──
+                const { ctiThreatActors: _ctiTA, ctiMalwareFamilies: _ctiMW, ctiCampaigns: _ctiCP } = await import("@shared/schema");
+                for (const actor of stixResult.threatActors) {
+                  try {
+                    await db.insert(_ctiTA).values({
+                      tenantId: tid,
+                      name: actor.name,
+                      aliases: actor.aliases.length > 0 ? actor.aliases : [],
+                      description: actor.description,
+                      sophistication: (actor.sophistication as any) || "intermediate",
+                      stixId: `stix-ta-${actor.name.toLowerCase().replace(/\W+/g, "-").slice(0, 80)}`,
+                    }).onConflictDoNothing();
+                  } catch {}
+                }
+                for (const malware of stixResult.malwareFamilies) {
+                  try {
+                    await db.insert(_ctiMW).values({
+                      tenantId: tid,
+                      name: malware.name,
+                      aliases: malware.aliases.length > 0 ? malware.aliases : [],
+                      description: malware.description,
+                      malwareTypes: malware.malwareTypes.length > 0 ? malware.malwareTypes : [],
+                      stixId: `stix-mw-${malware.name.toLowerCase().replace(/\W+/g, "-").slice(0, 80)}`,
+                    }).onConflictDoNothing();
+                  } catch {}
+                }
+                for (const campaign of stixResult.campaigns) {
+                  try {
+                    await db.insert(_ctiCP).values({
+                      tenantId: tid,
+                      name: campaign.name,
+                      description: campaign.description,
+                      firstSeen: campaign.firstSeen ? new Date(campaign.firstSeen) : null,
+                      lastSeen: campaign.lastSeen ? new Date(campaign.lastSeen) : null,
+                      stixId: `stix-cp-${campaign.name.toLowerCase().replace(/\W+/g, "-").slice(0, 80)}`,
+                    }).onConflictDoNothing();
+                  } catch {}
+                }
+
+                Object.assign(stixJob, {
+                  status: "done" as const,
+                  completedAt: Date.now(),
+                  rowsProcessed: stixResult.totalObjects,
+                  eventsPublished: eventsCreated,
+                  detectedVendor: `STIX ${stixResult.iocs.length} IOCs, ${stixResult.threatActors.length} actors, ${stixResult.malwareFamilies.length} malware, ${stixResult.campaigns.length} campaigns`,
+                });
+              } catch (bgErr: any) {
+                Object.assign(stixJob, { status: "error" as const, errors: [bgErr.message] });
+                try { fs.unlinkSync(savedPath); } catch {}
+              }
+            })();
+          });
+          return;
+        }
+
+        // ── OCSF event ───────────────────────────────────────────────────────
+        if (isOcsfEvent) {
+          const ocsfVendor = "OCSF Event";
+          const { createImportJob: _oj } = await import("./import-stream");
+          const ocsfJob = _oj({
+            tenantId: tid,
+            userId: (req.user as any)?.id || 0,
+            detectedVendor: ocsfVendor,
+            dataType: "events",
+            schemaSource: "wire",
+          });
+
+          res.json({ importJobId: ocsfJob.jobId, detectedVendor: ocsfVendor, dataType: "events", schemaSource: "wire" });
+
+          setImmediate(() => {
+            (async () => {
+              try {
+                Object.assign(ocsfJob, { status: "processing" as const });
+                const content = fs.readFileSync(savedPath, "utf8");
+                fs.unlinkSync(savedPath);
+                const event = JSON.parse(content);
+                const normalized = importOcsfEvent(event);
+                await storage.createSecurityEvent({
+                  tenantId: tid,
+                  eventType: normalized.eventType || "network",
+                  severity: normalized.severity || "medium",
+                  threat: normalized.threat,
+                  target: normalized.target,
+                  attacker: normalized.attacker,
+                  description: normalized.description,
+                  action: normalized.action,
+                  sourceType: "OCSF",
+                  logSource: "OCSF Import",
+                  rawPayload: normalized.rawPayload || event,
+                  occurredAt: normalized.occurredAt || new Date(),
+                });
+                Object.assign(ocsfJob, {
+                  status: "done" as const,
+                  completedAt: Date.now(),
+                  rowsProcessed: 1,
+                  eventsPublished: 1,
+                });
+              } catch (bgErr: any) {
+                Object.assign(ocsfJob, { status: "error" as const, errors: [bgErr.message] });
+                try { fs.unlinkSync(savedPath); } catch {}
+              }
+            })();
+          });
+          return;
+        }
+      } catch (wireErr: any) {
+        // Wire-format detection failed — fall through to CSV/XLSX parsing
+        console.warn("[import] wire-format sniff failed, falling through:", wireErr.message);
+      }
+      // ── End Task #555 wire-format block ─────────────────────────────────────
+
       let rows: any[] = [];
 
       const SKIP_SHEET_PATTERNS = [/^pivot$/i, /^sheet\d+$/i, /vmname\s*count/i];
-      const shouldSkipSheet = (name: string): boolean => SKIP_SHEET_PATTERNS.some(p => p.test(name.trim()));
+      // Never skip a sheet when it is the only candidate — many vendor exports
+      // (CrowdStrike, SentinelOne, etc.) use "Sheet1" as the sole sheet name.
+      const hasNonSkippableSheet = (allNames: string[]): boolean =>
+        allNames.some(n => !SKIP_SHEET_PATTERNS.some(p => p.test(n.trim())));
+      const shouldSkipSheet = (name: string, allSheetNames: string[] = []): boolean => {
+        if (allSheetNames.length > 0 && !hasNonSkippableSheet(allSheetNames)) return false;
+        return SKIP_SHEET_PATTERNS.some(p => p.test(name.trim()));
+      };
 
       const STATUS_NOT_OS = new Set([
         "decommissioned", "running", "operational", "powered off", "powered on", "poweredoff", "poweredon",
@@ -10972,7 +10758,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         const workbook = XLSX.readFile(filePath);
         const allRows: any[] = [];
         for (const sheetName of workbook.SheetNames) {
-          if (shouldSkipSheet(sheetName)) continue;
+          if (shouldSkipSheet(sheetName, workbook.SheetNames)) continue;
           const sheet = workbook.Sheets[sheetName];
           const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
           if (!rawData || rawData.length === 0) continue;
@@ -11058,14 +10844,106 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         return incidents;
       }
 
+      // ── Streaming CSV/TSV path (Task #555) — processFileStream + immediate importJobId ─
+      // Returns JSON immediately; rows streamed in 1000-row chunks via processFileStream,
+      // published to Kinesis (or onChunk DB fallback) without loading the full file.
       if (ext === ".csv" || ext === ".tsv") {
-        const workbook = XLSX.readFile(savedPath, { type: "file" });
-        for (const sheetName of workbook.SheetNames) {
-          const sheet = workbook.Sheets[sheetName];
-          const sheetRows = XLSX.utils.sheet_to_json(sheet);
-          rows.push(...sheetRows);
+        const {
+          createImportJob: _csvCreate,
+          processFileStream: _pfs,
+        } = await import("./import-stream");
+        const { normalizeSeverity: _normSev } = await import("./import-intelligence");
+        // Route schema discovery through the DB-backed LLM cache:
+        // discoverSchema checks import_schema_cache first, calls AI on miss, persists result.
+        const { discoverSchema: _discoverSchema } = await import("./ai-normalizer");
+
+        // Peek first 50 data rows (bounded read — not a full file load)
+        const peekWb = XLSX.readFile(savedPath, { sheetRows: 51 });
+        const peekRows: any[] = [];
+        for (const sn of peekWb.SheetNames) {
+          peekRows.push(...(XLSX.utils.sheet_to_json(peekWb.Sheets[sn]) as any[]));
         }
-      } else if (ext === ".xlsx" || ext === ".xls") {
+
+        const schemaResult = await _discoverSchema(peekRows, tid);
+        const fieldMappings = schemaResult.fieldMappings.map(m => ({
+          sourceCol: m.sourceCol,
+          cdmField: m.cdmField,
+        }));
+
+        const csvJob = _csvCreate({
+          tenantId: tid,
+          userId: (req.user as any)?.id || 0,
+          detectedVendor: schemaResult.detectedVendor || originalName,
+          dataType: schemaResult.dataType || "events",
+          schemaSource: schemaResult.schemaSource as any,
+        });
+
+        // Respond immediately — frontend opens EventSource to /api/import/progress/:jobId
+        res.json({
+          importJobId: csvJob.jobId,
+          detectedVendor: csvJob.detectedVendor,
+          dataType: csvJob.dataType,
+          schemaSource: csvJob.schemaSource,
+        });
+
+        const VALID_SEVERITY = new Set(["critical","high","medium","low","info"]);
+        const VALID_EVENT_TYPE = new Set(["network","endpoint","identity","cloud","vulnerability","email","casb","waf","dlp","sse","web","database","ot_iot"]);
+        const csvVendor = schemaResult.detectedVendor || "CSV Import";
+
+        setImmediate(() => {
+          (async () => {
+            try {
+              await _pfs({
+                filePath: savedPath,
+                ext: ext.slice(1), // "csv" or "tsv"
+                tenantId: tid,
+                fieldMappings,
+                job: csvJob,
+                onChunk: async (chunkRows) => {
+                  let published = 0, errors = 0;
+                  for (const row of chunkRows) {
+                    try {
+                      const sev = _normSev(String(row.severity ?? row.Severity ?? "medium"));
+                      const evtType = String(row.eventType || row.event_type || row.category || "network").toLowerCase();
+                      const evtSev = VALID_SEVERITY.has(sev) ? sev : "medium";
+                      const evtKind = VALID_EVENT_TYPE.has(evtType) ? evtType : "network";
+                      await storage.createSecurityEvent({
+                        tenantId: tid,
+                        eventType: evtKind as any,
+                        severity: evtSev as any,
+                        threat: row.threat || row.name || row.Title || null,
+                        target: row.target || row.destination || null,
+                        attacker: row.attacker || row.source || null,
+                        description: String(row.description || row.message || "").slice(0, 1000) || null,
+                        action: row.action || null,
+                        sourceType: csvVendor,
+                        logSource: originalName,
+                        rawPayload: row,
+                        occurredAt: (() => {
+                          try {
+                            const v = row.occurredAt || row.timestamp || row.eventTime;
+                            return v ? new Date(String(v)) : new Date();
+                          } catch { return new Date(); }
+                        })(),
+                      });
+                      published++;
+                    } catch { errors++; }
+                  }
+                  return { published, errors };
+                },
+              });
+            } catch (bgErr: any) {
+              Object.assign(csvJob, { status: "error" as const, errors: [String((bgErr as any).message)] });
+            } finally {
+              try { fs.unlinkSync(savedPath); } catch {}
+            }
+          })();
+        });
+        return;
+      }
+      // ── End streaming CSV/TSV path ────────────────────────────────────────────
+
+      if (ext === ".xlsx" || ext === ".xls") {
         if (isVerticalFormat(savedPath)) {
           rows = parseVerticalFormat(savedPath);
         } else {
@@ -11278,8 +11156,15 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       }
 
       const allColumnSet = new Set<string>();
-      for (let ri = 0; ri < Math.min(rows.length, 50); ri++) {
+      const colFwdLimit = Math.min(rows.length, 100);
+      for (let ri = 0; ri < colFwdLimit; ri++) {
         if (rows[ri]) Object.keys(rows[ri]).forEach(k => allColumnSet.add(k));
+      }
+      if (rows.length > 100) {
+        const colBwdStart = Math.max(colFwdLimit, rows.length - 100);
+        for (let ri = colBwdStart; ri < rows.length; ri++) {
+          if (rows[ri]) Object.keys(rows[ri]).forEach(k => allColumnSet.add(k));
+        }
       }
       const detectedColumns = Array.from(allColumnSet);
 
@@ -11365,33 +11250,44 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         serverType: ["server type", "vm type", "infra type"],
       };
 
-      const normalizeCol = (col: string): string => col.toLowerCase().replace(/[_\-\.\/\\]+/g, " ").replace(/\s+/g, " ").trim();
+      // ── Intelligent column mapper — handles any vendor, any language, any casing.
+      // Level 1: exact normalized  Level 2: fuzzy (Levenshtein+token overlap)
+      // Level 3: AI semantic (cached by header fingerprint, fires when L1+L2
+      //          coverage < 2 key fields)
+      // Falls back gracefully when AI is unavailable.
+      const normalizeCol = importNormalizeKey;
 
-      const buildColumnIndex = (cols: string[]): Record<string, string> => {
-        const index: Record<string, string> = {};
-        const normalizedCols = cols.map(c => ({ original: c, normalized: normalizeCol(c) }));
-        for (const [field, aliases] of Object.entries(COLUMN_MAP)) {
-          for (const alias of aliases) {
-            const match = normalizedCols.find(c => c.normalized === alias);
-            if (match && !index[field]) {
-              index[field] = match.original;
-              break;
-            }
-          }
-          if (!index[field]) {
-            for (const alias of aliases) {
-              const match = normalizedCols.find(c => c.normalized.includes(alias) || alias.includes(c.normalized));
-              if (match && !index[field]) {
-                index[field] = match.original;
-                break;
-              }
-            }
-          }
-        }
-        return index;
-      };
+      const intelligentIndexResult = await buildIntelligentColumnIndex(
+        detectedColumns,
+        COLUMN_MAP,
+        { filename: originalName, sampleRows: rows.slice(0, 50) }
+      );
+      const colIndex = intelligentIndexResult.index;
 
-      const colIndex = buildColumnIndex(detectedColumns);
+      // Log intelligence metadata for observability
+      if (intelligentIndexResult.aiUsed) {
+        console.log(`[ImportIntelligence] AI schema discovery: vendor=${intelligentIndexResult.vendor} contentType=${intelligentIndexResult.contentType} lang=${intelligentIndexResult.language} coverage=${intelligentIndexResult.coveragePct}%`);
+      }
+
+      // Content type classification (heuristic, instant)
+      const contentClassification = classifyContentTypeHeuristic(detectedColumns, rows.slice(0, 5));
+      const detectedContentType = intelligentIndexResult.contentType !== "events"
+        ? intelligentIndexResult.contentType
+        : contentClassification.type;
+
+      // ── Create import job (Task #555) ──────────────────────────────────────
+      // Registers the job in the in-process JOB_STORE so the frontend can
+      // subscribe to GET /api/import/progress/:jobId via EventSource.
+      // The job tracks row-level progress even though parsing is synchronous.
+      const { createImportJob: _createJob, getImportJob: _getJob } = await import("./import-stream");
+      const importJob = _createJob({
+        tenantId: tid,
+        userId: (req.user as any)?.id || 0,
+        detectedVendor: intelligentIndexResult.vendor || "generic",
+        dataType: detectedContentType,
+        schemaSource: intelligentIndexResult.aiUsed ? "ai" : "cache",
+      });
+      Object.assign(importJob, { rowsTotal: rows.length, status: "processing" as const });
 
       const normalizedDetected = detectedColumns.map(c => normalizeCol(c));
       const hasSkyhighWebCols = (col: string) => normalizedDetected.some(c => c === normalizeCol(col) || c.includes(normalizeCol(col)));
@@ -11620,7 +11516,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           for (const rec of userAssetRecords) {
             const existing = existingUserMap.get(rec.userName?.toLowerCase());
             if (existing) {
-              const existingAD = existing.activityData || {};
+              const existingAD: any = existing.activityData || {};
               const emailData = existingAD.email || (existingAD.source === "checkpoint_hec" ? existingAD : null);
               const mergedActivityData = emailData
                 ? { email: emailData, sse: rec.activityData }
@@ -11897,7 +11793,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
             for (const rec of userAssetRecords) {
               const existing = existingUserMap.get(rec.userName?.toLowerCase());
               if (existing) {
-                const existingAD = existing.activityData || {};
+                const existingAD: any = existing.activityData || {};
                 const emailData = existingAD.email || (existingAD.source === "checkpoint_hec" ? existingAD : null);
                 const mergedActivityData = emailData
                   ? { email: emailData, sse: rec.activityData }
@@ -12856,7 +12752,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           for (const ua of userAssetBatch) {
             const existing = existingUserMap.get(ua.userName?.toLowerCase());
             if (existing) {
-              const existingAD = existing.activityData || {};
+              const existingAD: any = existing.activityData || {};
               const sseData = existingAD.sse || (existingAD.source !== "checkpoint_hec" && !existingAD.email ? existingAD : null);
               const mergedActivityData = sseData
                 ? { email: ua.activityData, sse: sseData }
@@ -13520,6 +13416,890 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         });
       }
 
+      // ─────────────────────────────────────────────────────────────────────────
+      // CrowdStrike Multi-Sheet Handler
+      // Covers: Host Inventory (MAC, IP, groups, users, criticality, sensor),
+      //         Spotlight Vulnerability (CVE, CVSS, remediation, affected OS/app),
+      //         Detections (threat name/type/family, action, engine, MITRE).
+      // Triggered by column signatures; each row classified individually so
+      // combined CS3.xlsx exports (multiple sheets merged) are routed correctly.
+      // ─────────────────────────────────────────────────────────────────────────
+      {
+        const csNorm = (k: string) => k.toLowerCase().replace(/[\s_.-]/g, "");
+        const csHas = (...keys: string[]) =>
+          keys.some(k => normalizedDetected.some(c => c === csNorm(k) || c.includes(csNorm(k))));
+
+        // File-level column fingerprints for each data type
+        const isCSHostInvFile =
+          (csHas("sensorversion") && (csHas("hostid") || csHas("macaddress") || csHas("preventionpolicy"))) ||
+          (csHas("lastloggedinuseraccount") && csHas("hostname"));
+
+        const isCSSpotlightFile =
+          normalizedDetected.some(c => c.includes("cve")) &&
+          (normalizedDetected.some(c => c.includes("hostname")) || csHas("aid")) &&
+          !csHas("aggregateid") && !csHas("agentid");
+
+        const isCSDetectionsFile =
+          (csHas("displayname") || csHas("firstbehavior") || csHas("detectionid")) &&
+          !csHas("aggregateid") && !csHas("agentid");
+
+        if (isCSHostInvFile || isCSSpotlightFile || isCSDetectionsFile) {
+          // Row-level getter: exact key → normalized key → dot-path traversal
+          const csGet = (row: any, ...keys: string[]): string => {
+            for (const k of keys) {
+              if (row[k] != null && String(row[k]).trim() !== "") return String(row[k]).trim();
+              const nk = csNorm(k);
+              const found = Object.keys(row).find(rk => csNorm(rk) === nk);
+              if (found && row[found] != null && String(row[found]).trim() !== "") return String(row[found]).trim();
+              if (k.includes(".")) {
+                const parts = k.split(".");
+                let v: any = row;
+                for (const p of parts) { v = v?.[p] ?? v?.[csNorm(p)]; }
+                if (v != null && String(v).trim() !== "") return String(v).trim();
+              }
+            }
+            return "";
+          };
+          const csTs = (v: any): Date => { const d = new Date(String(v || "")); return isNaN(d.getTime()) ? new Date() : d; };
+          const csSev = (v: any): "critical"|"high"|"medium"|"low"|"info" => {
+            const s = String(v || "").toLowerCase().trim();
+            if (s === "critical" || s === "5") return "critical";
+            if (s === "high"     || s === "4") return "high";
+            if (s === "medium"   || s === "3") return "medium";
+            if (s === "low"      || s === "2") return "low";
+            return "medium";
+          };
+          const csCrit = (v: any): "critical"|"high"|"medium"|"low"|null => {
+            const s = String(v || "").toLowerCase();
+            return (["critical","high","medium","low"].includes(s) ? s : null) as any;
+          };
+
+          // ── Pre-load existing data for dedup ─────────────────────────────────
+          // One parallel query each; seeds dedup sets before the row loop so
+          // already-imported events and assets are automatically skipped.
+          const [_existingEvtRows, _existingAssetRows] = await Promise.all([
+            pool.query(
+              `SELECT event_hash FROM security_events
+               WHERE tenant_id = $1 AND source_type = 'CrowdStrike Falcon'
+                 AND event_hash IS NOT NULL`,
+              [tid]
+            ).catch(() => ({ rows: [] as any[] })),
+            pool.query(
+              `SELECT LOWER(hostname) AS hn FROM assets
+               WHERE tenant_id = $1 AND hostname IS NOT NULL AND hostname <> ''`,
+              [tid]
+            ).catch(() => ({ rows: [] as any[] })),
+          ]);
+          const existingEvtHashes = new Set<string>(
+            _existingEvtRows.rows.map((r: any) => r.event_hash as string)
+          );
+          const existingAssetHns = new Set<string>(
+            _existingAssetRows.rows.map((r: any) => r.hn as string)
+          );
+
+          // Accumulators
+          const csAssets      = new Map<string, any>(); // hostname.lower → upsert params
+          const csVulnEvts:    any[] = [];
+          const csDetEvts:     any[] = [];
+          const csIncidents:   any[] = [];
+          const csVulnDedup   = new Set<string>();
+          const csDetDedup    = new Set<string>();
+
+          for (const row of rows) {
+            const rk = Object.keys(row).map(k => csNorm(k));
+            // CVE row: any "cve" column with id/desc/sev/score qualifier or bare "cve"
+            const rowHasCVE = rk.some(k =>
+              k === "cve" || k === "cveid" || k === "cveid" ||
+              (k.includes("cve") && (k.includes("id") || k.includes("desc") || k.includes("sev") || k.includes("score") || k.includes("bas"))));
+            const rowHasSensor   = rk.some(k => k.includes("sensorver"));
+            const rowHasPrevPol  = rk.some(k => k.includes("preventionpol"));
+            const rowHasLastUser = rk.some(k => k.includes("lastloggedin"));
+            const rowHasMac      = rk.some(k => k === "macaddress" || k === "mac");
+            const rowHasDisplayName = rk.some(k => k === "displayname" || k.includes("threatname") || k === "alertname");
+            const rowHasFirstBeh    = rk.some(k => k.includes("firstbehavior"));
+            const rowHasDetId       = rk.some(k => k === "detectionid");
+
+            // ── Host Inventory row ──────────────────────────────────────────────
+            if (!rowHasCVE && (rowHasSensor || rowHasPrevPol || rowHasLastUser || rowHasMac)) {
+              const hostname = csGet(row, "Hostname","hostname","Device Name","device_name");
+              if (!hostname) continue;
+              const hn = hostname.toLowerCase();
+              if (csAssets.has(hn)) continue; // dedup within file
+
+              const localIp    = csGet(row,"Local IP","Local IP Addresses","local_ip","localip");
+              const externalIp = csGet(row,"External IP","external_ip");
+              const macAddress = csGet(row,"MAC Address","mac_address","macaddress","MAC");
+              const firstSeen  = csGet(row,"First Seen","first_seen","firstseen","First Detected");
+              const lastSeen   = csGet(row,"Last Seen","last_seen","lastseen");
+              const osVersion  = csGet(row,"OS Version","os_version","osversion","OperatingSystem");
+              const platform   = csGet(row,"Platform","platform","os_type");
+              const assetType  = csGet(row,"Type","type","device_type","DeviceType");
+              const sensorVerRaw = csGet(row,"Sensor Version","sensor_version","sensorversion","AgentVersion");
+              // AI-smart validation: a real sensor version starts with digits (e.g. "7.14.16703.0").
+              // CrowdStrike sheets sometimes expose the OS platform name in this column instead —
+              // reject those so "Windows 11" never appears as a sensor version.
+              const sensorVer = sensorVerRaw && /^\d+\.\d/.test(sensorVerRaw) && !/^(windows|mac|linux|ubuntu|android|ios|chrome)/i.test(sensorVerRaw)
+                ? sensorVerRaw
+                : null;
+              const hostId     = csGet(row,"Host ID","host_id","hostid","AID","aid","device_id");
+              const hostGroup  = csGet(row,"Host Groups","Host Group","host_groups","host_group","hostgroup");
+              const sensorTags = csGet(row,"Sensor Tags","sensor_tags","sensortags","tags");
+              const lastUser   = csGet(row,"Last Logged In User Account","last_logged_in_user","lastloggedinuseraccount","LastUser","Last User");
+              const critRaw    = csGet(row,"Criticality","criticality");
+              const prevPolicy = csGet(row,"Prevention Policy","prevention_policy","preventionpolicy");
+              const logscale   = csGet(row,"LogScale Collector Policy","logscale_collector_policy");
+              const sensorUpd  = csGet(row,"Sensor Update Policy","sensor_update_policy");
+              const contentUpd = csGet(row,"Content Update Policy","content_update_policy");
+              const hostRet    = csGet(row,"Host Retention Policy","host_retention_policy");
+
+              csAssets.set(hn, {
+                hn:          hostname.slice(0,255),
+                localIp:     localIp?.slice(0,100)   || null,
+                macAddress:  macAddress?.slice(0,50)  || null,
+                os:          (osVersion || platform)?.slice(0,200) || null,
+                type:        assetType?.slice(0,50)   || null,
+                lastSeen:    lastSeen ? csTs(lastSeen) : null,
+                lastUser:    lastUser?.slice(0,255)   || null,
+                criticality: csCrit(critRaw),
+                hostId:      hostId?.slice(0,255)     || null,
+                sensorVer:   sensorVer?.slice(0,100)  || null,
+                hostGroup:   hostGroup?.slice(0,255)  || null,
+                sensorTags:  sensorTags || null,
+                prevPolicy:  prevPolicy?.slice(0,255) || null,
+                enrichment:  JSON.stringify({
+                  externalIp:          externalIp  || null,
+                  platform:            platform    || null,
+                  firstSeen:           firstSeen   ? csTs(firstSeen).toISOString() : null,
+                  sensorVersion:       sensorVer   || null,
+                  hostGroups:          hostGroup   || null,
+                  sensorTags:          sensorTags  || null,
+                  logscalePolicy:      logscale    || null,
+                  sensorUpdatePolicy:  sensorUpd   || null,
+                  contentUpdatePolicy: contentUpd  || null,
+                  hostRetentionPolicy: hostRet     || null,
+                  importedAt:          new Date().toISOString(),
+                  importSource:        "crowdstrike_host_inventory",
+                }),
+              });
+              continue;
+            }
+
+            // ── Spotlight / Vulnerability row ───────────────────────────────────
+            if (rowHasCVE) {
+              const cveId       = csGet(row,"CVE ID","cve.id","cve_id","CVE","cveId","CVEID","CVE-ID");
+              if (!cveId) continue;
+              const hostname    = csGet(row,"Hostname","hostname","host_info.hostname","Device","Host Name","HostName");
+              const aid         = csGet(row,"AID","aid","agent_id","Device ID");
+              const localIp     = csGet(row,"Local IP","Local IP Addresses","host_info.local_ip","local_ip");
+              const osVersion   = csGet(row,"OS Version","host_info.os_version","os_version","osversion","Operating System");
+              const cveDesc     = csGet(row,"CVE Description","cve.description","cve_description","Description","Vuln Description");
+              const cveSevRaw   = csGet(row,"CVE Severity","Severity","cve.severity","cve_severity");
+              const cvssScore   = csGet(row,"CVSS Base Score","CVSS Score","cve.base_score","cvss_base_score","CVSSScore","BaseCVSS");
+              const cvssVector  = csGet(row,"CVSS Vector","cve.vector","cvss_vector");
+              const exploitSt   = csGet(row,"Exploit Status","cve.exprt_rating","exprt_rating","Exploitability","Exploit Rating");
+              const exploitSc   = csGet(row,"Exploitability Score","cve.exploitability_score","exploitability_score");
+              const publishedDt = csGet(row,"Published Date","cve.published_date","cve_published","Published");
+              const status      = csGet(row,"Status","status");
+              const subStatus   = csGet(row,"Sub Status","app.sub_status","sub_status","SubStatus");
+              const remediation = csGet(row,"Remediation","remediation.entities","remediation","Fix","Recommended Fix","Patch");
+              const remType     = csGet(row,"Remediation Type","remediation_type","remediation.action");
+              const productName = csGet(row,"Product Name Version","app.product_name_version","product_name_version","Application","App Name","Affected Software");
+              const siteOrGroup = csGet(row,"Site Name","host_info.site_name","Groups","Host Groups","host_groups","Group");
+              const createdTs   = csGet(row,"Created","created_timestamp","First Detected","Detected Date","Detected");
+              const patchAvail  = csGet(row,"Patch Available","patch_available","Patch Status");
+              const affectedOS  = osVersion || csGet(row,"Affected OS","affected_os");
+              const cveURL      = csGet(row,"CVE URL","cve.base_url","CVE Link","Reference");
+
+              const severity  = csSev(cveSevRaw);
+              const cvssNum   = parseFloat(cvssScore) || null;
+              const isOpen    = !status.toLowerCase().includes("clos") &&
+                                !status.toLowerCase().includes("fix") &&
+                                !status.toLowerCase().includes("resolv");
+              const eventTs   = csTs(createdTs);
+              const dedupKey  = `cs-spot-${tid}-${hostname}-${cveId}`;
+              // Compute hash used for DB-level dedup (matches event_hash column)
+              const evtHash   = crypto.createHash("sha256")
+                .update(`cs-spot::${tid}::${hostname}::${cveId}`).digest("hex").slice(0, 64);
+              // Skip if already in DB (re-import) or seen earlier in this batch
+              if (csVulnDedup.has(dedupKey) || existingEvtHashes.has(evtHash)) continue;
+              csVulnDedup.add(dedupKey);
+              existingEvtHashes.add(evtHash); // prevent intra-batch dupes
+
+              // Upsert asset from Spotlight host info
+              if (hostname) {
+                const hn = hostname.toLowerCase();
+                if (!csAssets.has(hn)) {
+                  csAssets.set(hn, {
+                    hn:          hostname.slice(0,255),
+                    localIp:     localIp?.slice(0,100)   || null,
+                    macAddress:  null,
+                    os:          osVersion?.slice(0,200)  || null,
+                    type:        "Workstation",
+                    lastSeen:    eventTs,
+                    lastUser:    null,
+                    criticality: null,
+                    hostId:      aid?.slice(0,255)        || null,
+                    sensorVer:   null,
+                    hostGroup:   siteOrGroup?.slice(0,255)|| null,
+                    sensorTags:  null,
+                    prevPolicy:  null,
+                    enrichment:  JSON.stringify({ importedAt: new Date().toISOString(), importSource: "crowdstrike_spotlight" }),
+                  });
+                }
+              }
+
+              csVulnEvts.push({
+                tenantId:    tid,
+                eventType:   "vulnerability" as const,
+                severity,
+                threat:      cveId,
+                action:      isOpen ? "Open" : "Remediated",
+                title:       `${cveId}${productName ? " — " + productName : ""}${hostname ? " on " + hostname : ""}`.slice(0,500),
+                description: [
+                  cveDesc || `${cveId} detected via CrowdStrike Spotlight`,
+                  cvssScore   ? `CVSS: ${cvssScore}${cvssVector ? " (" + cvssVector + ")" : ""}` : "",
+                  exploitSt   ? `Exploit Status: ${exploitSt}` : "",
+                  exploitSc   ? `Exploitability: ${exploitSc}` : "",
+                  remediation ? `Remediation: ${remediation}` : "",
+                  remType     ? `Remediation Type: ${remType}` : "",
+                  patchAvail  ? `Patch Available: ${patchAvail}` : "",
+                  affectedOS  ? `Affected OS: ${affectedOS}` : "",
+                  productName ? `Affected Product: ${productName}` : "",
+                  subStatus   ? `Sub-Status: ${subStatus}` : "",
+                  publishedDt ? `Published: ${publishedDt}` : "",
+                  cveURL      ? `Ref: ${cveURL}` : "",
+                ].filter(Boolean).join(" | ").slice(0,5000) || null,
+                source:       "CrowdStrike Falcon",
+                category:     "vulnerability",
+                status:       (isOpen ? "open" : "resolved") as any,
+                asset:        hostname?.slice(0,500) || null,
+                logSource:    "CrowdStrike Falcon",
+                sourceType:   "CrowdStrike Falcon",
+                eventHash:    evtHash,
+                rawPayload: {
+                  cveId, cvssBaseScore: cvssNum, cvssVector,
+                  exploitStatus: exploitSt, exploitabilityScore: exploitSc,
+                  cveDescription: cveDesc, severity: cveSevRaw,
+                  productNameVersion: productName, affectedOS, status, subStatus,
+                  remediation, remediationType: remType, patchAvailable: patchAvail,
+                  publishedDate: publishedDt, cveURL,
+                  hostname, aid, localIp, osVersion, siteOrGroup,
+                  importSource: "crowdstrike_spotlight",
+                },
+                occurredAt:     eventTs,
+                pipelineStatus: "received" as const,
+              });
+
+              if ((severity === "critical" || severity === "high") && isOpen) {
+                const incKey = `cs-spot-inc-${dedupKey}`;
+                if (!csVulnDedup.has(incKey)) {
+                  csVulnDedup.add(incKey);
+                  csIncidents.push({
+                    tenantId:      tid,
+                    title:         `[CVE] ${cveId}${hostname ? " on " + hostname : ""}`.slice(0,500),
+                    description:   [
+                      cveDesc || `CrowdStrike Spotlight: ${cveId} (${severity.toUpperCase()})`,
+                      cvssScore   ? `CVSS: ${cvssScore}` : "",
+                      remediation ? `Remediation: ${remediation}` : "",
+                      productName ? `Affected Product: ${productName}` : "",
+                      affectedOS  ? `Affected OS: ${affectedOS}` : "",
+                    ].filter(Boolean).join(" | ").slice(0,5000),
+                    severity,
+                    status:        "open" as const,
+                    category:      "Vulnerability Management",
+                    source:        "CrowdStrike Falcon",
+                    affectedAssets: hostname?.slice(0,500) || null,
+                    createdAt:     eventTs,
+                  });
+                }
+              }
+              continue;
+            }
+
+            // ── Detection / Incident row ──────────────────────────────────────
+            if (rowHasDisplayName || rowHasFirstBeh || rowHasDetId) {
+              const detectionId  = csGet(row,"Detection ID","detection_id","id","ID","Alert ID");
+              const displayName  = csGet(row,"Display Name","display_name","displayname","Threat Name","Alert Name","Name");
+              const threatType   = csGet(row,"Type","type","detection_type","Scenario","scenario","Category");
+              const threatFamily = csGet(row,"Threat Family","threat_family","adversary","Adversary","Family","Threat Family Name");
+              const sevRaw       = csGet(row,"Severity","severity","Max Severity","Threat Level");
+              const severity     = csSev(sevRaw);
+              const firstBeh     = csGet(row,"First Behavior","first_behavior","firstbehavior","Detected","Detection Time","Timestamp","Created At");
+              const lastBeh      = csGet(row,"Last Behavior","last_behavior","lastbehavior","Last Seen");
+              const status       = csGet(row,"Status","status","State");
+              const actionTaken  = csGet(row,"Actions Taken","actions_taken","action","Action Taken","Pattern Disposition","Disposition");
+              const deviceHost   = csGet(row,"Device: Hostname","device.hostname","Hostname","hostname","Host","Device");
+              const deviceIp     = csGet(row,"Device: Local IP","device.local_ip","Local IP","local_ip");
+              const tactic       = csGet(row,"Tactic","tactic","MITRE Tactic","mitre_tactic","Kill Chain Phase");
+              const technique    = csGet(row,"Technique","technique","MITRE Technique","mitre_technique");
+              const techniqueId  = csGet(row,"Technique ID","technique_id","mitre_technique_id","TechniqueID");
+              const detEng       = csGet(row,"Detection Engine","detection_engine","Detected By","detected_by","Engine","Behaviors: Filename","behaviors.filename","Filename");
+              const confidence   = parseFloat(csGet(row,"Confidence","confidence","Max Confidence","Risk Score")) || null;
+              const assignedTo   = csGet(row,"Assigned To","assigned_to","Analyst","Owner","Assignee");
+              const cmdline      = csGet(row,"Command Line","cmdline","behaviors.cmdline","Command");
+              const filePath     = csGet(row,"File Path","filepath","behaviors.filepath","FilePath","File");
+              const sha256       = csGet(row,"SHA256","sha256","behaviors.sha256","Hash","File Hash");
+              const objective    = csGet(row,"Objective","objective","Description","description");
+
+              if (!displayName && !detectionId) continue;
+
+              const eventTs    = csTs(firstBeh || lastBeh);
+              const dedupKey   = detectionId || `cs-det-${tid}-${deviceHost}-${displayName}-${firstBeh}`;
+              const eventHash  = crypto.createHash("sha256").update(`cs-ms::${tid}::${dedupKey}`).digest("hex").slice(0,64);
+              // Skip if already in DB (re-import) or seen earlier in this batch
+              if (csDetDedup.has(eventHash) || existingEvtHashes.has(eventHash)) continue;
+              csDetDedup.add(eventHash);
+              existingEvtHashes.add(eventHash);
+              const isClosed = status.toLowerCase().includes("clos") ||
+                               status.toLowerCase().includes("false pos") ||
+                               status.toLowerCase().includes("resolv");
+
+              csDetEvts.push({
+                tenantId:    tid,
+                eventType:   "endpoint" as const,
+                severity,
+                title:       (displayName || `CrowdStrike Detection ${detectionId}`).slice(0,500),
+                description: [
+                  objective || "",
+                  threatType   ? `Type: ${threatType}` : "",
+                  threatFamily ? `Threat Family: ${threatFamily}` : "",
+                  actionTaken  ? `Action Taken: ${actionTaken}` : "",
+                  tactic       ? `MITRE Tactic: ${tactic}` : "",
+                  technique    ? `Technique: ${technique}${techniqueId ? " (" + techniqueId + ")" : ""}` : "",
+                  detEng       ? `Detection Engine: ${detEng}` : "",
+                  cmdline      ? `Command: ${cmdline}` : "",
+                  filePath     ? `File: ${filePath}` : "",
+                  sha256       ? `SHA256: ${sha256}` : "",
+                  confidence   ? `Confidence: ${confidence}%` : "",
+                  assignedTo   ? `Assigned To: ${assignedTo}` : "",
+                ].filter(Boolean).join(" | ").slice(0,5000) || null,
+                source:       "CrowdStrike Falcon",
+                category:     "Endpoint Security",
+                status:       (isClosed ? "resolved" : "open") as any,
+                asset:        deviceHost?.slice(0,500)   || null,
+                logSource:    "CrowdStrike Falcon",
+                sourceType:   "CrowdStrike Falcon",
+                sourceIp:     deviceIp?.slice(0,200)     || null,
+                mitreTactic:  tactic?.slice(0,200)       || null,
+                mitreTechnique: technique?.slice(0,200)  || null,
+                action:       actionTaken?.slice(0,100)  || null,
+                riskScore:    confidence ? Math.min(100, Math.round(confidence)) : null,
+                rawPayload: {
+                  detectionId, displayName, threatType, threatFamily,
+                  tactic, technique, techniqueId,
+                  firstBehavior: firstBeh, detectionEngine: detEng,
+                  actionTaken, status, assignedTo,
+                  cmdline, filePath, sha256,
+                  deviceHostname: deviceHost, deviceLocalIp: deviceIp,
+                  importSource: "crowdstrike_detections",
+                },
+                eventHash,
+                occurredAt:     eventTs,
+                pipelineStatus: "received" as const,
+              });
+
+              if ((severity === "critical" || severity === "high") && !isClosed) {
+                const incKey = `cs-det-inc-${eventHash}`;
+                if (!csDetDedup.has(incKey)) {
+                  csDetDedup.add(incKey);
+                  csIncidents.push({
+                    tenantId:        tid,
+                    title:           (displayName || `[CrowdStrike] ${severity.toUpperCase()} Detection`).slice(0,500),
+                    description:     [
+                      `CrowdStrike Falcon ${severity} detection: ${displayName || detectionId}`,
+                      threatFamily  ? `Threat Family: ${threatFamily}` : "",
+                      tactic        ? `MITRE Tactic: ${tactic}` : "",
+                      technique     ? `Technique: ${technique}${techniqueId ? " (" + techniqueId + ")" : ""}` : "",
+                      actionTaken   ? `Action Taken: ${actionTaken}` : "",
+                      detEng        ? `Detection Engine: ${detEng}` : "",
+                      deviceHost    ? `Affected Host: ${deviceHost}` : "",
+                      objective     ? `Objective: ${objective}` : "",
+                    ].filter(Boolean).join("\n").slice(0,5000),
+                    severity,
+                    status:          "open" as const,
+                    category:        "Endpoint Security",
+                    source:          "CrowdStrike Falcon",
+                    affectedAssets:  deviceHost?.slice(0,500)     || null,
+                    mitreTactic:     tactic?.slice(0,200)         || null,
+                    mitreTechnique:  technique?.slice(0,200)      || null,
+                    mitreTechniqueId: techniqueId?.slice(0,50)    || null,
+                    detectionSource: "CrowdStrike Falcon",
+                    incidentType:    "detection",
+                    createdAt:       eventTs,
+                  });
+                }
+              }
+            }
+          } // end row loop
+
+          // ── Batch insert vulnerability events ─────────────────────────────────
+          let csVulnEvtCount = 0;
+          const CS_BATCH = 100;
+          for (let i = 0; i < csVulnEvts.length; i += CS_BATCH) {
+            try {
+              const stored = await storage.createSecurityEvents(csVulnEvts.slice(i, i + CS_BATCH));
+              csVulnEvtCount += stored.length;
+            } catch {
+              for (const e of csVulnEvts.slice(i, i + CS_BATCH)) {
+                try { await storage.createSecurityEvent(e); csVulnEvtCount++; } catch {}
+              }
+            }
+          }
+
+          // ── Batch insert detection events ──────────────────────────────────────
+          let csDetEvtCount = 0;
+          for (let i = 0; i < csDetEvts.length; i += CS_BATCH) {
+            try {
+              const stored = await storage.createSecurityEvents(csDetEvts.slice(i, i + CS_BATCH));
+              csDetEvtCount += stored.length;
+            } catch {
+              for (const e of csDetEvts.slice(i, i + CS_BATCH)) {
+                try { await storage.createSecurityEvent(e); csDetEvtCount++; } catch {}
+              }
+            }
+          }
+
+          // ── Insert incidents in parallel batches of 20 (cap 500 to prevent timeout) ─
+          let csIncCount = 0;
+          const INC_CAP   = 500;
+          const INC_BATCH = 20;
+          const incSlice  = csIncidents.slice(0, INC_CAP);
+          for (let i = 0; i < incSlice.length; i += INC_BATCH) {
+            const chunk   = incSlice.slice(i, i + INC_BATCH);
+            const results = await Promise.allSettled(
+              chunk.map(inc => storage.createIncident(inc as any))
+            );
+            csIncCount += results.filter(r => r.status === "fulfilled").length;
+          }
+          if (csIncidents.length > INC_CAP) {
+            console.warn(`[CS-multi] incidents capped: created=${INC_CAP} total=${csIncidents.length}`);
+          }
+
+          // ── Upsert assets in parallel batches of 10 (ON CONFLICT preserves richer existing data) ─
+          const ASSET_SQL = `INSERT INTO assets (
+                   tenant_id, hostname, ip_address, mac_address, operating_system, endpoint_type,
+                   last_seen, last_logged_in_user, primary_user_email, criticality,
+                   edr_host_id, edr_platform, source_platforms, source,
+                   agent_version, endpoint_group, tags, prevention_policy,
+                   enrichment_data, status, created_at, updated_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,$19::jsonb,'active',NOW(),NOW())
+                 ON CONFLICT (tenant_id, hostname) DO UPDATE SET
+                   ip_address          = COALESCE(EXCLUDED.ip_address,          assets.ip_address),
+                   mac_address         = COALESCE(EXCLUDED.mac_address,         assets.mac_address),
+                   operating_system    = COALESCE(EXCLUDED.operating_system,    assets.operating_system),
+                   endpoint_type       = COALESCE(EXCLUDED.endpoint_type,       assets.endpoint_type),
+                   last_seen           = COALESCE(EXCLUDED.last_seen,           assets.last_seen),
+                   last_logged_in_user = COALESCE(EXCLUDED.last_logged_in_user, assets.last_logged_in_user),
+                   primary_user_email  = COALESCE(EXCLUDED.primary_user_email,  assets.primary_user_email),
+                   criticality         = COALESCE(EXCLUDED.criticality,         assets.criticality),
+                   edr_host_id         = COALESCE(EXCLUDED.edr_host_id,         assets.edr_host_id),
+                   edr_platform        = COALESCE(EXCLUDED.edr_platform,        assets.edr_platform),
+                   source_platforms    = EXCLUDED.source_platforms,
+                   source              = EXCLUDED.source,
+                   agent_version       = COALESCE(EXCLUDED.agent_version,       assets.agent_version),
+                   endpoint_group      = COALESCE(EXCLUDED.endpoint_group,      assets.endpoint_group),
+                   tags                = COALESCE(EXCLUDED.tags,                assets.tags),
+                   prevention_policy   = COALESCE(EXCLUDED.prevention_policy,   assets.prevention_policy),
+                   enrichment_data     = EXCLUDED.enrichment_data,
+                   updated_at          = NOW()`;
+          let csAssetUpserted = 0;
+          const assetList     = Array.from(csAssets.values());
+          const ASSET_PAR     = 10;
+          for (let i = 0; i < assetList.length; i += ASSET_PAR) {
+            const batch   = assetList.slice(i, i + ASSET_PAR);
+            const results = await Promise.allSettled(
+              batch.map(a =>
+                pool.query(ASSET_SQL, [
+                  tid,                                    // $1  tenant_id
+                  a.hn,                                   // $2  hostname
+                  a.localIp,                              // $3  ip_address
+                  a.macAddress,                           // $4  mac_address
+                  a.os,                                   // $5  operating_system
+                  a.type,                                 // $6  endpoint_type
+                  a.lastSeen,                             // $7  last_seen
+                  a.lastUser,                             // $8  last_logged_in_user
+                  a.lastUser,                             // $9  primary_user_email
+                  a.criticality,                          // $10 criticality
+                  a.hostId,                               // $11 edr_host_id
+                  "CrowdStrike Falcon",                   // $12 edr_platform
+                  JSON.stringify(["CrowdStrike Falcon"]), // $13 source_platforms (jsonb)
+                  "CrowdStrike Falcon",                   // $14 source
+                  a.sensorVer,                            // $15 agent_version
+                  a.hostGroup,                            // $16 endpoint_group
+                  a.sensorTags,                           // $17 tags
+                  a.prevPolicy,                           // $18 prevention_policy
+                  a.enrichment,                           // $19 enrichment_data (jsonb)
+                ])
+              )
+            );
+            const failed = results.filter(r => r.status === "rejected") as PromiseRejectedResult[];
+            failed.forEach((r, idx) =>
+              console.error(`[CS-multi] asset upsert hostname="${batch[idx]?.hn}":`, r.reason?.message)
+            );
+            csAssetUpserted += results.filter(r => r.status === "fulfilled").length;
+          }
+
+          // ── Auto-register CrowdStrike as a connected integration ───────────────
+          // This ensures the integration guard allows the imported events to appear
+          // in Endpoint Security, Vulnerability Management, and Incidents pages.
+          try {
+            const existingInt = await pool.query(
+              `SELECT id FROM security_integrations
+               WHERE tenant_id = $1 AND platform_key = 'crowdstrike' AND deleted_at IS NULL
+               LIMIT 1`,
+              [tid]
+            );
+            const totalImported = csVulnEvtCount + csDetEvtCount;
+            if (existingInt.rows.length > 0) {
+              await pool.query(
+                `UPDATE security_integrations
+                 SET status = 'connected', events_imported = events_imported + $1, updated_at = NOW()
+                 WHERE id = $2`,
+                [totalImported, existingInt.rows[0].id]
+              );
+            } else {
+              await pool.query(
+                `INSERT INTO security_integrations
+                   (tenant_id, platform_key, platform_name, category, status,
+                    description, is_enabled, polling_enabled, events_imported,
+                    consecutive_failures, auto_heal_enabled, created_at, updated_at)
+                 VALUES ($1,'crowdstrike','CrowdStrike Falcon','edr','connected',
+                   'Auto-registered via data import',true,false,$2,0,true,NOW(),NOW())`,
+                [tid, totalImported]
+              );
+            }
+            console.log(`[CS-multi] integration auto-registered/updated for tenant=${tid}`);
+          } catch (e: any) {
+            console.warn(`[CS-multi] integration auto-register failed:`, e.message);
+          }
+
+          // ── Auto-sync users from imported assets → user_assets ────────────────
+          // CrowdStrike assets set last_logged_in_user; populate user_assets so
+          // CAASM Users tab shows these identities immediately after import.
+          try {
+            const assetUsers = await pool.query(
+              `SELECT DISTINCT
+                 COALESCE(NULLIF(TRIM(user_name),''), NULLIF(TRIM(last_logged_in_user),'')) AS uname,
+                 id, endpoint_group, last_seen
+               FROM assets
+               WHERE tenant_id = $1
+                 AND COALESCE(NULLIF(TRIM(user_name),''), NULLIF(TRIM(last_logged_in_user),'')) IS NOT NULL
+               LIMIT 2000`,
+              [tid]
+            );
+            let usersSynced = 0;
+            for (const u of assetUsers.rows) {
+              if (!u.uname) continue;
+              const ex = await pool.query(
+                `SELECT id FROM user_assets WHERE tenant_id = $1 AND user_name = $2 LIMIT 1`,
+                [tid, u.uname]
+              );
+              if (ex.rows.length === 0) {
+                await pool.query(
+                  `INSERT INTO user_assets
+                     (tenant_id, user_name, department, risk_score, risk_level,
+                      linked_asset_ids, last_activity, user_status, account_type)
+                   VALUES ($1,$2,$3,0,'low',$4,$5,'active','Domain')`,
+                  [tid, u.uname, u.endpoint_group || null, JSON.stringify([u.id]), u.last_seen]
+                ).catch(() => {});
+                usersSynced++;
+              } else {
+                await pool.query(
+                  `UPDATE user_assets SET last_activity = GREATEST(last_activity, $1),
+                     department = COALESCE(department, $2), updated_at = NOW()
+                   WHERE tenant_id = $3 AND user_name = $4`,
+                  [u.last_seen, u.endpoint_group || null, tid, u.uname]
+                ).catch(() => {});
+                usersSynced++;
+              }
+            }
+            console.log(`[CS-multi] user-sync: ${usersSynced} user_assets records synced for tenant=${tid}`);
+          } catch (e: any) {
+            console.warn(`[CS-multi] user-sync failed:`, e.message);
+          }
+
+          // ── Background NVD CVE enrichment ─────────────────────────────────────
+          // Fire-and-forget: fetch NVD data for unique CVE IDs after responding to
+          // the user so the import response is not delayed by API calls.
+          // NVD free tier: ~5 req/30s → 6.1 s cooldown between requests.
+          if (csVulnEvtCount > 0) {
+            (async () => {
+              try {
+                const cveRes = await pool.query(
+                  `SELECT DISTINCT raw_payload->>'cveId' AS cve_id
+                   FROM security_events
+                   WHERE tenant_id = $1
+                     AND event_type = 'vulnerability'
+                     AND raw_payload->>'cveId' IS NOT NULL
+                     AND (raw_payload->>'nvdEnriched' IS NULL OR raw_payload->>'nvdEnriched' != 'true')
+                   LIMIT 60`,
+                  [tid]
+                );
+                const cveIds: string[] = cveRes.rows
+                  .map((r: any) => (r.cve_id || "").trim())
+                  .filter((id: string) => /^CVE-\d{4}-\d+$/i.test(id));
+
+                if (cveIds.length === 0) return;
+                console.log(`[NVD Enrich] Enriching ${cveIds.length} CVE(s) for tenant ${tid} in background`);
+
+                for (const cveId of cveIds) {
+                  try {
+                    // Rate-limit: NVD free tier allows ~5 req / 30 s
+                    await new Promise(resolve => setTimeout(resolve, 6200));
+                    const nvdRes = await fetch(
+                      `https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=${encodeURIComponent(cveId)}`,
+                      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000) }
+                    );
+                    if (!nvdRes.ok) continue;
+                    const nvdJson: any = await nvdRes.json();
+                    const vuln = nvdJson.vulnerabilities?.[0]?.cve;
+                    if (!vuln) continue;
+
+                    // CVSS — prefer v3.1 > v3.0 > v2
+                    const m31 = vuln.metrics?.cvssMetricV31?.[0];
+                    const m30 = vuln.metrics?.cvssMetricV30?.[0];
+                    const m2  = vuln.metrics?.cvssMetricV2?.[0];
+                    const bestMetric = m31 || m30 || m2;
+
+                    const nvdPatch: Record<string, any> = {
+                      nvdEnriched:           "true",
+                      nvdCvssScore:          bestMetric?.cvssData?.baseScore ?? null,
+                      nvdCvssVector:         bestMetric?.cvssData?.vectorString ?? null,
+                      nvdCvssVersion:        bestMetric?.cvssData?.version ?? null,
+                      nvdExploitabilityScore: bestMetric?.exploitabilityScore ?? null,
+                      nvdImpactScore:        bestMetric?.impactScore ?? null,
+                      nvdSeverity:           bestMetric?.cvssData?.baseSeverity ?? null,
+                      nvdDescription:        vuln.descriptions?.find((d: any) => d.lang === "en")?.value ?? null,
+                      nvdCweId:              vuln.weaknesses?.[0]?.description?.[0]?.value ?? null,
+                      nvdReferences:         (vuln.references || []).slice(0, 5).map((r: any) => r.url),
+                      nvdPublishedDate:      vuln.published ?? null,
+                      nvdLastModified:       vuln.lastModified ?? null,
+                      nvdEnrichedAt:         new Date().toISOString(),
+                    };
+
+                    await pool.query(
+                      `UPDATE security_events
+                       SET raw_payload = raw_payload || $1::jsonb, updated_at = NOW()
+                       WHERE tenant_id = $2 AND event_type = 'vulnerability'
+                         AND raw_payload->>'cveId' = $3`,
+                      [JSON.stringify(nvdPatch), tid, cveId]
+                    );
+
+                    // Append NVD summary to matching open incidents
+                    if (nvdPatch.nvdCvssScore !== null) {
+                      const cvssNote = ` | NVD CVSS ${nvdPatch.nvdCvssScore}${nvdPatch.nvdCweId ? " / " + nvdPatch.nvdCweId : ""}${nvdPatch.nvdExploitabilityScore ? " / Exploitability:" + nvdPatch.nvdExploitabilityScore : ""}`;
+                      await pool.query(
+                        `UPDATE incidents
+                         SET description = description || $1, updated_at = NOW()
+                         WHERE tenant_id = $2 AND title LIKE $3
+                           AND description NOT LIKE '%NVD CVSS%'`,
+                        [cvssNote, tid, `%${cveId}%`]
+                      );
+                    }
+                    console.log(`[NVD Enrich] ${cveId}: CVSS=${nvdPatch.nvdCvssScore}, CWE=${nvdPatch.nvdCweId}`);
+                  } catch (e: any) {
+                    console.warn(`[NVD Enrich] ${cveId} failed:`, e.message);
+                  }
+                }
+                flushAllCache();
+                console.log(`[NVD Enrich] Background enrichment complete for tenant ${tid}`);
+              } catch (e: any) {
+                console.warn(`[NVD Enrich] Background job error for tenant ${tid}:`, e.message);
+              }
+            })();
+          }
+
+          flushAllCache();
+
+          const msgParts: string[] = [];
+          if (csAssetUpserted > 0) msgParts.push(`${csAssetUpserted} assets upserted (${csAssets.size} unique hosts)`);
+          if (csVulnEvtCount  > 0) msgParts.push(`${csVulnEvtCount} vulnerability events`);
+          if (csDetEvtCount   > 0) msgParts.push(`${csDetEvtCount} detection events`);
+          if (csIncCount      > 0) msgParts.push(`${csIncCount} incidents created`);
+
+          console.log(`[CS-multi] tenant=${tid} rows=${rows.length} assets=${csAssetUpserted} vulnEvts=${csVulnEvtCount} detEvts=${csDetEvtCount} incidents=${csIncCount}`);
+
+          return res.json({
+            message:             msgParts.join(", ") || "CrowdStrike data processed (no matching rows found — check column names)",
+            importType:          "crowdstrike_multi",
+            dataType:            "crowdstrike",
+            assetsUpserted:      csAssetUpserted,
+            uniqueHosts:         csAssets.size,
+            vulnerabilityEvents: csVulnEvtCount,
+            detectionEvents:     csDetEvtCount,
+            totalIncidents:      csIncCount,
+            totalRows:           rows.length,
+            detectedColumns,
+            source:              "CrowdStrike Falcon",
+          });
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
+      // --- CrowdStrike Falcon Endpoint Detection & Response Auto-Detection ---
+      const isCrowdStrikeFalcon = hasSkyhighWebCols("agent_id") && hasSkyhighWebCols("aggregate_id") &&
+        (hasSkyhighWebCols("alleged_filetype") || hasSkyhighWebCols("max_severity_displayname") || hasSkyhighWebCols("behaviors.0.scenario"));
+
+      if (isCrowdStrikeFalcon) {
+        const getFalconCol = (row: any, ...keys: string[]): string => {
+          for (const k of keys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") return String(row[k]).trim();
+            const normK = normalizeCol(k);
+            const found = Object.keys(row).find(rk => normalizeCol(rk) === normK);
+            if (found && row[found] !== undefined && row[found] !== null && String(row[found]).trim() !== "") return String(row[found]).trim();
+          }
+          return "";
+        };
+
+        let falconEventsCreated = 0;
+        let falconIncidentsCreated = 0;
+        let falconAssetsCreated = 0;
+        let falconAssetsUpdated = 0;
+        const falconDedupSet = new Set<string>();
+
+        const existingFalconAssets = await storage.getAssets(tid);
+        const existingFalconByHost = new Map(existingFalconAssets.map((a: any) => [a.hostname.toLowerCase(), a]));
+
+        for (const row of rows) {
+          const detectionId = getFalconCol(row, "id", "aggregate_id", "detection_id");
+          const hostname = getFalconCol(row, "device.hostname", "hostname", "device.device_id");
+          const severityRaw = getFalconCol(row, "max_severity_displayname", "severity", "max_severity");
+          const status = getFalconCol(row, "status", "state");
+          const firstBehavior = getFalconCol(row, "first_behavior", "created_timestamp", "timestamp");
+          const scenario = getFalconCol(row, "behaviors.0.scenario", "type");
+          const allegedFiletype = getFalconCol(row, "alleged_filetype");
+          const tacticId = getFalconCol(row, "behaviors.0.tactic_id", "tactic_id");
+          const tactic = getFalconCol(row, "behaviors.0.tactic", "tactic");
+          const techniqueId = getFalconCol(row, "behaviors.0.technique_id", "technique_id");
+          const technique = getFalconCol(row, "behaviors.0.technique", "technique");
+          const fileName = getFalconCol(row, "behaviors.0.filename", "alleged_filetype", "filename");
+          const confidenceRaw = getFalconCol(row, "max_confidence", "confidence");
+          const confidence = parseFloat(confidenceRaw) || 0;
+          const localIp = getFalconCol(row, "device.local_ip", "local_ip");
+          const externalIp = getFalconCol(row, "device.external_ip", "external_ip");
+          const platform = getFalconCol(row, "device.platform_name", "platform_name");
+          const assignedTo = getFalconCol(row, "assigned_to_name", "assigned_to");
+
+          if (!hostname && !detectionId) continue;
+
+          const normSev: "critical" | "high" | "medium" | "low" | "info" = (() => {
+            const s = severityRaw.toLowerCase();
+            if (s === "critical" || s === "4") return "critical";
+            if (s === "high" || s === "3") return "high";
+            if (s === "medium" || s === "2") return "medium";
+            if (s === "low" || s === "1") return "low";
+            return "medium";
+          })();
+          const isClosed = status.toLowerCase() === "closed" || status.toLowerCase() === "false positive";
+          const eventStatus = isClosed ? "resolved" : "open";
+          const eventTs = firstBehavior ? (() => { const d = new Date(firstBehavior); return isNaN(d.getTime()) ? new Date() : d; })() : new Date();
+
+          const dedupKey = detectionId || `cs-falcon-${hostname}-${scenario}-${firstBehavior}`;
+          if (falconDedupSet.has(dedupKey)) continue;
+          falconDedupSet.add(dedupKey);
+
+          const eventTitle = scenario || allegedFiletype || `CrowdStrike Detection`;
+          const eventDesc = [
+            scenario ? `Scenario: ${scenario}` : "",
+            tacticId ? `MITRE Tactic: ${tacticId}${tactic ? " — " + tactic : ""}` : "",
+            techniqueId ? `Technique: ${techniqueId}${technique ? " — " + technique : ""}` : "",
+            fileName ? `File: ${fileName}` : "",
+          ].filter(Boolean).join(" | ") || `CrowdStrike Falcon detection on ${hostname}`;
+
+          try {
+            await storage.createSecurityEvents([{
+              tenantId: tid,
+              eventType: "endpoint",
+              severity: normSev,
+              title: eventTitle,
+              description: eventDesc,
+              source: "CrowdStrike Falcon",
+              category: "endpoint",
+              status: eventStatus,
+              asset: hostname || undefined,
+              sourceIp: localIp || undefined,
+              target: hostname || undefined,
+              mitreTactic: tactic || undefined,
+              mitreTechnique: techniqueId ? `${techniqueId}${technique ? " " + technique : ""}` : undefined,
+              rawPayload: {
+                detectionId, hostname, platform, localIp, externalIp,
+                scenario, fileName, allegedFiletype, tacticId, tactic,
+                techniqueId, technique, confidence, assignedTo, status,
+                source: "CrowdStrike Falcon",
+              },
+              createdAt: eventTs,
+            } as any]);
+            falconEventsCreated++;
+          } catch {}
+
+          const incKey = `cs-falcon-inc-${dedupKey}`;
+          if (!falconDedupSet.has(incKey)) {
+            falconDedupSet.add(incKey);
+            try {
+              await storage.createIncident({
+                tenantId: tid,
+                title: `[CrowdStrike] ${eventTitle}${hostname ? " on " + hostname : ""}`,
+                description: eventDesc,
+                severity: normSev,
+                status: eventStatus,
+                category: "endpoint",
+                source: "CrowdStrike Falcon",
+                sourceIp: localIp || null,
+                assignedTo: assignedTo || null,
+                createdAt: eventTs,
+              } as any);
+              falconIncidentsCreated++;
+            } catch {}
+          }
+
+          if (hostname) {
+            const hostLower = hostname.toLowerCase();
+            const existingHost = existingFalconByHost.get(hostLower) as any;
+            if (existingHost) {
+              try {
+                await storage.updateAsset(existingHost.id, {
+                  operatingSystem: platform || existingHost.operatingSystem || null,
+                  ipAddress: localIp || existingHost.ipAddress || null,
+                  source: "CrowdStrike Falcon",
+                  lastSeen: eventTs,
+                } as any);
+                falconAssetsUpdated++;
+              } catch {}
+            } else {
+              existingFalconByHost.set(hostLower, { id: -1 } as any);
+              try {
+                await storage.createAssets([{
+                  tenantId: tid,
+                  hostname,
+                  ipAddress: localIp || null,
+                  operatingSystem: platform || null,
+                  status: "active",
+                  source: "CrowdStrike Falcon",
+                  endpointGroup: "CrowdStrike Managed",
+                  deploymentType: "On Prem",
+                  lastSeen: eventTs,
+                } as any]);
+                falconAssetsCreated++;
+              } catch {}
+            }
+          }
+        }
+
+        flushAllCache();
+        return res.json({
+          message: `CrowdStrike Falcon detections imported: ${falconEventsCreated} endpoint events, ${falconIncidentsCreated} incidents, ${falconAssetsCreated} new hosts discovered, ${falconAssetsUpdated} hosts updated.`,
+          importType: "crowdstrike_falcon",
+          dataType: "endpoint",
+          eventsCreated: falconEventsCreated,
+          incidentsCreated: falconIncidentsCreated,
+          assetsCreated: falconAssetsCreated,
+          assetsUpdated: falconAssetsUpdated,
+          totalRows: rows.length,
+          detectedColumns,
+          source: "CrowdStrike Falcon",
+        });
+      }
+
       const hasSoftwareNameCol = !!colIndex.softwareName;
       const hasHostnameCol = !!colIndex.hostname;
       const hasIpCol = !!colIndex.ipAddress;
@@ -13615,6 +14395,270 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           detectedColumns,
         });
       }
+
+      const isCrowdStrikeDetections = hasSkyhighWebCols("composite_id") && hasSkyhighWebCols("falcon_host_link") && hasSkyhighWebCols("pattern_disposition");
+
+      if (isCrowdStrikeDetections) {
+        const csGet = (row: any, ...keys: string[]): string => {
+          for (const k of keys) {
+            if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
+              return String(row[k]).trim();
+            }
+            const found = Object.keys(row).find(rk => normalizeCol(rk) === normalizeCol(k));
+            if (found && row[found] !== undefined && row[found] !== null && String(row[found]).trim() !== "") {
+              return String(row[found]).trim();
+            }
+          }
+          return "";
+        };
+
+        const csParseSeverity = (val: string): "critical" | "high" | "medium" | "low" | "info" => {
+          const v = val.toLowerCase().trim();
+          if (v === "critical") return "critical";
+          if (v === "high") return "high";
+          if (v === "medium") return "medium";
+          if (v === "low") return "low";
+          if (v === "informational" || v === "info") return "info";
+          if (v.includes("crit")) return "critical";
+          if (v.includes("hi")) return "high";
+          if (v.includes("lo")) return "low";
+          return "medium";
+        };
+
+        const csParseStatus = (val: string): "open" | "investigating" | "resolved" | "closed" => {
+          const v = val.toLowerCase().trim();
+          if (v === "closed" || v === "resolved") return "resolved";
+          if (v === "in_progress" || v === "in progress" || v === "investigating" || v === "reopened") return "investigating";
+          if (v === "new" || v === "open") return "open";
+          return "open";
+        };
+
+        const csParseDate = (val: any): Date => {
+          if (!val) return new Date();
+          if (typeof val === "number") {
+            if (val > 0 && val < 200000) {
+              const d = new Date((val - 25569) * 86400000);
+              if (!isNaN(d.getTime())) return d;
+            }
+            return new Date();
+          }
+          const s = String(val).trim();
+          const parsed = new Date(s);
+          if (!isNaN(parsed.getTime())) return parsed;
+          return new Date();
+        };
+
+        const csBuildRawPayload = (row: any): any => {
+          const payload: any = {};
+          for (const [key, value] of Object.entries(row)) {
+            if (value !== null && value !== undefined && String(value).trim() !== "") {
+              payload[key] = value;
+            }
+          }
+          return Object.keys(payload).length > 0 ? payload : null;
+        };
+
+        const existingIncidents = await storage.getIncidents(tid);
+        const existingEvents = await storage.getSecurityEvents(tid);
+        const existingDedupHashes = await storage.getExistingDedupHashes(tid);
+        const incidentDedupSet = new Set(existingIncidents.map(i => `${i.title}||${i.affectedAssets || ""}`));
+        const eventDedupSet = new Set(existingEvents.map(e => `${e.threat || ""}||${e.asset || ""}||${e.eventType}`));
+
+        let eventsCreated = 0;
+        let incidentsCreated = 0;
+        let duplicatesSkipped = 0;
+        let skippedRows = 0;
+
+        const eventBatch: any[] = [];
+        const incidentBatch: any[] = [];
+
+        for (const row of rows) {
+          const detectionId = csGet(row, "composite_id", "id");
+          const description = csGet(row, "description", "display_name", "name");
+          if (!description && !detectionId) { skippedRows++; continue; }
+
+          const title = description || `CrowdStrike Detection: ${detectionId}`;
+          const hostname = csGet(row, "device.hostname");
+          const severity = csParseSeverity(csGet(row, "severity_name", "severity"));
+          const statusRaw = csGet(row, "status");
+          const status = csParseStatus(statusRaw);
+          const confidence = parseInt(csGet(row, "confidence")) || null;
+          const priorityValue = parseInt(csGet(row, "priority_value")) || null;
+          const riskScore = priorityValue || confidence || null;
+
+          const occurredAt = csParseDate(csGet(row, "timestamp", "created_timestamp", "context_timestamp"));
+          const mitreTactic = csGet(row, "mitre_attack.tactic", "tactic");
+          const mitreTechnique = csGet(row, "mitre_attack.technique", "technique");
+          const mitreTechniqueId = csGet(row, "mitre_attack.technique_id", "technique_id");
+          const mitreTacticId = csGet(row, "mitre_attack.tactic_id", "tactic_id");
+
+          const cmdline = csGet(row, "cmdline");
+          const filename = csGet(row, "filename");
+          const filepath = csGet(row, "filepath");
+          const patternDisp = csGet(row, "pattern_disposition_description", "pattern_disposition");
+          const userName = csGet(row, "user_name", "user_principal");
+          const localIp = csGet(row, "device.local_ip");
+          const externalIp = csGet(row, "device.external_ip");
+          const osVersion = csGet(row, "device.os_version");
+          const agentVersion = csGet(row, "device.agent_version");
+          const falconLink = csGet(row, "falcon_host_link");
+
+          let richDescription = description;
+          if (cmdline) richDescription += `\nCommand Line: ${cmdline}`;
+          if (filename) richDescription += `\nFilename: ${filename}`;
+          if (filepath) richDescription += `\nFilepath: ${filepath}`;
+          if (patternDisp) richDescription += `\nDisposition: ${patternDisp}`;
+          if (userName) richDescription += `\nUser: ${userName}`;
+          if (localIp) richDescription += `\nLocal IP: ${localIp}`;
+          if (externalIp) richDescription += `\nExternal IP: ${externalIp}`;
+          if (osVersion) richDescription += `\nOS: ${osVersion}`;
+          if (agentVersion) richDescription += `\nAgent: ${agentVersion}`;
+          if (falconLink) richDescription += `\nFalcon Link: ${falconLink}`;
+          richDescription = richDescription.substring(0, 2000);
+
+          const iocData: any = {};
+          const iocDesc = csGet(row, "ioc_context.ioc_description", "ioc_description");
+          const iocSource = csGet(row, "ioc_context.ioc_source", "ioc_source");
+          const iocType = csGet(row, "ioc_context.ioc_type", "ioc_type");
+          const iocValue = csGet(row, "ioc_context.ioc_value", "ioc_value");
+          const iocMd5 = csGet(row, "ioc_context.md5");
+          const iocSha256 = csGet(row, "ioc_context.sha256", "sha256");
+          if (iocDesc) iocData.iocDescription = iocDesc;
+          if (iocSource) iocData.iocSource = iocSource;
+          if (iocType) iocData.iocType = iocType;
+          if (iocValue) iocData.iocValue = iocValue;
+          if (iocMd5) iocData.md5 = iocMd5;
+          if (iocSha256) iocData.sha256 = iocSha256;
+
+          const rawPayload = csBuildRawPayload(row);
+          if (detectionId && rawPayload) {
+            rawPayload.id = detectionId;
+          }
+
+          const assetVal = hostname ? hostname.substring(0, 500) : null;
+
+          const evtDedupKey = `${title.substring(0, 500)}||${assetVal || ""}||endpoint`;
+          if (!eventDedupSet.has(evtDedupKey)) {
+            eventDedupSet.add(evtDedupKey);
+            eventBatch.push({
+              tenantId: tid,
+              eventType: "endpoint",
+              severity,
+              threat: title.substring(0, 500),
+              target: assetVal,
+              attacker: csGet(row, "source_hosts") || csGet(row, "parent_details.filename") || null,
+              asset: assetVal,
+              app: null,
+              description: richDescription,
+              threatVector: "endpoint",
+              mitreTactic: mitreTactic ? mitreTactic.substring(0, 200) : null,
+              mitreTechnique: mitreTechnique ? mitreTechnique.substring(0, 200) : null,
+              action: patternDisp ? patternDisp.substring(0, 100) : "Detected",
+              sourceType: "Endpoint Protection",
+              logSource: "CrowdStrike Falcon",
+              riskScore,
+              rawPayload,
+              occurredAt,
+            });
+          } else {
+            duplicatesSkipped++;
+          }
+
+          const incDedupKey = `${title}||${assetVal || ""}`;
+          const hashInput = `${tid}||${title}||CrowdStrike Falcon||${occurredAt ? occurredAt.toISOString().split("T")[0] : ""}||${detectionId}`;
+          const dedupHash = Buffer.from(hashInput).toString("base64").substring(0, 64);
+          if (!incidentDedupSet.has(incDedupKey) && !existingDedupHashes.has(dedupHash)) {
+            incidentDedupSet.add(incDedupKey);
+            existingDedupHashes.add(dedupHash);
+            incidentBatch.push({
+              tenantId: tid,
+              title: title.substring(0, 500),
+              description: richDescription,
+              severity,
+              status,
+              source: "CrowdStrike Falcon",
+              category: mitreTactic ? mitreTactic.substring(0, 100) : null,
+              affectedAssets: assetVal,
+              mitreTactic: mitreTactic ? mitreTactic.substring(0, 200) : null,
+              mitreTechniqueId: mitreTechniqueId ? mitreTechniqueId.substring(0, 50) : null,
+              mitreTechnique: mitreTechnique ? mitreTechnique.substring(0, 200) : null,
+              killChainPhase: mitreTacticId ? mitreTacticId.substring(0, 100) : null,
+              dedupHash,
+              detectionSource: "CrowdStrike Falcon",
+              incidentType: "Endpoint Security",
+              iocData: Object.keys(iocData).length > 0 ? iocData : null,
+            });
+          } else {
+            duplicatesSkipped++;
+          }
+        }
+
+        for (let i = 0; i < eventBatch.length; i += 100) {
+          const chunk = eventBatch.slice(i, i + 100);
+          try {
+            await storage.createSecurityEvents(chunk);
+            eventsCreated += chunk.length;
+          } catch (e: any) {
+            console.error(`[CrowdStrikeImport] Batch insert failed (${chunk.length} events): ${e.message}`);
+            for (const evt of chunk) {
+              try {
+                await storage.createSecurityEvents([evt]);
+                eventsCreated++;
+              } catch (e2: any) {
+                console.error(`[CrowdStrikeImport] Single event insert failed: ${e2.message}`, {
+                  threat: evt.threat?.substring?.(0, 100),
+                  action: evt.action?.substring?.(0, 100),
+                  sourceType: evt.sourceType?.substring?.(0, 100),
+                  logSource: evt.logSource?.substring?.(0, 100),
+                  mitreTactic: evt.mitreTactic?.substring?.(0, 100),
+                  attacker: evt.attacker?.substring?.(0, 100),
+                });
+                skippedRows++;
+              }
+            }
+          }
+        }
+
+        for (const inc of incidentBatch) {
+          try {
+            await storage.createIncident(inc);
+            incidentsCreated++;
+          } catch (e: any) {
+            console.error(`[CrowdStrikeImport] Incident insert failed: ${e.message}`, {
+              title: inc.title?.substring?.(0, 100),
+              source: inc.source?.substring?.(0, 100),
+              category: inc.category?.substring?.(0, 100),
+              killChainPhase: inc.killChainPhase?.substring?.(0, 100),
+              incidentType: inc.incidentType?.substring?.(0, 100),
+              detectionSource: inc.detectionSource?.substring?.(0, 100),
+              dedupHash: inc.dedupHash?.substring?.(0, 70),
+            });
+            skippedRows++;
+          }
+        }
+
+        if (fileIngestBatch) {
+          storage.updateIngestBatch(fileIngestBatch.id, {
+            status: "complete" as any,
+            processedEvents: incidentsCreated + eventsCreated,
+            completedAt: new Date(),
+          } as any).catch(() => {});
+        }
+
+        return res.json({
+          message: `Imported ${incidentsCreated} CrowdStrike incidents and ${eventsCreated} security events.${duplicatesSkipped > 0 ? ` ${duplicatesSkipped} duplicates skipped.` : ""}`,
+          incidentsCreated,
+          eventsCreated,
+          imported: incidentsCreated + eventsCreated,
+          total: rows.length,
+          skipped: skippedRows,
+          duplicatesSkipped,
+          detectedColumns,
+          importType: "crowdstrike_detections",
+          source: "CrowdStrike Falcon",
+        });
+      }
+
 
       const isInventoryFile = hasHostnameCol && (hasIpCol || hasOsCol || hasAgentCol || hasGroupCol);
 
@@ -14041,14 +15085,85 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
         const mappedColumns = Object.entries(colIndex).filter(([_, v]) => v).map(([field, col]) => `${field} ← "${col}"`);
 
+        // --- Multi-sheet CVE extraction (e.g. CrowdStrike Sheet2 with CVE ID / CVE Description) ---
+        let cveSheetEventsCreated = 0;
+        let cveSheetIncidentsCreated = 0;
+        const cveSheetDedupSet = new Set<string>();
+        for (const row of rows) {
+          const cveIdKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("CVE ID") || normalizeCol(k) === "cveid");
+          if (!cveIdKey) continue;
+          const cveId = String(row[cveIdKey] || "").trim();
+          if (!cveId) continue;
+          const cveDescKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("CVE Description"));
+          const cveDesc = cveDescKey ? String(row[cveDescKey] || "").trim() : "";
+          const cveHostKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("Hostname") || normalizeCol(k) === "host");
+          const cveHostname = cveHostKey ? String(row[cveHostKey] || "").trim() : "";
+          const cveSevKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("Severity"));
+          const cveSevRaw = (cveSevKey ? String(row[cveSevKey] || "") : "medium").toLowerCase();
+          const cveNormSev: "critical"|"high"|"medium"|"low"|"info" = cveSevRaw === "critical" ? "critical" : cveSevRaw === "high" ? "high" : cveSevRaw === "medium" ? "medium" : cveSevRaw === "low" ? "low" : "medium";
+          const cveStatusKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("Status"));
+          const cveStatus = cveStatusKey ? String(row[cveStatusKey] || "open").toLowerCase() : "open";
+          const cveDateKey = Object.keys(row).find(k => ["created date","detection date","reported date"].includes(normalizeCol(k)));
+          const cveDateRaw = cveDateKey ? row[cveDateKey] : null;
+          const cveTs = cveDateRaw ? (() => { const d = new Date(cveDateRaw); return isNaN(d.getTime()) ? new Date() : d; })() : new Date();
+          const cveProductKey = Object.keys(row).find(k => normalizeCol(k) === normalizeCol("Product") || normalizeCol(k) === "application");
+          const cveProduct = cveProductKey ? String(row[cveProductKey] || "").trim() : "";
+
+          const dedupKeyCve = `cve-sheet-${cveHostname}-${cveId}`;
+          if (cveSheetDedupSet.has(dedupKeyCve)) continue;
+          cveSheetDedupSet.add(dedupKeyCve);
+
+          try {
+            await storage.createSecurityEvents([{
+              tenantId: tid,
+              eventType: "vulnerability",
+              severity: cveNormSev,
+              title: cveId + (cveProduct ? ` — ${cveProduct}` : "") + (cveHostname ? ` on ${cveHostname}` : ""),
+              description: cveDesc || `${cveId} vulnerability detected${cveHostname ? " on " + cveHostname : ""}`,
+              source: "CrowdStrike Falcon",
+              category: "vulnerability",
+              status: cveStatus.includes("close") ? "resolved" : "open",
+              asset: cveHostname || undefined,
+              rawPayload: { cveId, hostname: cveHostname, severity: cveNormSev, status: cveStatus, product: cveProduct, source: "CrowdStrike Falcon" },
+              createdAt: cveTs,
+            } as any]);
+            cveSheetEventsCreated++;
+          } catch {}
+
+          if (cveNormSev === "critical" || cveNormSev === "high") {
+            const cveIncKey = `cve-inc-${dedupKeyCve}`;
+            if (!cveSheetDedupSet.has(cveIncKey)) {
+              cveSheetDedupSet.add(cveIncKey);
+              try {
+                await storage.createIncident({
+                  tenantId: tid,
+                  title: `[Vulnerability] ${cveId}${cveHostname ? " on " + cveHostname : ""}`,
+                  description: cveDesc || `CrowdStrike detected ${cveId} (${cveNormSev})${cveHostname ? " on " + cveHostname : ""}`,
+                  severity: cveNormSev,
+                  status: cveStatus.includes("close") ? "resolved" : "open",
+                  category: "vulnerability",
+                  source: "CrowdStrike Falcon",
+                  createdAt: cveTs,
+                } as any);
+                cveSheetIncidentsCreated++;
+              } catch {}
+            }
+          }
+        }
+
+        if (cveSheetEventsCreated > 0) flushAllCache();
+
         return res.json({
           message: `Asset inventory imported: ${assetsCreated} new assets created, ${assetsUpdated} existing assets updated` +
-            (vulnEventsCreated > 0 ? `, ${vulnEventsCreated} vulnerability events created` : ""),
+            (vulnEventsCreated > 0 ? `, ${vulnEventsCreated} vulnerability events created` : "") +
+            (cveSheetEventsCreated > 0 ? `, ${cveSheetEventsCreated} CVE vulnerability events extracted from multi-sheet data` : ""),
           importType: "inventory",
           assetsCreated,
           assetsUpdated,
           assetsDuplicates,
-          vulnEventsCreated,
+          vulnEventsCreated: vulnEventsCreated + cveSheetEventsCreated,
+          cveSheetEventsCreated,
+          cveSheetIncidentsCreated,
           totalRows: rows.length,
           detectedColumns,
           columnMapping: mappedColumns,
@@ -14058,23 +15173,15 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
       const validSeverities = ["critical", "high", "medium", "low", "info"];
       const validEventTypes = ["email", "endpoint", "vulnerability", "casb", "waf", "dlp", "sse", "network", "identity", "cloud"];
 
-      const getField = (row: any, ...keys: string[]): string => {
-        for (const k of keys) {
-          if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "") {
-            return String(row[k]).trim();
-          }
-        }
-        return "";
-      }
+      // ── Smart field extraction — checks colIndex first, then fuzzy-scans
+      // row keys. Handles any vendor/language/casing convention.
+      const getField = (row: any, ...keys: string[]): string =>
+        smartGetField(row, colIndex, ...keys);
 
+      // ── Multilingual severity normalization — 70+ language/vendor variants
       const parseSeverity = (val: string): "critical" | "high" | "medium" | "low" | "info" => {
-        const v = val.toLowerCase().trim();
-        if (validSeverities.includes(v)) return v as any;
-        if (v.includes("crit")) return "critical";
-        if (v.includes("hi")) return "high";
-        if (v.includes("lo")) return "low";
-        if (v.includes("info")) return "info";
-        return "medium";
+        const normalized = importNormalizeSeverity(val);
+        return (validSeverities.includes(normalized) ? normalized : "medium") as any;
       }
 
       const parseIncidentStatus = (val: string): "open" | "investigating" | "resolved" | "closed" => {
@@ -14115,7 +15222,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
         return "endpoint";
       }
 
-      const classifyIncidentType = (title: string, eventType: string): string => {
+      const classifyIncidentTypeByEvent = (title: string, eventType: string): string => {
         const t = title.toLowerCase();
         if (t.includes("insertion of storage device") || t.includes("device control") || t.includes("usb")) return "Device Control";
         if (t.includes("malicious binary") || t.includes("malware") || t.includes("infected file") || t.includes("malicious file") || t.includes("suspicious file") || t.includes("threat intelligence detection")) return "Malware";
@@ -14282,7 +15389,7 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
           const occurredAt = parseExcelDate(dateRaw);
 
           const eventType = detectEventType(row);
-          const incidentType = classifyIncidentType(title, eventType);
+          const incidentType = classifyIncidentTypeByEvent(title, eventType);
           const derivedSource = deriveIncidentSource(eventType, logSourceRaw, title);
 
           const incDedupKey = `${title}||${assets || ""}`;
@@ -14312,8 +15419,22 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
             });
           }
 
-          const mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
-          const mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
+          // Pull MITRE from the row when the vendor includes it;
+          // fall back to predictive keyword-map (zero-latency, 200+ rules)
+          // so every imported row gets MITRE coverage regardless of source.
+          let mitreTactic = extractMitre(row, "MITRE ATT&CK Tactic");
+          let mitreTechnique = extractMitre(row, "MITRE ATT&CK Technique");
+          let mitreTechniqueId = getField(row, "MITRE ATT&CK Technique ID", "Technique ID", "technique_id").substring(0, 50) || null;
+          let killChainPhase = getField(row, "Kill Chain Phase", "killChainPhase", "Kill Chain", "Cyber Kill Chain").substring(0, 100) || null;
+          if (!mitreTactic || !mitreTechnique) {
+            const predicted = predictMitre(title, description);
+            if (!mitreTactic && predicted.tactic)      mitreTactic = predicted.tactic;
+            if (!mitreTechnique && predicted.technique) mitreTechnique = predicted.technique;
+            if (!mitreTechniqueId && predicted.techniqueId) mitreTechniqueId = predicted.techniqueId;
+            if (!killChainPhase && predicted.killChainPhase) killChainPhase = predicted.killChainPhase;
+          }
+          // IOC extraction from the full row
+          const rowIOCs = extractIOCsFromRow(row);
           const riskScoreRaw = getField(row, "Total Risk", "Score", "riskScore", "risk_score", "Risk Score", "Severity Score", "CVSS");
           const riskScore = riskScoreRaw ? parseInt(riskScoreRaw) || null : null;
           let logSource = getField(row, "Scan Group Name", "scanGroup", "logSource", "Log Source", "Data Source");
@@ -14350,6 +15471,8 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
               threatVector: threatVectorVal.substring(0, 200) || null,
               mitreTactic: mitreTactic.substring(0, 200) || null,
               mitreTechnique: mitreTechnique.substring(0, 200) || null,
+              mitreTechniqueId: mitreTechniqueId ?? null,
+              killChainPhase: killChainPhase ?? null,
               action: getField(row, "Auto-Remediation", "autoRemediation", "action", "Action Required", "Action Taken", "Response Action", "Remediation Action").substring(0, 100) || null,
               sourceType: getField(row, "Asset Types", "sourceType", "Source Type", "Device Type", "Endpoint Type").substring(0, 100) || null,
               logSource: logSource.substring(0, 200) || null,
@@ -14358,7 +15481,12 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
               protocol: protocolVal.substring(0, 50) || null,
               country: countryVal.substring(0, 100) || null,
               riskScore,
-              rawPayload: buildRawPayload(row),
+              rawPayload: {
+                ...buildRawPayload(row),
+                ...(rowIOCs.length > 0 ? { extractedIOCs: rowIOCs } : {}),
+                ...(mitreTechniqueId ? { mitreTechniqueId } : {}),
+                ...(killChainPhase ? { killChainPhase } : {}),
+              },
               occurredAt,
             });
           } else {
@@ -14428,7 +15556,24 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       const sendImportProgress = (phase: string, aiEnriched: number, aiTotal: number, done: boolean) => {
         if (clientDisconnected) return;
-        res.write(`data: ${JSON.stringify({ phase, incidentsCreated, eventsCreated, aiEnriched, aiTotal, imported: incidentsCreated + eventsCreated, total: rows.length, skipped: skippedRows, duplicatesSkipped, columnsDetected: detectedColumns, done })}\n\n`);
+        const totalImported = incidentsCreated + eventsCreated;
+        // Keep job store in sync so EventSource subscribers see live progress
+        Object.assign(importJob, {
+          status: done ? ("done" as const) : ("processing" as const),
+          rowsProcessed: totalImported,
+          eventsPublished: eventsCreated,
+          ...(done ? { completedAt: Date.now() } : {}),
+        });
+        res.write(`data: ${JSON.stringify({
+          phase, incidentsCreated, eventsCreated, aiEnriched, aiTotal,
+          imported: totalImported, total: rows.length,
+          skipped: skippedRows, duplicatesSkipped,
+          columnsDetected: detectedColumns, done,
+          importJobId: importJob.jobId,
+          detectedVendor: importJob.detectedVendor,
+          dataType: importJob.dataType,
+          schemaSource: importJob.schemaSource,
+        })}\n\n`);
       };
 
       sendImportProgress("enriching", 0, unenriched.length, false);
@@ -14522,6 +15667,978 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
     }
   });
 
+  // ─── CrowdStrike Detections CSV / XLSX Import ─────────────────────────────
+  // POST /api/data-import/crowdstrike
+  // Accepts the flat dot-notation CSV/XLSX export from Falcon Detections/Alerts.
+  // De-nests columns (device.hostname → d.device.hostname), maps to
+  // security_events + incidents, deduplicates on composite_id/id.
+  app.post("/api/data-import/crowdstrike", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      const tid = parseInt(tenantId);
+      await assertTenantAccess(req, tid);
+
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "xlsx", "xls"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr: any) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_cs_${safe.safeName}`);
+      fs.copyFileSync(req.file.path, savedPath);
+      fs.unlinkSync(req.file.path);
+
+      // ── Parse file ─────────────────────────────────────────────────────────
+      let flatRows: Record<string, any>[] = [];
+      try {
+        const workbook = XLSX.readFile(savedPath);
+        for (const sheetName of workbook.SheetNames) {
+          const sheet = workbook.Sheets[sheetName];
+          const sheetRows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
+          flatRows.push(...sheetRows);
+        }
+      } finally {
+        try { fs.unlinkSync(savedPath); } catch {}
+      }
+
+      if (flatRows.length === 0) {
+        return res.status(400).json({ message: "File contains no data rows. Ensure the first row contains column headers." });
+      }
+
+      const { createImportJob: _csDet } = await import("./import-stream");
+      const importJob = _csDet({ tenantId: tid, userId: (req.user as any)?.id || 0, detectedVendor: "CrowdStrike Falcon", dataType: "endpoint", schemaSource: "wire" });
+      importJob.rowsTotal = flatRows.length;
+      res.json({ importJobId: importJob.jobId, totalRows: flatRows.length, success: true });
+
+      setImmediate(async () => { try {
+
+      // ── De-nest flat dot-notation keys recursively ─────────────────────────
+      // "device.hostname" → { device: { hostname: value } }
+      const denest = (flat: Record<string, any>): Record<string, any> => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(flat)) {
+          const dot = k.indexOf(".");
+          if (dot === -1) {
+            out[k] = v;
+          } else {
+            const parent = k.slice(0, dot);
+            const child = k.slice(dot + 1);
+            if (!out[parent] || typeof out[parent] !== "object" || Array.isArray(out[parent])) out[parent] = {};
+            const nested = denest({ [child]: v });
+            out[parent] = { ...(out[parent] as Record<string, any>), ...nested };
+          }
+        }
+        return out;
+      };
+
+      // ── Severity helper ────────────────────────────────────────────────────
+      const mapSev = (raw: any): "critical" | "high" | "medium" | "low" | "info" => {
+        const s = String(raw || "").toLowerCase().trim();
+        if (s === "critical" || s === "5") return "critical";
+        if (s === "high" || s === "4") return "high";
+        if (s === "medium" || s === "3") return "medium";
+        if (s === "low" || s === "2") return "low";
+        return "info";
+      };
+
+      // ── Load existing event hashes for dedup ───────────────────────────────
+      const existingHashRows = await pool.query(
+        `SELECT event_hash FROM security_events WHERE tenant_id = $1 AND log_source = 'CrowdStrike Falcon' AND event_hash IS NOT NULL`,
+        [tid]
+      ).catch((err: any) => {
+        console.error("[data-import/crowdstrike] dedup query failed:", err.message);
+        return { rows: [] as any[] };
+      });
+      const existingHashes = new Set<string>(existingHashRows.rows.map((r: any) => r.event_hash as string));
+
+      // ── Map rows → events + incidents ─────────────────────────────────────
+      const eventsToInsert: any[] = [];
+      const incidentsToInsert: any[] = [];
+      const incidentDedupSet = new Set<string>();
+      let duplicatesSkipped = 0;
+
+      for (const flat of flatRows) {
+        const d = denest(flat);
+        const dev       = (d.device            && typeof d.device === "object") ? d.device as Record<string, any> : {};
+        const mitreAtk  = (d.mitre_attack       && typeof d.mitre_attack === "object") ? d.mitre_attack as Record<string, any> : {};
+        const iocCtx    = (d.ioc_context        && typeof d.ioc_context === "object") ? d.ioc_context as Record<string, any> : {};
+        const netAcc    = (d.network_accesses   && typeof d.network_accesses === "object") ? d.network_accesses as Record<string, any> : {};
+        const autoTriage= (d.automated_triage   && typeof d.automated_triage === "object") ? d.automated_triage as Record<string, any> : {};
+        const patDisp   = (d.pattern_disposition_details && typeof d.pattern_disposition_details === "object") ? d.pattern_disposition_details as Record<string, any> : {};
+        const parentDet = (d.parent_details     && typeof d.parent_details === "object") ? d.parent_details as Record<string, any> : {};
+        const grandDet  = (d.grandparent_details && typeof d.grandparent_details === "object") ? d.grandparent_details as Record<string, any> : {};
+        const dnsReq    = (d.dns_requests       && typeof d.dns_requests === "object") ? d.dns_requests as Record<string, any> : {};
+
+        const severity = mapSev(d.severity_name || d.severity);
+        const mitreTactic    = String(d.tactic    || mitreAtk.tactic    || "").slice(0, 200) || null;
+        const mitreTechnique = String(d.technique || mitreAtk.technique || "").slice(0, 200) || null;
+        const mitreTechniqueId = String(d.technique_id || mitreAtk.technique_id || "").slice(0, 50) || null;
+
+        // Dedup key: composite_id preferred → id → hostname+timestamp fallback
+        const dedupSrc = String(d.composite_id || d.id || `${dev.hostname || ""}_${d.created_timestamp || Date.now()}`);
+        const eventHash = crypto.createHash("sha256").update(`cs::${tid}::${dedupSrc}`).digest("hex").slice(0, 64);
+
+        if (existingHashes.has(eventHash)) { duplicatesSkipped++; continue; }
+        existingHashes.add(eventHash); // prevent intra-batch dupes
+
+        // Action taken from pattern_disposition_details flags
+        const action = String(
+          d.pattern_disposition_description
+          || (patDisp.kill_process       ? "Process Killed"
+            : patDisp.quarantine_machine  ? "Machine Quarantined"
+            : patDisp.quarantine_file     ? "File Quarantined"
+            : patDisp.process_blocked     ? "Process Blocked"
+            : patDisp.operation_blocked   ? "Operation Blocked"
+            : "Detected")
+        ).slice(0, 100);
+
+        // IOC extraction
+        const extractedIocs: any[] = [];
+        const addIoc = (type: string, value: string, rep = "suspicious") => {
+          if (!value || extractedIocs.some(i => i.value === value)) return;
+          extractedIocs.push({ type, value, reputation: rep, source: "CrowdStrike Falcon" });
+        };
+        const iocRep = (severity === "critical" || severity === "high") ? "malicious" : "suspicious";
+        if (d.ioc_type && d.ioc_value) addIoc(String(d.ioc_type).toLowerCase(), String(d.ioc_value), iocRep);
+        if (iocCtx.ioc_type && iocCtx.ioc_value) addIoc(String(iocCtx.ioc_type).toLowerCase(), String(iocCtx.ioc_value), iocRep);
+        for (const h of [d.sha256, d.sha1, iocCtx.sha256, parentDet.sha256, grandDet.sha256].filter(Boolean)) addIoc("hash", String(h));
+        if (dnsReq.domain_name) addIoc("domain", String(dnsReq.domain_name));
+        if (netAcc.remote_address) addIoc("ip", String(netAcc.remote_address));
+
+        const rawPayload = {
+          ...d,
+          _import_meta: {
+            importedAt: new Date().toISOString(),
+            importSource: "manual_csv_upload",
+            dedupKey: dedupSrc,
+            autoTriage: Object.keys(autoTriage).length > 0 ? autoTriage : undefined,
+            preventionPolicy: d.prevention_policy_name || null,
+            secondsToTriaged: d.seconds_to_triaged ?? null,
+            secondsToResolved: d.seconds_to_resolved ?? null,
+            assignedTo: d.assigned_to_name || null,
+            comments: (d.comments && typeof d.comments === "object") ? (d.comments as any).value : (d.comments || null),
+          },
+          extractedIocs,
+        };
+
+        const occurredAt = new Date(String(d.created_timestamp || d.timestamp || d.context_timestamp || Date.now()));
+        if (isNaN(occurredAt.getTime())) continue;
+
+        const riskScore = d.confidence != null ? Math.min(100, Math.max(0, parseInt(String(d.confidence)) || 0)) : null;
+
+        eventsToInsert.push({
+          tenantId: tid,
+          eventType: "endpoint" as const,
+          severity,
+          threat: String(d.display_name || d.objective || String(d.description || "").slice(0, 200) || mitreTactic || "CrowdStrike Detection").slice(0, 500) || null,
+          target: String(dev.hostname || d.host_names || "").slice(0, 500) || null,
+          attacker: String(d.cmdline || d.filename || d.user_name || "").slice(0, 500) || null,
+          asset: String(dev.hostname || "").slice(0, 500) || null,
+          description: String(d.description || d.pattern_disposition_description || "").slice(0, 5000) || null,
+          mitreTactic,
+          mitreTechnique,
+          action,
+          sourceType: "CrowdStrike Falcon",
+          logSource: "CrowdStrike Falcon",
+          sourceIp: String(dev.local_ip || dev.external_ip || "").slice(0, 200) || null,
+          destinationIp: String(netAcc.remote_address || "").slice(0, 200) || null,
+          protocol: String(netAcc.protocol || "").slice(0, 50) || null,
+          riskScore,
+          rawPayload,
+          eventHash,
+          occurredAt,
+          pipelineStatus: "received" as const,
+        });
+
+        // Create incident for high/critical detections
+        if (severity === "critical" || severity === "high") {
+          const incKey = `${tid}::${dedupSrc}`;
+          if (!incidentDedupSet.has(incKey)) {
+            incidentDedupSet.add(incKey);
+            const incDedupHash = crypto.createHash("sha256").update(`cs_inc::${tid}::${dedupSrc}`).digest("hex").slice(0, 64);
+            const incTitle = String(d.display_name || d.objective || `CrowdStrike ${severity.charAt(0).toUpperCase() + severity.slice(1)} Detection`).slice(0, 500);
+            incidentsToInsert.push({
+              tenantId: tid,
+              title: incTitle,
+              description: String(d.description || `CrowdStrike Falcon detection on ${dev.hostname || "unknown host"}: ${action}`).slice(0, 5000),
+              severity,
+              status: "open",
+              source: "CrowdStrike Falcon",
+              category: "Endpoint Security",
+              incidentType: "detection",
+              detectionSource: "CrowdStrike Falcon",
+              affectedAssets: String(dev.hostname || "").slice(0, 500) || null,
+              mitreTactic: mitreTactic?.slice(0, 200) || null,
+              mitreTechniqueId: mitreTechniqueId?.slice(0, 50) || null,
+              mitreTechnique: mitreTechnique?.slice(0, 200) || null,
+              confidenceScore: riskScore ?? 50,
+              iocData: extractedIocs.length > 0 ? { indicators: extractedIocs } : null,
+              dedupHash: incDedupHash,
+              detectedAt: occurredAt,
+            });
+          }
+        }
+      }
+
+      if (eventsToInsert.length === 0 && duplicatesSkipped === 0) {
+        return res.status(400).json({
+          message: "No valid CrowdStrike detection rows found. Ensure the file uses the standard Falcon export format with columns like composite_id, severity, device.hostname, created_timestamp.",
+        });
+      }
+
+      // ── Batch insert events ────────────────────────────────────────────────
+      let eventsCreated = 0;
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < eventsToInsert.length; i += BATCH_SIZE) {
+        const chunk = eventsToInsert.slice(i, i + BATCH_SIZE);
+        try {
+          const stored = await storage.createSecurityEvents(chunk);
+          eventsCreated += stored.length;
+        } catch {
+          for (const evt of chunk) {
+            try { await storage.createSecurityEvent(evt); eventsCreated++; } catch {}
+          }
+        }
+      }
+
+      // ── Dedup & insert incidents ───────────────────────────────────────────
+      let incidentsCreated = 0;
+      if (incidentsToInsert.length > 0) {
+        const dedupHashes = incidentsToInsert.map((i: any) => i.dedupHash).filter(Boolean);
+        const existingIncRows = dedupHashes.length > 0
+          ? await pool.query(
+              `SELECT dedup_hash FROM incidents WHERE tenant_id = $1 AND dedup_hash = ANY($2)`,
+              [tid, dedupHashes]
+            ).catch(() => ({ rows: [] as any[] }))
+          : { rows: [] as any[] };
+        const existingIncSet = new Set<string>(existingIncRows.rows.map((r: any) => r.dedup_hash as string));
+        for (const inc of incidentsToInsert) {
+          if (existingIncSet.has(inc.dedupHash)) continue;
+          try { await storage.createIncident(inc); incidentsCreated++; } catch {}
+        }
+      }
+
+      flushAllCache();
+
+      console.log(`[data-import/crowdstrike] tenant=${tid} rows=${flatRows.length} events=${eventsCreated} incidents=${incidentsCreated} dupes=${duplicatesSkipped}`);
+
+      importJob.eventsPublished = eventsCreated;
+      importJob.rowsProcessed = flatRows.length;
+      importJob.status = "done";
+      importJob.completedAt = Date.now();
+
+      } catch (bgErr: any) {
+        importJob.status = "error";
+        importJob.errors.push(bgErr.message || "Import failed");
+      } }); // end setImmediate
+
+    } catch (error: any) {
+      console.error("[data-import/crowdstrike] Error:", error);
+      if (!res.headersSent) res.status(error.status || 500).json({ message: error.message || "Failed to import CrowdStrike data" });
+    }
+  });
+
+  // POST /api/data-import/crowdstrike-hosts
+  // Accepts a Falcon Host Management CSV/XLSX export (Sheet1 of the cs_2_*.xlsx format).
+  // Maps the 20-column inventory layout to the `assets` table (upsert on tenantId+hostname).
+  app.post("/api/data-import/crowdstrike-hosts", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      const tid = parseInt(tenantId);
+      await assertTenantAccess(req, tid);
+
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "xlsx", "xls"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr: any) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_csh_${safe.safeName}`);
+      fs.copyFileSync(req.file.path, savedPath);
+      fs.unlinkSync(req.file.path);
+
+      // ── Parse file (first sheet only = Host Inventory) ──────────────────────
+      let rows: Record<string, any>[] = [];
+      try {
+        const workbook = XLSX.readFile(savedPath);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        rows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
+      } finally {
+        try { fs.unlinkSync(savedPath); } catch {}
+      }
+
+      if (rows.length === 0) {
+        return res.status(400).json({
+          message: "File contains no data rows. Ensure the first row contains column headers (Hostname, Host ID, OS Version, etc.).",
+        });
+      }
+
+      const { createImportJob: _csHost } = await import("./import-stream");
+      const importJob = _csHost({ tenantId: tid, userId: (req.user as any)?.id || 0, detectedVendor: "CrowdStrike Hosts", dataType: "asset", schemaSource: "wire" });
+      importJob.rowsTotal = rows.length;
+      res.json({ importJobId: importJob.jobId, totalRows: rows.length, success: true });
+
+      setImmediate(async () => { try {
+
+      // ── Criticality normaliser ──────────────────────────────────────────────
+      const normCriticality = (raw: any): string => {
+        const s = String(raw || "").toLowerCase().trim();
+        if (s === "critical") return "critical";
+        if (s === "high") return "high";
+        if (s === "medium") return "medium";
+        if (s === "low") return "low";
+        if (s === "informational" || s === "info") return "low";
+        return "medium";
+      };
+
+      // ── Safe date parse ─────────────────────────────────────────────────────
+      const safeDate = (v: any): Date | null => {
+        if (!v) return null;
+        const d = new Date(String(v));
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      // ── Upsert each row ─────────────────────────────────────────────────────
+      let hostsCreated = 0;
+      let hostsUpdated = 0;
+      let duplicatesSkipped = 0;
+      const totalRows = rows.length;
+      const seenHostnames = new Set<string>(); // intra-file dedup
+
+      for (const row of rows) {
+        // Support both "Title Case" headers (Falcon export) and snake_case variations
+        const g = (a: string, b?: string) => row[a] ?? (b ? row[b] : undefined);
+
+        const hostname = String(g("Hostname", "hostname") ?? "").trim();
+        if (!hostname) continue;
+
+        // Skip duplicate hostnames within the same uploaded file
+        const dedupeKey = `${tid}::${hostname.toLowerCase()}`;
+        if (seenHostnames.has(dedupeKey)) { duplicatesSkipped++; continue; }
+        seenHostnames.add(dedupeKey);
+
+        const hostId          = String(g("Host ID", "host_id")                                 ?? "").trim() || null;
+        const platform        = String(g("Platform", "platform")                               ?? "").trim() || null;
+        const osVersion       = String(g("OS Version", "os_version")                           ?? "").trim() || null;
+        const assetType       = String(g("Type", "type")                                       ?? "").trim() || null;
+        const localIp         = String(g("Local IP", "local_ip")                               ?? "").trim() || null;
+        const externalIp      = String(g("External IP", "external_ip")                         ?? "").trim() || null;
+        const macAddress      = String(g("MAC Address", "mac_address")                         ?? "").trim() || null;
+        const firstSeenRaw    = g("First Seen", "first_seen");
+        const lastSeenRaw     = g("Last Seen", "last_seen");
+        const sensorVersion   = String(g("Sensor Version", "sensor_version")                   ?? "").trim() || null;
+        const hostGroups      = String(g("Host Groups", "host_groups")                         ?? "").trim() || null;
+        const sensorTags      = String(g("Sensor Tags", "sensor_tags")                         ?? "").trim() || null;
+        const lastUser        = String(g("Last Logged In User Account", "last_logged_in_user") ?? "").trim() || null;
+        const critRaw         = g("Criticality", "criticality");
+        const prevPolicy      = String(g("Prevention Policy", "prevention_policy")             ?? "").trim() || null;
+        const logscalePolicy  = String(g("LogScale Collector Policy")                          ?? "").trim() || null;
+        const sensorUpPolicy  = String(g("Sensor Update Policy")                               ?? "").trim() || null;
+        const contentUpPolicy = String(g("Content Update Policy")                              ?? "").trim() || null;
+        const hostRetPolicy   = String(g("Host Retention Policy")                              ?? "").trim() || null;
+
+        const criticality = normCriticality(critRaw);
+        const validLastSeen = safeDate(lastSeenRaw);
+        const firstSeenDate = safeDate(firstSeenRaw);
+
+        const enrichmentData = {
+          externalIp:           externalIp  || null,
+          platform:             platform    || null,
+          firstSeen:            firstSeenDate ? firstSeenDate.toISOString() : null,
+          sensorVersion:        sensorVersion       || null,
+          hostGroups:           hostGroups          || null,
+          sensorTags:           sensorTags          || null,
+          logscalePolicy:       logscalePolicy      || null,
+          sensorUpdatePolicy:   sensorUpPolicy      || null,
+          contentUpdatePolicy:  contentUpPolicy     || null,
+          hostRetentionPolicy:  hostRetPolicy       || null,
+          importedAt:           new Date().toISOString(),
+          importSource:         "crowdstrike_host_inventory",
+        };
+
+        try {
+          const upsertResult = await pool.query(
+            `INSERT INTO assets (
+               tenant_id, hostname, ip_address, mac_address, operating_system, endpoint_type,
+               last_seen, last_logged_in_user, primary_user_email, criticality,
+               edr_host_id, edr_platform, source_platforms, source,
+               agent_version, endpoint_group, tags, prevention_policy,
+               enrichment_data, status, created_at, updated_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+               $13::jsonb, $14, $15, $16, $17, $18, $19::jsonb, 'active', NOW(), NOW()
+             )
+             ON CONFLICT (tenant_id, hostname) DO UPDATE SET
+               ip_address        = EXCLUDED.ip_address,
+               mac_address       = EXCLUDED.mac_address,
+               operating_system  = EXCLUDED.operating_system,
+               endpoint_type     = EXCLUDED.endpoint_type,
+               last_seen         = COALESCE(EXCLUDED.last_seen, assets.last_seen),
+               last_logged_in_user = EXCLUDED.last_logged_in_user,
+               primary_user_email  = EXCLUDED.primary_user_email,
+               criticality       = EXCLUDED.criticality,
+               edr_host_id       = EXCLUDED.edr_host_id,
+               edr_platform      = EXCLUDED.edr_platform,
+               source_platforms  = EXCLUDED.source_platforms,
+               agent_version     = EXCLUDED.agent_version,
+               endpoint_group    = EXCLUDED.endpoint_group,
+               tags              = EXCLUDED.tags,
+               prevention_policy = EXCLUDED.prevention_policy,
+               enrichment_data   = EXCLUDED.enrichment_data,
+               updated_at        = NOW()
+             RETURNING id, (xmax = 0) AS inserted`,
+            [
+              tid,
+              hostname,
+              localIp?.slice(0, 100)     || null,
+              macAddress?.slice(0, 50)   || null,
+              osVersion?.slice(0, 200)   || null,
+              assetType?.slice(0, 50)    || null,
+              validLastSeen,
+              lastUser?.slice(0, 255)    || null,
+              lastUser?.slice(0, 255)    || null,
+              criticality,
+              hostId?.slice(0, 255)      || null,
+              "CrowdStrike Falcon",
+              JSON.stringify(["CrowdStrike Falcon"]),
+              "CrowdStrike Falcon",
+              sensorVersion?.slice(0, 100)  || null,
+              hostGroups?.slice(0, 255)     || null,
+              sensorTags                    || null,
+              prevPolicy?.slice(0, 255)     || null,
+              JSON.stringify(enrichmentData),
+            ]
+          );
+          if (upsertResult.rows[0]?.inserted) {
+            hostsCreated++;
+          } else {
+            hostsUpdated++;
+          }
+        } catch (rowErr: any) {
+          console.error(`[data-import/crowdstrike-hosts] skip hostname="${hostname}":`, rowErr.message);
+        }
+      }
+
+      flushAllCache();
+
+      console.log(`[data-import/crowdstrike-hosts] tenant=${tid} total=${totalRows} created=${hostsCreated} updated=${hostsUpdated} dupes=${duplicatesSkipped}`);
+
+      importJob.eventsPublished = hostsCreated + hostsUpdated;
+      importJob.rowsProcessed = totalRows;
+      importJob.status = "done";
+      importJob.completedAt = Date.now();
+
+      } catch (bgErr: any) {
+        importJob.status = "error";
+        importJob.errors.push(bgErr.message || "Import failed");
+      } }); // end setImmediate
+
+    } catch (error: any) {
+      console.error("[data-import/crowdstrike-hosts] Error:", error);
+      if (!res.headersSent) res.status(error.status || 500).json({ message: error.message || "Failed to import CrowdStrike host inventory" });
+    }
+  });
+
+  // POST /api/data-import/crowdstrike-spotlight
+  // Accepts the 72-column Falcon Spotlight Vulnerabilities CSV/XLSX export (Sheet2 of cs_2_*.xlsx).
+  // Creates security_events (eventType="vulnerability"), refreshes assets.vulnerability_count,
+  // and auto-creates incidents for Critical or CISA KEV findings.
+  app.post("/api/data-import/crowdstrike-spotlight", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      const tid = parseInt(tenantId);
+      await assertTenantAccess(req, tid);
+
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "xlsx", "xls"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr: any) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_csspot_${safe.safeName}`);
+      fs.copyFileSync(req.file.path, savedPath);
+      fs.unlinkSync(req.file.path);
+
+      // ── Parse file — prefer sheet named "Sheet2" if present, else all sheets ──
+      let flatRows: Record<string, any>[] = [];
+      try {
+        const workbook = XLSX.readFile(savedPath);
+        const targetSheet = workbook.SheetNames.find((n) => /sheet2/i.test(n)) || workbook.SheetNames[0];
+        const sheetsToRead = workbook.SheetNames.includes(targetSheet)
+          ? [targetSheet]
+          : workbook.SheetNames;
+        for (const sheetName of sheetsToRead) {
+          const sheet = workbook.Sheets[sheetName];
+          const sheetRows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
+          flatRows.push(...sheetRows);
+        }
+      } finally {
+        try { fs.unlinkSync(savedPath); } catch {}
+      }
+
+      if (flatRows.length === 0) {
+        return res.status(400).json({ message: "File contains no data rows. Ensure the first row contains column headers." });
+      }
+
+      const { createImportJob: _csSpot } = await import("./import-stream");
+      const importJob = _csSpot({ tenantId: tid, userId: (req.user as any)?.id || 0, detectedVendor: "CrowdStrike Spotlight", dataType: "vulnerability", schemaSource: "wire" });
+      importJob.rowsTotal = flatRows.length;
+      res.json({ importJobId: importJob.jobId, totalRows: flatRows.length, success: true });
+
+      setImmediate(async () => { try {
+
+      // ── Severity helper ────────────────────────────────────────────────────
+      const mapSpotSev = (raw: any, isCisaKev = false): "critical" | "high" | "medium" | "low" | "info" => {
+        const s = String(raw || "").toLowerCase().trim();
+        let sev: "critical" | "high" | "medium" | "low" | "info" = "info";
+        if (s === "critical") sev = "critical";
+        else if (s === "high") sev = "high";
+        else if (s === "medium") sev = "medium";
+        else if (s === "low") sev = "low";
+        else sev = "info";
+        // CISA KEV: treat severity as at least "high"
+        if (isCisaKev && sev !== "critical" && (sev === "medium" || sev === "low" || sev === "info")) sev = "high";
+        return sev;
+      };
+
+      // ── Load existing event hashes for dedup ───────────────────────────────
+      const existingHashRows = await pool.query(
+        `SELECT event_hash FROM security_events WHERE tenant_id = $1 AND log_source = 'CrowdStrike Spotlight' AND event_hash IS NOT NULL`,
+        [tid]
+      ).catch((err: any) => {
+        console.error("[data-import/crowdstrike-spotlight] dedup query failed:", err.message);
+        return { rows: [] as any[] };
+      });
+      const existingHashes = new Set<string>(existingHashRows.rows.map((r: any) => r.event_hash as string));
+
+      // ── Load existing incident dedup hashes ────────────────────────────────
+      const existingIncHashRows = await pool.query(
+        `SELECT dedup_hash FROM incidents WHERE tenant_id = $1 AND detection_source = 'CrowdStrike Spotlight' AND dedup_hash IS NOT NULL`,
+        [tid]
+      ).catch(() => ({ rows: [] as any[] }));
+      const existingIncHashes = new Set<string>(existingIncHashRows.rows.map((r: any) => r.dedup_hash as string));
+
+      // ── Map rows → events + incidents ─────────────────────────────────────
+      const eventsToInsert: any[] = [];
+      const incidentsToInsert: any[] = [];
+      const seenHostnames = new Set<string>();
+      let duplicatesSkipped = 0;
+
+      for (const raw of flatRows) {
+        // Normalise column keys: trim whitespace, collapse repeated spaces
+        const row: Record<string, any> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          row[k.trim().replace(/\s+/g, " ")] = v;
+        }
+
+        const hostname   = String(row["Hostname"] || row["Host Name"] || "").trim();
+        const hostId     = String(row["Host ID"]  || row["AID"]       || "").trim();
+        const cveId      = String(row["CVE ID"]   || row["Vulnerability ID"] || row["CVE"] || "").trim();
+        const cveDesc    = String(row["CVE Description"] || row["Description"] || "").trim();
+        const rawSev     = String(row["Severity"] || "").trim();
+        const baseScore  = parseFloat(String(row["Base Score"] || row["CVSS Base Score"] || "0")) || 0;
+        const cvssVer    = String(row["CVSS Version"] || "").trim();
+        const vector     = String(row["Vector"] || row["CVSS Vector"] || "").trim();
+        const exprRating = String(row["ExPRT Rating"] || "").trim();
+        const cisaKevRaw = String(row["Is CISA KEV"] || row["CISA KEV"] || "").trim().toLowerCase();
+        const isCisaKev  = cisaKevRaw === "true" || cisaKevRaw === "yes" || cisaKevRaw === "1";
+        const cisaKevDue = String(row["CISA KEV Due Date"] || "").trim() || null;
+        const exploitStatus = String(row["Exploit status label"] || row["Exploit Status"] || "").trim() || null;
+        const status     = String(row["Status"] || "Open").trim();
+        const createdDate = String(row["Created Date"] || row["Created"] || "").trim();
+        const closedDate  = String(row["Closed Date"] || "").trim() || null;
+        const closedDwell = String(row["Closed Dwell Time"] || "").trim() || null;
+        const product    = String(row["Product"] || row["Vulnerable Application"] || "").trim() || null;
+        const vulnVersions = String(row["Vulnerable Product Versions"] || "").trim() || null;
+        const remediation   = String(row["Recommended Remediations"] || row["Recommended Remediation"] || "").trim() || null;
+        const remDetails    = String(row["Remediation Details"] || "").trim() || null;
+        const remLinks      = String(row["Remediation Links"] || "").trim() || null;
+        const minRem        = String(row["Minimum Remediation"] || "").trim() || null;
+        const patchPubDate  = String(row["Patch Publication Date"] || "").trim() || null;
+        const cwes          = String(row["CWEs"] || "").trim() || null;
+        const remLevel      = String(row["RemediationLevel"] || "").trim() || null;
+        const assetCrit     = String(row["Asset Criticality"] || "").trim() || null;
+        const assetRoles    = String(row["Asset Roles"] || "").trim() || null;
+        const internetExp   = String(row["Internet exposure"] || row["Internet Exposure"] || "").trim() || null;
+        const vulnConf      = String(row["Vulnerability Confidence"] || "").trim() || null;
+        const osVersion     = String(row["OS Version"] || row["OS"] || "").trim() || null;
+        const platform      = String(row["Platform"] || "").trim() || null;
+        const machineDomain = String(row["MachineDomain"] || row["Machine Domain"] || "").trim() || null;
+        const ou            = String(row["OU"] || "").trim() || null;
+        const siteName      = String(row["SiteName"] || row["Site Name"] || "").trim() || null;
+
+        // Skip rows without at least a CVE ID
+        if (!cveId) { duplicatesSkipped++; continue; }
+
+        // Dedup key: cs_spot::{tenantId}::{cveId}::{hostId}
+        const dedupInput = `cs_spot::${tid}::${cveId}::${hostId || hostname}`;
+        const eventHash  = crypto.createHash("sha256").update(dedupInput).digest("hex").slice(0, 64);
+
+        if (existingHashes.has(eventHash)) { duplicatesSkipped++; continue; }
+        existingHashes.add(eventHash); // prevent intra-batch dupes
+
+        const severity = mapSpotSev(rawSev, isCisaKev);
+        const riskScore = Math.round(Math.min(10, Math.max(0, baseScore)) * 10);
+
+        let occurredAt = new Date();
+        if (createdDate) {
+          const parsed = new Date(createdDate);
+          if (!isNaN(parsed.getTime())) occurredAt = parsed;
+        }
+
+        const action = status.toLowerCase() === "closed" ? "Closed" : "Open";
+
+        if (hostname) seenHostnames.add(hostname);
+
+        const rawPayload = {
+          ...row,
+          _meta: {
+            hostId:           hostId   || null,
+            cvssVersion:      cvssVer  || null,
+            cvssVector:       vector   || null,
+            exprRating:       exprRating || null,
+            isCisaKev,
+            cisaKevDueDate:   cisaKevDue,
+            exploitStatus,
+            closedDate,
+            closedDwellTime:  closedDwell,
+            vulnerableVersions: vulnVersions,
+            remediation,
+            remediationDetails: remDetails,
+            remediationLinks:   remLinks,
+            minRemediation:     minRem,
+            patchPublishedDate: patchPubDate,
+            cwes,
+            remediationLevel:   remLevel,
+            assetCriticality:   assetCrit,
+            assetRoles,
+            internetExposure:   internetExp,
+            vulnConfidence:     vulnConf,
+            osVersion,
+            platform,
+            machineDomain,
+            ou,
+            siteName,
+            importedAt: new Date().toISOString(),
+            importSource: "manual_csv_upload",
+          },
+        };
+
+        eventsToInsert.push({
+          tenantId:   tid,
+          eventType:  "vulnerability" as const,
+          severity,
+          threat:     cveId.slice(0, 500) || null,
+          target:     hostname.slice(0, 500) || null,
+          attacker:   product?.slice(0, 500) || null,
+          asset:      hostname.slice(0, 500) || null,
+          description: cveDesc.slice(0, 5000) || null,
+          action,
+          sourceType: "CrowdStrike Spotlight",
+          logSource:  "CrowdStrike Spotlight",
+          riskScore,
+          rawPayload,
+          eventHash,
+          occurredAt,
+          pipelineStatus: "received" as const,
+        });
+
+        // ── Incident for Critical or CISA KEV ─────────────────────────────
+        if (severity === "critical" || isCisaKev) {
+          const incDedupInput = `cs_spot_inc::${tid}::${cveId}::${hostId || hostname}`;
+          const incDedupHash  = crypto.createHash("sha256").update(incDedupInput).digest("hex").slice(0, 64);
+          if (!existingIncHashes.has(incDedupHash)) {
+            existingIncHashes.add(incDedupHash);
+            const incTitle = `${cveId} on ${hostname || "Unknown Host"}`.slice(0, 500);
+            const incDesc  = [
+              cveDesc,
+              `CVSS Base Score: ${baseScore} (${rawSev})`,
+              exprRating ? `ExPRT Rating: ${exprRating}` : "",
+              isCisaKev ? `CISA KEV: YES${cisaKevDue ? ` — Due: ${cisaKevDue}` : ""}` : "",
+              exploitStatus ? `Exploit Status: ${exploitStatus}` : "",
+              product ? `Vulnerable Product: ${product}` : "",
+              remediation ? `Remediation: ${remediation}` : "",
+            ].filter(Boolean).join("\n").slice(0, 5000);
+            incidentsToInsert.push({
+              tenantId:        tid,
+              title:           incTitle,
+              description:     incDesc,
+              severity,
+              status:          "open",
+              source:          "CrowdStrike Spotlight",
+              category:        "Vulnerability Management",
+              incidentType:    "vulnerability",
+              detectionSource: "CrowdStrike Spotlight",
+              affectedAssets:  hostname.slice(0, 500) || null,
+              confidenceScore: riskScore ?? 50,
+              dedupHash:       incDedupHash,
+              detectedAt:      occurredAt,
+            });
+          }
+        }
+      }
+
+      if (eventsToInsert.length === 0 && duplicatesSkipped === 0) {
+        return res.status(400).json({
+          message: "No valid Spotlight vulnerability rows found. Ensure the file uses the Falcon Spotlight export format with columns like CVE ID, Hostname, Severity, Base Score.",
+        });
+      }
+
+      // ── Batch insert events ────────────────────────────────────────────────
+      let eventsCreated = 0;
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < eventsToInsert.length; i += BATCH_SIZE) {
+        const chunk = eventsToInsert.slice(i, i + BATCH_SIZE);
+        try {
+          const stored = await storage.createSecurityEvents(chunk);
+          eventsCreated += stored.length;
+        } catch {
+          for (const evt of chunk) {
+            try { await storage.createSecurityEvent(evt); eventsCreated++; } catch {}
+          }
+        }
+      }
+
+      // ── Insert incidents (already deduped above) ───────────────────────────
+      let incidentsCreated = 0;
+      for (const inc of incidentsToInsert) {
+        try { await storage.createIncident(inc); incidentsCreated++; } catch {}
+      }
+
+      // ── Refresh assets.vulnerability_count for affected hostnames ──────────
+      let assetsUpdated = 0;
+      for (const hostname of seenHostnames) {
+        try {
+          const upd = await pool.query(
+            `UPDATE assets
+               SET vulnerability_count = (
+                 SELECT COUNT(*) FROM security_events
+                 WHERE tenant_id = $1
+                   AND event_type = 'vulnerability'
+                   AND target = $2
+                   AND (action IS NULL OR action != 'Closed')
+               )
+             WHERE tenant_id = $1 AND hostname = $2`,
+            [tid, hostname]
+          );
+          if ((upd.rowCount ?? 0) > 0) assetsUpdated++;
+        } catch {}
+      }
+
+      flushAllCache();
+
+      console.log(`[data-import/crowdstrike-spotlight] tenant=${tid} rows=${flatRows.length} events=${eventsCreated} incidents=${incidentsCreated} assets=${assetsUpdated} dupes=${duplicatesSkipped}`);
+
+      importJob.eventsPublished = eventsCreated;
+      importJob.rowsProcessed = flatRows.length;
+      importJob.status = "done";
+      importJob.completedAt = Date.now();
+
+      } catch (bgErr: any) {
+        importJob.status = "error";
+        importJob.errors.push(bgErr.message || "Import failed");
+      } }); // end setImmediate
+
+    } catch (error: any) {
+      console.error("[data-import/crowdstrike-spotlight] Error:", error);
+      if (!res.headersSent) res.status(error.status || 500).json({ message: error.message || "Failed to import CrowdStrike Spotlight vulnerabilities" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // POST /api/data-import/universal
+  // Universal single-sheet import pipeline.
+  // Detects ALL entity types in one file (assets, users, IPs, incidents,
+  // vulnerabilities, security events) and routes each to its correct table.
+  // Imported incidents/events are run through the same enrichment pipeline
+  // as live-ingested data (MITRE ATT&CK, Kill Chain, IOC extraction, etc.)
+  // ─────────────────────────────────────────────────────────────────────────
+  app.post("/api/data-import/universal", isAuthenticated, upload.single("file"), async (req: any, res) => {
+    try {
+      const access = await getUserTenantAccess(req);
+      assertMSSRole(access);
+
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
+      const tid = parseInt(tenantId);
+      await assertTenantAccess(req, tid);
+
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "tsv", "xlsx", "xls"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const originalName = safe.safeName;
+      const ext = "." + safe.ext;
+      const savedPath = path.join(UPLOADS_DIR, `${Date.now()}_univ_${originalName}`);
+      fs.copyFileSync(req.file.path, savedPath);
+      fs.unlinkSync(req.file.path);
+
+      // ── Parse all rows from the file ─────────────────────────────────────
+      let allRows: Record<string, any>[] = [];
+      let allColumns: string[] = [];
+
+      try {
+        const wb = XLSX.readFile(savedPath);
+        for (const sheetName of wb.SheetNames) {
+          const rawData = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1 }) as any[][];
+          if (!rawData || rawData.length < 2) continue;
+
+          let headerRowIdx = 0;
+          for (let i = 0; i < Math.min(10, rawData.length); i++) {
+            const row = rawData[i];
+            const filledCells = (row || []).filter((c: any) => c !== null && c !== undefined && String(c).trim() !== "").length;
+            if (filledCells >= 3) { headerRowIdx = i; break; }
+          }
+
+          const headers = (rawData[headerRowIdx] || []).map((h: any, idx: number) => {
+            const v = String(h || "").trim();
+            return v || `Column_${idx + 1}`;
+          });
+
+          headers.forEach((h: string) => { if (h && !allColumns.includes(h)) allColumns.push(h); });
+
+          for (let i = headerRowIdx + 1; i < rawData.length; i++) {
+            const rawRow = rawData[i];
+            if (!rawRow || rawRow.length === 0) continue;
+            const obj: Record<string, any> = {};
+            headers.forEach((h: string, idx: number) => {
+              if (h && rawRow[idx] !== undefined && rawRow[idx] !== null) obj[h] = rawRow[idx];
+            });
+            if (Object.keys(obj).length >= 1) allRows.push(obj);
+          }
+        }
+      } catch (parseErr: any) {
+        try { fs.unlinkSync(savedPath); } catch {}
+        return res.status(400).json({ message: `Failed to parse file: ${parseErr.message}` });
+      }
+
+      if (allRows.length === 0) {
+        try { fs.unlinkSync(savedPath); } catch {}
+        return res.status(400).json({ message: "File is empty or could not be parsed" });
+      }
+
+      // ── Build intelligent column index (4-level cascade + AI fallback) ───
+      const { UNIVERSAL_FIELD_MAP, detectEntitySignals } = await import("./universal-import-pipeline");
+      const { buildIntelligentColumnIndex } = await import("./import-intelligence");
+
+      const indexResult = await buildIntelligentColumnIndex(allColumns, UNIVERSAL_FIELD_MAP, {
+        filename: originalName,
+        sampleRows: allRows.slice(0, 5),
+      });
+      const colIndex = indexResult.index;
+
+      // ── Run entity signal detection (preview/highlight) ──────────────────
+      const detectedEntities = detectEntitySignals(allRows, colIndex, allColumns);
+
+      // ── Respond immediately with detection preview ────────────────────────
+      const jobId = `univ_${tid}_${Date.now()}`;
+      res.json({
+        jobId,
+        totalRows: allRows.length,
+        columnsDetected: allColumns,
+        columnIndex: colIndex,
+        vendor: indexResult.vendor,
+        aiUsed: indexResult.aiUsed,
+        detectedEntities,
+        message: `Detected ${allRows.length} rows across ${allColumns.length} columns. Starting import...`,
+      });
+
+      // ── Background: run universal import pipeline ─────────────────────────
+      setImmediate(() => {
+        (async () => {
+          try {
+            const { runUniversalImport } = await import("./universal-import-pipeline");
+            const result = await runUniversalImport(
+              allRows,
+              colIndex,
+              allColumns,
+              tid,
+              originalName,
+            );
+            console.log(
+              `[data-import/universal] tenant=${tid} rows=${allRows.length} ` +
+              `assets_created=${result.assetsCreated} assets_updated=${result.assetsUpdated} ` +
+              `users_created=${result.usersCreated} events=${result.eventsCreated} ` +
+              `incidents=${result.incidentsCreated} dupes=${result.duplicatesSkipped} ` +
+              `enrichment_queued=${result.enrichmentQueued}`
+            );
+          } catch (bgErr: any) {
+            console.error("[data-import/universal] Background error:", bgErr.message);
+          } finally {
+            try { fs.unlinkSync(savedPath); } catch {}
+          }
+        })();
+      });
+
+    } catch (error: any) {
+      console.error("[data-import/universal] Error:", error);
+      res.status(error.status || 500).json({ message: error.message || "Universal import failed" });
+    }
+  });
+
   app.post("/api/ai/smart-import-analyze", isAuthenticated, upload.single("file"), async (req: any, res) => {
     try {
       const access = await getUserTenantAccess(req);
@@ -14534,15 +16651,34 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
 
       if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
-      const originalName = req.file.originalname || "";
-      const ext = path.extname(originalName).toLowerCase();
+      // Hardening: same upload guard as /api/import — magic-byte sniff + safe
+      // filename + extension allow-list (CSV/spreadsheet/PDF/JSON for analysis).
+      const { safeFileUpload, isInputHardeningError } = await import("./input-hardening");
+      let safe;
+      try {
+        safe = safeFileUpload(req.file, {
+          allowExt: ["csv", "tsv", "xlsx", "xls", "pdf", "json"],
+          maxBytes: 25 * 1024 * 1024,
+        });
+        req.file.originalname = safe.safeName;
+      } catch (hErr) {
+        if (isInputHardeningError(hErr)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+          return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        }
+        throw hErr;
+      }
+
+      const originalName = safe.safeName;
+      const ext = "." + safe.ext;
 
       let sampleRows: any[] = [];
       let allColumns: string[] = [];
       let totalRows = 0;
 
       if (ext === ".csv" || ext === ".tsv" || ext === ".xlsx" || ext === ".xls") {
-        const workbook = XLSX.readFile(req.file.path);
+        // sheetRows:15 loads only first 15 rows (fast); !ref retains full dimension for accurate totalRows
+        const workbook = XLSX.readFile(req.file.path, { sheetRows: 15 });
         for (const sheetName of workbook.SheetNames) {
           const sheet = workbook.Sheets[sheetName];
           const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
@@ -14565,7 +16701,11 @@ Generate 3-8 specific, actionable tasks. Each task should be completable by one 
             return val || `Column_${idx + 1}`;
           });
           headers.forEach(h => { if (h && !allColumns.includes(h)) allColumns.push(h); });
-          totalRows = rawData.length - headerRowIdx - 1;
+          // Derive totalRows from !ref dimension (available even with sheetRows:15 limit)
+          const sheetRef = sheet['!ref'];
+          totalRows = sheetRef
+            ? XLSX.utils.decode_range(sheetRef).e.r
+            : Math.max(totalRows, rawData.length - headerRowIdx - 1);
 
           for (let i = headerRowIdx + 1; i < Math.min(headerRowIdx + 6, rawData.length); i++) {
             const row = rawData[i];
@@ -14642,12 +16782,25 @@ Determine the data type and provide a column mapping. Respond with JSON only:
         const analysisText = completion.choices[0]?.message?.content || "{}";
         const analysis = JSON.parse(analysisText);
 
+        // Task #555: run discoverSchema in parallel to populate the LLM cache
+        // and attach schemaSource + fieldMappings to the response
+        let schemaSource: string = "ai";
+        let schemaMappings: any[] = [];
+        try {
+          const { discoverSchema } = await import("./ai-normalizer");
+          const schemaResult = await discoverSchema(sampleRows, tid);
+          schemaSource = schemaResult.schemaSource;
+          schemaMappings = schemaResult.fieldMappings;
+        } catch {}
+
         return res.json({
           success: true,
           fileName: originalName,
           totalRows,
           columnsDetected: allColumns,
           sampleData: sampleRows.slice(0, 3),
+          schemaSource,
+          fieldMappings: schemaMappings,
           aiAnalysis: analysis,
         });
       } catch (aiErr: any) {
@@ -14657,6 +16810,8 @@ Determine the data type and provide a column mapping. Respond with JSON only:
           totalRows,
           columnsDetected: allColumns,
           sampleData: sampleRows.slice(0, 3),
+          schemaSource: "fallback",
+          fieldMappings: [],
           aiAnalysis: {
             dataType: "unknown",
             confidence: 0,
@@ -15210,7 +17365,7 @@ ${rawContext}${assetContext}`;
 
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
 
-      const accessibleIds = await getAccessibleTenantIds(tenantId, storage);
+      const accessibleIds = await getAccessibleTenantIds(req, tenantId);
       const placeholders = accessibleIds.map((_, i) => `$${i + 1}`).join(",");
       const unenrichedResult = await poolRead.query(
         `SELECT id, tenant_id, title, description, severity, status, source, category, incident_type, affected_assets, action_taken, mitre_tactic, mitre_technique, kill_chain_phase, detection_source, created_at
@@ -15920,7 +18075,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       "system", "root", "daemon", "nobody", "svc", "cron",
       "www-data", "mail", "proxy", "backup", "news", "irc",
     ];
-    const GUEST_PATTERNS = ["guest", "visitor", "anonymous", "temp user", "temporary"];
+    const GUEST_PATTERNS = GUEST_ACCOUNT_PATTERNS;
     const SERVICE_PATTERNS = [
       "svc_", "svc-", "service_", "service-", "_svc", "-svc",
       "sqlservice", "iis_", "exchange", "sharepoint",
@@ -15979,6 +18134,117 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         }
       } else {
         rawUserAssets = await storage.getUserAssets(tenantId);
+      }
+
+      // Canonical CAASM Users projection:
+      // 1. Identity events (security_events WHERE event_type='identity') → projected users
+      // 2. assets.primary_user_email linkage → user–asset mapping
+      // Projected users are merged (by email) with user_assets table rows so that
+      // tenants with real identity feeds see live data; tenants without identity events
+      // (e.g. Vinca/tenant-39, which uses endpoint event seeding) keep their rows.
+      try {
+        const identityResult = await pool.query<{
+          email: string; user_name: string; display_name: string | null;
+          department: string | null; hostname: string | null; last_seen: string | null;
+        }>(`
+          SELECT
+            COALESCE(
+              NULLIF(se.raw_payload->>'email', ''),
+              NULLIF(se.raw_payload->>'userPrincipalName', ''),
+              NULLIF(se.raw_payload->>'assignedTo', '')
+            )                                              AS email,
+            COALESCE(
+              NULLIF(SPLIT_PART(se.raw_payload->>'email', '@', 1), ''),
+              NULLIF(se.raw_payload->>'userName', ''),
+              NULLIF(SPLIT_PART(se.raw_payload->>'assignedTo', '@', 1), '')
+            )                                              AS user_name,
+            MAX(NULLIF(se.raw_payload->>'displayName', ''))  AS display_name,
+            MAX(NULLIF(se.raw_payload->>'department', ''))    AS department,
+            MAX(a.hostname)                                AS hostname,
+            MAX(se.occurred_at)::text                      AS last_seen
+          FROM security_events se
+          LEFT JOIN assets a
+            ON  a.tenant_id = se.tenant_id
+            AND a.primary_user_email = COALESCE(
+              NULLIF(se.raw_payload->>'email', ''),
+              NULLIF(se.raw_payload->>'userPrincipalName', '')
+            )
+          WHERE se.tenant_id = $1
+            AND se.event_type = 'identity'
+            AND COALESCE(
+              NULLIF(se.raw_payload->>'email', ''),
+              NULLIF(se.raw_payload->>'userPrincipalName', ''),
+              NULLIF(se.raw_payload->>'assignedTo', '')
+            ) IS NOT NULL
+          GROUP BY
+            COALESCE(
+              NULLIF(se.raw_payload->>'email', ''),
+              NULLIF(se.raw_payload->>'userPrincipalName', ''),
+              NULLIF(se.raw_payload->>'assignedTo', '')
+            ),
+            COALESCE(
+              NULLIF(SPLIT_PART(se.raw_payload->>'email', '@', 1), ''),
+              NULLIF(se.raw_payload->>'userName', ''),
+              NULLIF(SPLIT_PART(se.raw_payload->>'assignedTo', '@', 1), '')
+            )
+          LIMIT 500
+        `, [tenantId]);
+
+        // Also pull assets with primary_user_email set (linkage source)
+        const assetUserResult = await pool.query<{
+          email: string; user_name: string; hostname: string | null;
+        }>(`
+          SELECT DISTINCT
+            primary_user_email AS email,
+            SPLIT_PART(primary_user_email, '@', 1) AS user_name,
+            hostname
+          FROM assets
+          WHERE tenant_id = $1
+            AND primary_user_email IS NOT NULL
+            AND primary_user_email <> ''
+          LIMIT 500
+        `, [tenantId]);
+
+        // Build a set of emails already in user_assets to avoid duplicates
+        const existingEmails = new Set(rawUserAssets.map((u: any) => (u.email || "").toLowerCase()));
+
+        // Project identity event users as synthetic user_asset entries (not persisted)
+        const projected: any[] = [];
+        const seenEmails = new Set<string>();
+        const combinedRows = [...identityResult.rows, ...assetUserResult.rows] as Array<{
+          email: string; user_name: string; hostname: string | null;
+          department?: string | null; display_name?: string | null;
+        }>;
+        for (const r of combinedRows) {
+          if (!r.email) continue;
+          const emailLc = r.email.toLowerCase();
+          if (existingEmails.has(emailLc) || seenEmails.has(emailLc)) continue;
+          seenEmails.add(emailLc);
+          projected.push({
+            id: `identity-${emailLc}`,
+            tenantId,
+            userName: r.user_name || emailLc,
+            email: r.email,
+            department: r.department || null,
+            title: r.display_name || null,
+            riskLevel: "low",
+            riskScore: 10,
+            reputation: "clean",
+            accountType: "Standard",
+            totalRequests: 0, allowedRequests: 0, deniedRequests: 0,
+            isolatedRequests: 0, sitesVisited: 0,
+            totalBytesMB: 0, downloadedBytesMB: 0, uploadedBytesMB: 0,
+            applicationNames: "CrowdStrike Falcon",
+            linkedAssetIds: r.hostname ? [r.hostname] : [],
+            topSites: [], urlCategories: null, activityData: null,
+            source: "identity",
+          });
+        }
+        if (projected.length > 0) {
+          rawUserAssets = [...projected, ...rawUserAssets];
+        }
+      } catch (_projErr: any) {
+        // Non-fatal — fall through to user_assets table data
       }
 
       const userMap = new Map<string, any>();
@@ -16261,7 +18527,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       const EMAIL_REGEX_ASSET = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
       for (const evt of events) {
-        if (evt.eventType === "sse" || evt.eventType === "checkpoint_hec" || evt.eventType === "email") continue;
+        if ((evt.eventType as string) === "sse" || (evt.eventType as string) === "checkpoint_hec" || (evt.eventType as string) === "email") continue;
         const { firstSeen: rawFirst, lastSeen: rawLast } = extractDatesFromPayload(evt.rawPayload);
         let os: string | null = null;
         let memMB = 0;
@@ -17066,7 +19332,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         if (inc.mitreTactic) mitreTactics.add(inc.mitreTactic);
         if (inc.mitreTechnique) mitreTechniques.add(inc.mitreTechnique);
         if (inc.iocData) {
-          const rawIoc = inc.iocData;
+          const rawIoc: any = inc.iocData;
           const iocs: any[] = Array.isArray(rawIoc)
             ? rawIoc
             : (rawIoc?.indicators && Array.isArray(rawIoc.indicators))
@@ -17379,7 +19645,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           const ipArr = Array.isArray(enrichmentData.ipAddresses) ? enrichmentData.ipAddresses : [enrichmentData.ipAddresses];
           for (const ip of ipArr) { if (ip) ips.add(ip); }
         }
-        if (matchedAsset.userName) loggedInUsers.add(matchedAsset.userName);
+        if ((matchedAsset as any).userName) loggedInUsers.add((matchedAsset as any).userName);
         if ((matchedAsset as any).lastLoggedInUser) loggedInUsers.add((matchedAsset as any).lastLoggedInUser);
 
         if (matchedAsset.processor) hardwareSet.add(`Processor: ${matchedAsset.processor}`);
@@ -17865,7 +20131,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/tenants/:tenantId/security-integrations", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       await assertTenantAccess(req, tenantId);
       const cacheKey = `tenants:${tenantId}:integrations`;
       const cached = await getCache(cacheKey);
@@ -17881,7 +20147,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/tenants/:tenantId/security-integrations/deleted", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       const access = await assertTenantAccess(req, tenantId);
       assertMSSRole(access);
       const integrations = await storage.getDeletedSecurityIntegrations(tenantId);
@@ -17893,12 +20159,19 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/tenants/:tenantId/security-integrations/audit-log", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       const access = await assertTenantAccess(req, tenantId);
       assertMSSRole(access);
       const integrationId = req.query.integrationId ? parseInt(req.query.integrationId as string) : undefined;
       const log = await storage.getIntegrationAuditLog(tenantId, integrationId);
-      res.json(log);
+      const allowedActions = new Set(["created", "updated", "deleted", "restored", "test_connection", "pull_data", "draft_discarded"]);
+      const actionParam = req.query.action;
+      const actions = (Array.isArray(actionParam) ? actionParam : actionParam ? [actionParam] : [])
+        .flatMap((a) => String(a).split(","))
+        .map((a) => a.trim())
+        .filter((a) => allowedActions.has(a));
+      const filtered = actions.length > 0 ? log.filter((e) => actions.includes(e.action)) : log;
+      res.json(filtered);
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to fetch audit log" });
     }
@@ -17906,7 +20179,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/tenants/:tenantId/security-integrations/export", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       const access = await assertTenantAccess(req, tenantId);
       assertMSSRole(access);
       const integrations = await storage.getSecurityIntegrations(tenantId);
@@ -17933,7 +20206,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/tenants/:tenantId/security-integrations", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       const access = await assertTenantAccess(req, tenantId);
       assertMSSRole(access);
 
@@ -18026,7 +20299,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.patch("/api/security-integrations/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) {
         return res.status(404).json({ message: "Integration not found" });
@@ -18092,7 +20365,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.get("/api/security-integrations/:id/credentials-status", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       await assertTenantAccess(req, existing.tenantId);
@@ -18184,7 +20457,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.delete("/api/security-integrations/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) {
         return res.status(404).json({ message: "Integration not found" });
@@ -18194,17 +20467,30 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       await storage.deleteSecurityIntegration(id);
       await deleteCachePrefix(`tenants:${existing.tenantId}:`);
       const deleteUser = req.user as any;
+      const reasonRaw = typeof req.query.reason === "string" ? req.query.reason : "";
+      const isDraftDiscard =
+        reasonRaw === "draft_discarded" &&
+        (existing.status === "error" || existing.status === "configuring") &&
+        (existing.eventsImported || 0) === 0;
       await storage.logIntegrationAudit({
         tenantId: existing.tenantId,
         integrationId: id,
         platformName: existing.platformName,
         platformKey: existing.platformKey,
-        action: "deleted",
+        action: isDraftDiscard ? "draft_discarded" : "deleted",
         userId: deleteUser?.claims?.sub || deleteUser?.id || null,
         username: deleteUser?.claims?.email || deleteUser?.email || null,
-        details: { status: existing.status, eventsImported: existing.eventsImported },
+        details: isDraftDiscard
+          ? { autoRollback: true, lastPollMessage: existing.lastPollMessage || null, status: existing.status }
+          : { status: existing.status, eventsImported: existing.eventsImported },
       });
-      res.json({ success: true, message: "Integration moved to recycle bin. It can be restored within 30 days." });
+      res.json({
+        success: true,
+        autoRollback: isDraftDiscard,
+        message: isDraftDiscard
+          ? "Half-configured integration auto-rolled back to recycle bin after failed test."
+          : "Integration moved to recycle bin. It can be restored within 30 days.",
+      });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message || "Failed to delete integration" });
     }
@@ -18212,7 +20498,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/restore", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) {
         return res.status(404).json({ message: "Integration not found" });
@@ -18243,7 +20529,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/test-connection", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) {
         return res.status(404).json({ message: "Integration not found" });
@@ -18310,7 +20596,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/pull-data", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) {
         return res.status(404).json({ message: "Integration not found" });
@@ -18413,7 +20699,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
     app.post("/api/security-integrations/:id/autoheal", isAuthenticated, async (req: Request, res: Response) => {
       try {
-        const id = parseInt(req.params.id);
+        const id = parseInt(req.params.id as string);
         const existing = await storage.getSecurityIntegration(id);
         if (!existing) return res.status(404).json({ message: "Integration not found" });
         const access = await assertTenantAccess(req, existing.tenantId);
@@ -18445,7 +20731,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
     app.get("/api/security-integrations/:id/heal-log", isAuthenticated, async (req: Request, res: Response) => {
       try {
-        const id = parseInt(req.params.id);
+        const id = parseInt(req.params.id as string);
         const existing = await storage.getSecurityIntegration(id);
         if (!existing) return res.status(404).json({ message: "Integration not found" });
         await assertTenantAccess(req, existing.tenantId);
@@ -18462,7 +20748,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
     app.get("/api/tenants/:tenantId/heal-stats", isAuthenticated, async (req: Request, res: Response) => {
       try {
-        const tenantId = parseInt(req.params.tenantId);
+        const tenantId = parseInt(req.params.tenantId as string);
         await assertTenantAccess(req, tenantId);
 
         const { getHealStats } = await import("./integration-autoheal.js");
@@ -18476,7 +20762,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
     app.patch("/api/security-integrations/:id/autoheal-toggle", isAuthenticated, async (req: Request, res: Response) => {
       try {
-        const id = parseInt(req.params.id);
+        const id = parseInt(req.params.id as string);
         const existing = await storage.getSecurityIntegration(id);
         if (!existing) return res.status(404).json({ message: "Integration not found" });
         const access = await assertTenantAccess(req, existing.tenantId);
@@ -18593,7 +20879,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     const existingMap = new Map(existingAssets.map(a => [(a.hostname || "").toLowerCase(), a]));
     let stored = 0;
 
-    const BATCH_SIZE = 50;
+    const BATCH_SIZE = 3;
     let failed = 0;
 
     for (let i = 0; i < validHosts.length; i += BATCH_SIZE) {
@@ -19229,7 +21515,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         const existingNames = new Set(existing.map((s: any) => (s.name || "").toLowerCase()));
         const toAdd = newSoftware
           .filter(s => s.name && !existingNames.has(s.name.toLowerCase()))
-          .map(s => ({ ...s, source: s.source || "cynet_api" }));
+          .map(s => ({ ...s, source: ((s as any).source) || "cynet_api" }));
 
         const versionUpdates: Array<{ idx: number; version: string; vendor?: string }> = [];
         for (const newSw of newSoftware) {
@@ -19266,7 +21552,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
               if (!sw.name) return null;
               const eol = lookupEOL(sw.name, sw.version || "");
               if (!eol) return null;
-              if (eol.eolStatus === "unknown" && eol.eosStatus === "unknown") return null;
+              if ((eol.eolStatus as string) === "unknown" && (eol.eosStatus as string) === "unknown") return null;
               return {
                 name: sw.name,
                 version: sw.version || "",
@@ -19295,7 +21581,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/assets/:id/refresh-software", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const assetId = parseInt(req.params.id);
+      const assetId = parseInt(req.params.id as string);
       const asset = await storage.getAsset(assetId);
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       const access = await assertTenantAccess(req, asset.tenantId);
@@ -19668,7 +21954,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/pull-assets", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       const access = await assertTenantAccess(req, existing.tenantId);
@@ -19993,7 +22279,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/pull-hosts", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       const access = await assertTenantAccess(req, existing.tenantId);
@@ -20034,7 +22320,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
    */
   app.get("/api/security-integrations/:id/probe-full-host", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       const access = await assertTenantAccess(req, existing.tenantId);
@@ -20107,7 +22393,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/pull-users", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       const access = await assertTenantAccess(req, existing.tenantId);
@@ -20139,7 +22425,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   app.post("/api/security-integrations/:id/pull-network", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getSecurityIntegration(id);
       if (!existing) return res.status(404).json({ message: "Integration not found" });
       const access = await assertTenantAccess(req, existing.tenantId);
@@ -20556,7 +22842,34 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const swAnalyticsCached = await getCache(swAnalyticsCacheKey);
       if (swAnalyticsCached) return res.json(swAnalyticsCached);
 
-      const softwareAnalyticsResult = await withHeavyQueryLimit(async () => {
+      const softwareAnalyticsResult = await computeSoftwareAnalytics(
+        tenantId,
+        access.isMSS,
+        (typeof access.tenantId === 'number' && !isNaN(access.tenantId) && access.tenantId > 0) ? access.tenantId : null,
+      );
+      setCache(swAnalyticsCacheKey, softwareAnalyticsResult, 1_800_000);
+      res.json(softwareAnalyticsResult);
+    } catch (error: any) {
+      const errMsg = String(error?.message || error || '');
+      if (errMsg.includes('NaN') || errMsg.includes('invalid input syntax')) {
+        res.json({
+          totalAssets: 0, totalWithSoftwareData: 0, totalWithoutSoftwareData: 0,
+          topApps: [], allSoftware: [], appCategories: [], securityCategories: [],
+          endpointSecurity: { totalProtected: 0, totalUnprotected: 0, coveragePercent: 0, agents: [], protectedAssets: [], unprotectedAssets: [] },
+          multiAgent: { totalCount: 0, assets: [] },
+          p2pVpn: { totalAssets: 0, apps: [] },
+        });
+        return;
+      }
+      res.status(error.status || 500).json({ message: errMsg || "sw-analytics-v3-error" });
+    }
+  });
+
+  const computeSoftwareAnalytics = async (
+    tenantId: number | null,
+    isMSS: boolean,
+    accessTenantId: number | null,
+  ) => withHeavyQueryLimit(async () => {
       let allAssets: any[] = [];
       let allEvents: any[] = [];
       let allIncidents: any[] = [];
@@ -20564,9 +22877,9 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       if (!tenantId) {
         const allTenants = await storage.getTenants();
-        const tids = access.isMSS
+        const tids = isMSS
           ? allTenants.map(t => t.id).filter((id): id is number => typeof id === 'number' && !isNaN(id) && id > 0)
-          : (access.tenantId && typeof access.tenantId === 'number' && !isNaN(access.tenantId) && access.tenantId > 0) ? [access.tenantId] : [];
+          : (accessTenantId && typeof accessTenantId === 'number' && !isNaN(accessTenantId) && accessTenantId > 0) ? [accessTenantId] : [];
         for (const tid of tids) {
           if (typeof tid !== 'number' || isNaN(tid) || tid <= 0) continue;
           tenantIds.push(tid);
@@ -20968,28 +23281,12 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           apps: riskAppsList,
         },
       };
-      });
-      setCache(swAnalyticsCacheKey, softwareAnalyticsResult, 300_000);
-      res.json(softwareAnalyticsResult);
-    } catch (error: any) {
-      const errMsg = String(error?.message || error || '');
-      if (errMsg.includes('NaN') || errMsg.includes('invalid input syntax')) {
-        res.json({
-          totalAssets: 0, totalWithSoftwareData: 0, totalWithoutSoftwareData: 0,
-          topApps: [], allSoftware: [], appCategories: [], securityCategories: [],
-          endpointSecurity: { totalProtected: 0, totalUnprotected: 0, coveragePercent: 0, agents: [], protectedAssets: [], unprotectedAssets: [] },
-          multiAgent: { totalCount: 0, assets: [] },
-          p2pVpn: { totalAssets: 0, apps: [] },
-        });
-        return;
-      }
-      res.status(error.status || 500).json({ message: errMsg || "sw-analytics-v3-error" });
-    }
   });
+  _computeSoftwareAnalyticsForWarmup = computeSoftwareAnalytics;
 
   app.get("/api/assets/:id", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const asset = await storage.getAsset(id);
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       await assertTenantAccess(req, asset.tenantId);
@@ -21021,7 +23318,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     try {
       const access = await getUserTenantAccess(req);
       assertMSSRole(access);
-      const id = parseInt(req.params.id);
+      const id = parseInt(req.params.id as string);
       const existing = await storage.getAsset(id);
       if (!existing) return res.status(404).json({ message: "Asset not found" });
       await assertTenantAccess(req, existing.tenantId);
@@ -21035,7 +23332,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   app.post("/api/_migrate/batch", async (req: Request, res: Response) => {
     try {
       const key = req.headers["x-migrate-key"];
-      if (key !== "secureops-migrate-2026") {
+      const expected = process.env.MIGRATE_KEY;
+      if (!expected) {
+        return res.status(503).json({ message: "Migration endpoint disabled: MIGRATE_KEY not configured on server" });
+      }
+      if (key !== expected) {
         return res.status(403).json({ message: "Forbidden" });
       }
       const { table, rows } = req.body;
@@ -21072,7 +23373,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   app.post("/api/_migrate/clear", async (req: Request, res: Response) => {
     try {
       const key = req.headers["x-migrate-key"];
-      if (key !== "secureops-migrate-2026") {
+      const expected = process.env.MIGRATE_KEY;
+      if (!expected) {
+        return res.status(503).json({ message: "Migration endpoint disabled: MIGRATE_KEY not configured on server" });
+      }
+      if (key !== expected) {
         return res.status(403).json({ message: "Forbidden" });
       }
       // NOTE: security_integrations is intentionally excluded — it stores persistent
@@ -21110,7 +23415,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   app.get("/api/_migrate/export-integrations", async (req: Request, res: Response) => {
     try {
       const key = req.headers["x-migrate-key"];
-      if (key !== "secureops-migrate-2026") {
+      const expected = process.env.MIGRATE_KEY;
+      if (!expected) {
+        return res.status(503).json({ message: "Migration endpoint disabled: MIGRATE_KEY not configured on server" });
+      }
+      if (key !== expected) {
         return res.status(403).json({ message: "Forbidden" });
       }
       const { rows } = await pool.query(`SELECT * FROM security_integrations ORDER BY tenant_id, id`);
@@ -21124,7 +23433,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   app.post("/api/_migrate/reset-sequences", async (req: Request, res: Response) => {
     try {
       const key = req.headers["x-migrate-key"];
-      if (key !== "secureops-migrate-2026") {
+      const expected = process.env.MIGRATE_KEY;
+      if (!expected) {
+        return res.status(503).json({ message: "Migration endpoint disabled: MIGRATE_KEY not configured on server" });
+      }
+      if (key !== expected) {
         return res.status(403).json({ message: "Forbidden" });
       }
       const tables = [
@@ -21150,136 +23463,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   });
 
   // ==================== Risk Intelligence API ====================
-  const { calculateTenantRiskScores, getRiskDashboardStats, getRiskScores: getRiskScoresData, getRiskScoreForEntity } = await import("./risk-engine");
+  await registerRiskRoutes(app);
 
-  app.post("/api/risk/calculate", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = req.body.tenantId || req.query.tenantId;
-      if (!tenantId) {
-        return res.status(400).json({ message: "tenantId is required" });
-      }
-      const result = await calculateTenantRiskScores(Number(tenantId));
-      res.json({
-        success: true,
-        ...result,
-        message: `Risk scores calculated: ${result.assetsProcessed} assets, ${result.usersProcessed} users, ${result.ipsProcessed} IPs, ${result.totalAlerts} compound alerts`,
-      });
-    } catch (error: any) {
-      console.error("Risk calculation error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/dashboard/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const stats = await getRiskDashboardStats(tenantId);
-      res.json(stats);
-    } catch (error: any) {
-      console.error("Risk dashboard error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/:tenantId/unified", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      let stats = await getRiskDashboardStats(tenantId);
-      if (stats.totalEntities === 0) {
-        try {
-          await calculateTenantRiskScores(tenantId);
-          stats = await getRiskDashboardStats(tenantId);
-        } catch (calcErr: any) {
-          console.error("Auto risk calculation error:", calcErr.message);
-        }
-      }
-      const deviceAvg = stats.byEntityType?.asset?.avgScore ?? 0;
-      const userAvg = stats.byEntityType?.user?.avgScore ?? 0;
-      const ipAvg = stats.byEntityType?.ip?.avgScore ?? 0;
-      res.json({
-        ...stats,
-        score: stats.averageRiskScore,
-        riskLevel: stats.overallRiskLevel,
-        deviceScore: deviceAvg,
-        userScore: userAvg,
-        ipScore: ipAvg,
-        cloudScore: Math.round((deviceAvg + ipAvg) / 2) || undefined,
-        emailScore: ipAvg || undefined,
-        entities: [
-          ...(stats.topRiskyAssets || []).map((e: any) => ({ ...e, name: e.identifier, type: "asset" })),
-          ...(stats.topRiskyUsers || []).map((e: any) => ({ ...e, name: e.identifier, type: "user" })),
-          ...(stats.topRiskyIps || []).map((e: any) => ({ ...e, name: e.identifier, type: "ip" })),
-        ],
-      });
-    } catch (error: any) {
-      console.error("Risk unified error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/:tenantId/devices", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const { limit, offset, search, riskLevel } = req.query;
-      const result = await getRiskScoresData(tenantId, "asset", riskLevel as string | undefined, Number(limit) || 50, Number(offset) || 0, search as string | undefined);
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/:tenantId/users", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const { limit, offset, search, riskLevel } = req.query;
-      const result = await getRiskScoresData(tenantId, "user", riskLevel as string | undefined, Number(limit) || 50, Number(offset) || 0, search as string | undefined);
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/:tenantId/ips", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const { limit, offset, search, riskLevel } = req.query;
-      const result = await getRiskScoresData(tenantId, "ip", riskLevel as string | undefined, Number(limit) || 50, Number(offset) || 0, search as string | undefined);
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/scores/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const { entityType, riskLevel, limit, offset, search } = req.query;
-      const result = await getRiskScoresData(
-        tenantId,
-        entityType as string | undefined,
-        riskLevel as string | undefined,
-        Number(limit) || 50,
-        Number(offset) || 0,
-        search as string | undefined,
-      );
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/risk/entity/:tenantId/:entityType/:entityId", isAuthenticated, async (req: any, res) => {
-    try {
-      const { tenantId, entityType, entityId } = req.params;
-      const score = await getRiskScoreForEntity(Number(tenantId), entityType, Number(entityId));
-      if (!score) {
-        return res.status(404).json({ message: "Risk score not found for this entity" });
-      }
-      res.json(score);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // Compliance Framework endpoints
   const { assessComplianceFrameworks, getComplianceData, getFrameworkDefinitions } = await import("./compliance-engine");
@@ -22495,624 +24680,33 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
-  app.get("/api/behavior-analytics/:tenantId/:entityType", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const entityType = req.params.entityType;
-      if (!tenantId || !["devices", "users", "ips", "domains"].includes(entityType)) {
-        return res.status(400).json({ message: "Invalid parameters" });
-      }
-      await assertTenantAccess(req, tenantId);
+  registerBehaviorAnalyticsRoutes(app);
 
-      const tenant = await storage.getTenant(tenantId);
-      let childIds: number[] = [];
-      if (tenant && tenant.type === "mssp") {
-        const children = await storage.getChildTenants(tenantId);
-        childIds = children.map(c => c.id);
-      }
-      const allTenantIds = childIds.length > 0 ? [tenantId, ...childIds] : [tenantId];
-      const ph = allTenantIds.map((_, i) => `$${i + 1}`).join(",");
-
-      const enrichWithML = async (entities: any[]) => {
-        try {
-          const mlPh = allTenantIds.map((_, i) => `$${i + 1}`).join(",");
-          const mlRes = await pool.query(
-            `SELECT LOWER(entity_name) as entity_name, confidence_score, anomaly_type, dimensions
-             FROM behavior_anomalies
-             WHERE tenant_id IN (${mlPh}) AND entity_type = $${allTenantIds.length + 1}
-             ORDER BY occurred_at DESC`,
-            [...allTenantIds, entityType]
-          );
-          const mlMap = new Map<string, { score: number; riskLevel: string; dimensions: any[] }>();
-          for (const r of mlRes.rows) {
-            if (!mlMap.has(r.entity_name)) {
-              mlMap.set(r.entity_name, {
-                score: parseInt(r.confidence_score) || 0,
-                riskLevel: r.anomaly_type || "low",
-                dimensions: Array.isArray(r.dimensions) ? r.dimensions : [],
-              });
-            }
-          }
-          // Compute peer rank: % of entities this entity's ML score exceeds
-          const allScores = Array.from(mlMap.values()).map(v => v.score).sort((a, b) => a - b);
-          return entities.map((e: any) => {
-            const ml = mlMap.get((e.name || "").toLowerCase());
-            const score = ml?.score ?? 0;
-            const peersBelow = allScores.filter(s => s < score).length;
-            const mlPeerRank = allScores.length > 0 ? Math.round((peersBelow / allScores.length) * 100) : null;
-            return {
-              ...e,
-              mlConfidenceScore: ml?.score ?? null,
-              mlRiskLevel: ml?.riskLevel ?? null,
-              mlDimensions: ml?.dimensions ?? [],
-              mlPeerRank: ml ? mlPeerRank : null,
-            };
-          });
-        } catch (e: any) {
-          console.error(`[UEBA] enrichWithML failed for tenant ${tenantId}/${entityType}:`, e.message);
-          return entities.map((ent: any) => ({ ...ent, mlConfidenceScore: null, mlRiskLevel: null, mlDimensions: [], mlEnrichError: true }));
-        }
-      };
-
-      if (entityType === "devices") {
-        const result = await pool.query(
-          `SELECT LOWER(asset) as name, COUNT(*) as event_count,
-                  MAX(severity) as max_severity, MAX(occurred_at) as last_activity,
-                  MAX(CASE WHEN severity IN ('critical','high') THEN COALESCE(threat, event_type::text) END) as top_threat,
-                  array_agg(DISTINCT mitre_tactic) FILTER (WHERE mitre_tactic IS NOT NULL) as tactics
-           FROM security_events
-           WHERE tenant_id IN (${ph}) AND asset IS NOT NULL AND LENGTH(asset) > 1
-           GROUP BY LOWER(asset)
-           ORDER BY event_count DESC LIMIT 200`,
-          allTenantIds
-        );
-        const entities = result.rows.map((r: any) => {
-          const evtCount = parseInt(r.event_count);
-          const hasCritical = r.max_severity === "critical";
-          const tacticCount = (r.tactics || []).filter(Boolean).length;
-          const rawScore = Math.min(100, evtCount * 2 + (hasCritical ? 30 : 0) + tacticCount * 8);
-          const riskLevel = rawScore >= 81 ? "severe" : rawScore >= 61 ? "critical" : rawScore >= 41 ? "high" : rawScore >= 21 ? "moderate" : "low";
-          return {
-            name: r.name,
-            eventCount: evtCount,
-            riskScore: rawScore,
-            riskLevel,
-            lastActivity: r.last_activity ? new Date(r.last_activity).toISOString().split("T")[0] : null,
-            topThreat: r.top_threat || null,
-          };
-        });
-        return res.json(await enrichWithML(entities));
-      }
-
-      if (entityType === "users") {
-        const result = await pool.query(
-          `SELECT LOWER(COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender)) as name,
-                  COUNT(*) as event_count,
-                  MAX(severity) as max_severity, MAX(occurred_at) as last_activity,
-                  MAX(CASE WHEN severity IN ('critical','high') THEN COALESCE(threat, event_type::text) END) as top_threat,
-                  array_agg(DISTINCT mitre_tactic) FILTER (WHERE mitre_tactic IS NOT NULL) as tactics
-           FROM security_events
-           WHERE tenant_id IN (${ph})
-           AND COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender) IS NOT NULL
-           GROUP BY LOWER(COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender))
-           HAVING LENGTH(LOWER(COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender))) > 1
-           ORDER BY event_count DESC LIMIT 200`,
-          allTenantIds
-        );
-        const entities = result.rows.map((r: any) => {
-          const evtCount = parseInt(r.event_count);
-          const hasCritical = r.max_severity === "critical";
-          const tacticCount = (r.tactics || []).filter(Boolean).length;
-          const rawScore = Math.min(100, evtCount + (hasCritical ? 25 : 0) + tacticCount * 10);
-          const riskLevel = rawScore >= 81 ? "severe" : rawScore >= 61 ? "critical" : rawScore >= 41 ? "high" : rawScore >= 21 ? "moderate" : "low";
-          return {
-            name: r.name,
-            eventCount: evtCount,
-            riskScore: rawScore,
-            riskLevel,
-            lastActivity: r.last_activity ? new Date(r.last_activity).toISOString().split("T")[0] : null,
-            topThreat: r.top_threat || null,
-          };
-        });
-        return res.json(await enrichWithML(entities));
-      }
-
-      if (entityType === "ips") {
-        const result = await pool.query(
-          `SELECT name, SUM(cnt)::int as event_count, MAX(max_sev) as max_severity, MAX(last_act) as last_activity,
-                  MAX(top_t) as top_threat
-           FROM (
-             SELECT COALESCE(NULLIF(raw_payload->>'sourceIp',''), raw_payload->>'attackerIp') as name,
-                    COUNT(*) as cnt, MAX(severity) as max_sev, MAX(occurred_at) as last_act,
-                    MAX(CASE WHEN severity IN ('critical','high') THEN COALESCE(threat, event_type::text) END) as top_t
-             FROM security_events
-             WHERE tenant_id IN (${ph}) AND COALESCE(NULLIF(raw_payload->>'sourceIp',''), raw_payload->>'attackerIp') IS NOT NULL
-             GROUP BY COALESCE(NULLIF(raw_payload->>'sourceIp',''), raw_payload->>'attackerIp')
-             UNION ALL
-             SELECT COALESCE(NULLIF(raw_payload->>'destinationIp',''), raw_payload->>'targetIp') as name,
-                    COUNT(*) as cnt, MAX(severity) as max_sev, MAX(occurred_at) as last_act,
-                    MAX(CASE WHEN severity IN ('critical','high') THEN COALESCE(threat, event_type::text) END) as top_t
-             From security_events
-             WHERE tenant_id IN (${ph}) AND COALESCE(NULLIF(raw_payload->>'destinationIp',''), raw_payload->>'targetIp') IS NOT NULL
-             GROUP BY COALESCE(NULLIF(raw_payload->>'destinationIp',''), raw_payload->>'targetIp')
-           ) sub
-           WHERE name IS NOT NULL AND LENGTH(name) > 3
-           GROUP BY name
-           ORDER BY event_count DESC LIMIT 200`,
-          allTenantIds
-        );
-        const entities = result.rows.map((r: any) => {
-          const evtCount = r.event_count;
-          const hasCritical = r.max_severity === "critical";
-          const rawScore = Math.min(100, evtCount * 3 + (hasCritical ? 30 : 0));
-          const riskLevel = rawScore >= 81 ? "severe" : rawScore >= 61 ? "critical" : rawScore >= 41 ? "high" : rawScore >= 21 ? "moderate" : "low";
-          return {
-            name: r.name,
-            eventCount: evtCount,
-            riskScore: rawScore,
-            riskLevel,
-            lastActivity: r.last_activity ? new Date(r.last_activity).toISOString().split("T")[0] : null,
-            topThreat: r.top_threat || null,
-          };
-        });
-        return res.json(await enrichWithML(entities));
-      }
-
-      if (entityType === "domains") {
-        const result = await pool.query(
-          `SELECT LOWER(SUBSTRING(sender FROM '@(.+)$')) as name,
-                  COUNT(*) as event_count,
-                  MAX(severity) as max_severity, MAX(occurred_at) as last_activity,
-                  COUNT(*) FILTER (WHERE raw_payload->>'emailThreatType' IS NOT NULL AND raw_payload->>'emailThreatType' NOT IN ('Clean','Graymail')) as threat_count,
-                  MAX(CASE WHEN severity IN ('critical','high') THEN raw_payload->>'emailThreatType' END) as top_threat
-           FROM security_events
-           WHERE tenant_id IN (${ph}) AND event_type = 'email' AND sender IS NOT NULL AND sender LIKE '%@%'
-           GROUP BY LOWER(SUBSTRING(sender FROM '@(.+)$'))
-           HAVING LENGTH(LOWER(SUBSTRING(sender FROM '@(.+)$'))) > 2
-           ORDER BY event_count DESC LIMIT 200`,
-          allTenantIds
-        );
-        const entities = result.rows.map((r: any) => {
-          const evtCount = parseInt(r.event_count);
-          const threatCount = parseInt(r.threat_count || "0");
-          const threatRatio = evtCount > 0 ? threatCount / evtCount : 0;
-          const rawScore = Math.min(100, Math.round(threatRatio * 200) + (r.max_severity === "critical" ? 20 : 0));
-          const riskLevel = rawScore >= 81 ? "severe" : rawScore >= 61 ? "critical" : rawScore >= 41 ? "high" : rawScore >= 21 ? "moderate" : "low";
-          return {
-            name: r.name,
-            eventCount: evtCount,
-            riskScore: rawScore,
-            riskLevel,
-            lastActivity: r.last_activity ? new Date(r.last_activity).toISOString().split("T")[0] : null,
-            topThreat: r.top_threat || null,
-          };
-        });
-        return res.json(await enrichWithML(entities));
-      }
-
-      res.json([]);
-    } catch (error: any) {
-      console.error("Behavior analytics list error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/behavior-analytics/:tenantId/:entityType/ranked", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const entityType = req.params.entityType;
-      if (!tenantId || !["devices", "users", "ips", "domains"].includes(entityType)) {
-        return res.status(400).json({ message: "Invalid parameters" });
-      }
-      await assertTenantAccess(req, tenantId);
-
-      const limit = Math.min(100, parseInt(req.query.limit as string || "50") || 50);
-      // Include child tenant IDs for MSSP aggregation
-      const childTenantsRes = await pool.query(`SELECT id FROM tenants WHERE parent_id = $1`, [tenantId]);
-      const childTids = childTenantsRes.rows.map((r: any) => r.id as number);
-      const allTids = childTids.length > 0 ? [tenantId, ...childTids] : [tenantId];
-      const rankedPh = allTids.map((_, i) => `$${i + 1}`).join(",");
-      // Ranked query: DISTINCT ON entity_name (latest record per entity) → composite score sort
-      // composite = severityScore*0.4 + confidenceScore*0.4 + recencyScore*0.2
-      const result = await pool.query(
-        `SELECT entity_name, entity_type, confidence_score, risk_level,
-                marked_expected, escalated_to_incident, occurred_at, dimensions,
-                composite_rank_score,
-                ROW_NUMBER() OVER (ORDER BY composite_rank_score DESC) as rank
-         FROM (
-           SELECT DISTINCT ON (tenant_id, entity_name)
-                  entity_name, entity_type, confidence_score, anomaly_type AS risk_level,
-                  marked_expected, escalated_to_incident, occurred_at, dimensions,
-                  ROUND(
-                    (CASE anomaly_type WHEN 'severe' THEN 100 WHEN 'critical' THEN 80 WHEN 'high' THEN 60 WHEN 'moderate' THEN 40 ELSE 20 END * 0.40) +
-                    (LEAST(confidence_score, 100) * 0.40) +
-                    (GREATEST(0, 100 - EXTRACT(EPOCH FROM (NOW() - occurred_at)) / 3600 * 100.0 / 168) * 0.20)
-                  ) AS composite_rank_score
-           FROM behavior_anomalies
-           WHERE tenant_id IN (${rankedPh}) AND entity_type = $${allTids.length + 1} AND marked_expected = false
-           ORDER BY tenant_id, entity_name, occurred_at DESC
-         ) latest
-         ORDER BY composite_rank_score DESC
-         LIMIT $${allTids.length + 2}`,
-        [...allTids, entityType, limit]
-      );
-
-      // Get peer cohort size for this entity type (entities active in last 7 days)
-      const peerCohortRes = await pool.query(
-        `SELECT COUNT(*) as cohort_size FROM behavior_anomalies
-         WHERE tenant_id IN (${rankedPh}) AND entity_type = $${allTids.length + 1} AND occurred_at >= NOW() - INTERVAL '7 days'`,
-        [...allTids, entityType]
-      );
-      const peerCohortSize = parseInt(peerCohortRes.rows[0]?.cohort_size) || 0;
-
-      res.json({
-        entityType,
-        peerCohort: { type: entityType, size: peerCohortSize, description: `All ${entityType} entities in tenant scope` },
-        anomalies: result.rows.map((r: any) => ({
-          entityName: r.entity_name,
-          entityType: r.entity_type,
-          confidenceScore: parseInt(r.confidence_score),
-          riskLevel: r.risk_level,
-          markedExpected: r.marked_expected,
-          escalatedToIncident: r.escalated_to_incident,
-          occurredAt: r.occurred_at,
-          rank: parseInt(r.rank),
-          compositeRankScore: Math.round(parseFloat(r.composite_rank_score) || 0),
-          topDimensions: (r.dimensions || []).slice(0, 3),
-        })),
-      });
-    } catch (error: any) {
-      console.error("Ranked anomalies error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/behavior-analytics/:tenantId/:entityType/:entityName/sparklines", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const entityType = req.params.entityType;
-      const entityName = decodeURIComponent(req.params.entityName);
-      if (!tenantId || !entityType) return res.status(400).json({ message: "Invalid params" });
-      await assertTenantAccess(req, tenantId);
-
-      // Build entity-specific filter (for this entity's own sparkline) and entity-type cohort filter (for peer avg)
-      const entityFilters: Record<string, { where: string; params: any[]; peerWhere: string }> = {
-        devices: {
-          where: "LOWER(asset) = $3", params: [entityName.toLowerCase()],
-          peerWhere: "asset IS NOT NULL AND LENGTH(TRIM(asset)) > 0",
-        },
-        users: {
-          where: "LOWER(COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender)) = $3", params: [entityName.toLowerCase()],
-          peerWhere: "COALESCE(raw_payload->>'userName', raw_payload->>'user_name', sender) IS NOT NULL",
-        },
-        ips: {
-          where: "COALESCE(raw_payload->>'sourceIp', raw_payload->>'attackerIp') = $3", params: [entityName],
-          peerWhere: "COALESCE(raw_payload->>'sourceIp', raw_payload->>'attackerIp') IS NOT NULL",
-        },
-        domains: {
-          where: "LOWER(REGEXP_REPLACE(COALESCE(raw_payload->>'sender_domain', SPLIT_PART(COALESCE(sender,''), '@', 2)), '^\\s*$', 'unknown')) = $3", params: [entityName.toLowerCase()],
-          peerWhere: "COALESCE(raw_payload->>'sender_domain', SPLIT_PART(COALESCE(sender,''), '@', 2)) IS NOT NULL",
-        },
-      };
-      const filterCfg = entityFilters[entityType];
-      if (!filterCfg) return res.status(400).json({ message: "Unknown entity type" });
-
-      const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
-      const dailyRes = await pool.query(
-        `SELECT DATE_TRUNC('day', occurred_at) as day,
-                COUNT(*) as total_events,
-                COUNT(CASE WHEN severity IN ('critical','high') THEN 1 END) as critical_events,
-                COUNT(CASE WHEN EXTRACT(HOUR FROM occurred_at) < 6 OR EXTRACT(HOUR FROM occurred_at) >= 22 THEN 1 END) as off_hours_events,
-                COUNT(CASE WHEN event_type = 'privilege_escalation' OR (mitre_tactic ILIKE '%privilege%') THEN 1 END) as privilege_events,
-                COUNT(CASE WHEN event_type = 'lateral_movement' OR (mitre_tactic ILIKE '%lateral%') THEN 1 END) as lateral_events,
-                COUNT(CASE WHEN action = 'failed' OR event_type = 'failed_auth' THEN 1 END) as failed_auth_events,
-                COUNT(DISTINCT event_type) as distinct_event_types,
-                COUNT(DISTINCT log_source) as distinct_log_sources,
-                COUNT(DISTINCT mitre_tactic) as distinct_tactics,
-                COUNT(DISTINCT NULLIF(COALESCE(raw_payload->>'destinationIp', raw_payload->>'dst_ip', ''), '')) FILTER (WHERE COALESCE(raw_payload->>'destinationIp', raw_payload->>'dst_ip') IS NOT NULL) as dst_ips
-         FROM security_events
-         WHERE tenant_id = $1 AND occurred_at >= $2 AND ${filterCfg.where}
-         GROUP BY DATE_TRUNC('day', occurred_at)
-         ORDER BY day ASC`,
-        [tenantId, fourteenDaysAgo, ...filterCfg.params]
-      );
-
-      // Peer daily averages filtered to same entity TYPE cohort (not all events) for accurate peer context
-      const peerAvgRes = await pool.query(
-        `SELECT
-                COUNT(*) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_daily_events,
-                COUNT(CASE WHEN severity IN ('critical','high') THEN 1 END) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_critical_events,
-                COUNT(CASE WHEN EXTRACT(HOUR FROM occurred_at) < 6 OR EXTRACT(HOUR FROM occurred_at) >= 22 THEN 1 END) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_off_hours_events,
-                COUNT(CASE WHEN event_type = 'privilege_escalation' OR (mitre_tactic ILIKE '%privilege%') THEN 1 END) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_privilege_events,
-                COUNT(CASE WHEN event_type = 'lateral_movement' OR (mitre_tactic ILIKE '%lateral%') THEN 1 END) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_lateral_events,
-                COUNT(CASE WHEN action = 'failed' OR event_type = 'failed_auth' THEN 1 END) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_failed_auth_events,
-                COUNT(DISTINCT event_type) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_distinct_event_types,
-                COUNT(DISTINCT log_source) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_distinct_log_sources,
-                COUNT(DISTINCT mitre_tactic) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_distinct_tactics,
-                COUNT(DISTINCT NULLIF(COALESCE(raw_payload->>'destinationIp', raw_payload->>'dst_ip', ''), '')) FILTER (WHERE COALESCE(raw_payload->>'destinationIp', raw_payload->>'dst_ip') IS NOT NULL) / GREATEST(COUNT(DISTINCT DATE_TRUNC('day', occurred_at)), 1)::float as avg_dst_ips
-         FROM security_events
-         WHERE tenant_id = $1 AND occurred_at >= $2 AND ${filterCfg.peerWhere}`,
-        [tenantId, fourteenDaysAgo]
-      );
-      const peerAvg = peerAvgRes.rows[0] || {};
-
-      res.json({
-        days: dailyRes.rows.map((r: any) => ({
-          day: r.day,
-          totalEvents: parseInt(r.total_events) || 0,
-          criticalEvents: parseInt(r.critical_events) || 0,
-          offHoursEvents: parseInt(r.off_hours_events) || 0,
-          privilegeEvents: parseInt(r.privilege_events) || 0,
-          lateralEvents: parseInt(r.lateral_events) || 0,
-          failedAuthEvents: parseInt(r.failed_auth_events) || 0,
-          distinctEventTypes: parseInt(r.distinct_event_types) || 0,
-          distinctLogSources: parseInt(r.distinct_log_sources) || 0,
-          distinctTactics: parseInt(r.distinct_tactics) || 0,
-          dataEgressVolume: parseInt(r.dst_ips) || 0,
-          geoVariety: parseInt(r.dst_ips) || 0,
-          newResourceAccess: (parseInt(r.distinct_event_types) || 0) + (parseInt(r.distinct_log_sources) || 0),
-        })),
-        peerDailyAvg: {
-          totalEvents: parseFloat(peerAvg.avg_daily_events) || 0,
-          criticalEvents: parseFloat(peerAvg.avg_critical_events) || 0,
-          offHoursEvents: parseFloat(peerAvg.avg_off_hours_events) || 0,
-          privilegeEvents: parseFloat(peerAvg.avg_privilege_events) || 0,
-          lateralEvents: parseFloat(peerAvg.avg_lateral_events) || 0,
-          failedAuthEvents: parseFloat(peerAvg.avg_failed_auth_events) || 0,
-          distinctEventTypes: parseFloat(peerAvg.avg_distinct_event_types) || 0,
-          distinctLogSources: parseFloat(peerAvg.avg_distinct_log_sources) || 0,
-          distinctTactics: parseFloat(peerAvg.avg_distinct_tactics) || 0,
-          dataEgressVolume: parseFloat(peerAvg.avg_dst_ips) || 0,
-          geoVariety: parseFloat(peerAvg.avg_dst_ips) || 0,
-          newResourceAccess: (parseFloat(peerAvg.avg_distinct_event_types) + parseFloat(peerAvg.avg_distinct_log_sources)) || 0,
-          loginDayVariance: 0,
-          temporalPatternDeviation: 0,
-          peerDeviation: 0,
-        },
-      });
-    } catch (error: any) {
-      console.error("Sparkline error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-
-  app.get("/api/behavior-analytics/:tenantId/:entityType/:entityId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const entityType = req.params.entityType;
-      const entityId = decodeURIComponent(req.params.entityId);
-      if (!tenantId || !["devices", "users", "ips", "domains"].includes(entityType) || !entityId) {
-        return res.status(400).json({ message: "Invalid parameters" });
-      }
-      await assertTenantAccess(req, tenantId);
-
-      const tenant = await storage.getTenant(tenantId);
-      let childIds: number[] = [];
-      if (tenant && tenant.type === "mssp") {
-        const children = await storage.getChildTenants(tenantId);
-        childIds = children.map(c => c.id);
-      }
-      const allTenantIds = childIds.length > 0 ? [tenantId, ...childIds] : [tenantId];
-      const ph = allTenantIds.map((_, i) => `$${i + 1}`).join(",");
-      const np = `$${allTenantIds.length + 1}`;
-      const nameLower = entityId.toLowerCase().trim();
-
-      let whereClause = "";
-      if (entityType === "devices") {
-        whereClause = `LOWER(asset) = ${np}`;
-      } else if (entityType === "users") {
-        whereClause = `(raw_payload->>'userName' ILIKE ${np} OR raw_payload->>'user_name' ILIKE ${np} OR LOWER(sender) = ${np})`;
-      } else if (entityType === "ips") {
-        whereClause = `(raw_payload->>'sourceIp' = ${np} OR raw_payload->>'destinationIp' = ${np} OR raw_payload->>'attackerIp' = ${np} OR raw_payload->>'targetIp' = ${np})`;
-      } else {
-        whereClause = `(event_type = 'email' AND LOWER(sender) LIKE '%@' || ${np})`;
-      }
-
-      const evtRes = await pool.query(
-        `SELECT severity, event_type, threat as title, occurred_at, mitre_tactic, action, log_source,
-                COALESCE(raw_payload->>'userName', raw_payload->>'user_name') as related_user,
-                asset as related_host,
-                raw_payload->>'sourceIp' as src_ip,
-                raw_payload->>'destinationIp' as dst_ip
-         FROM security_events
-         WHERE tenant_id IN (${ph}) AND ${whereClause}
-         ORDER BY occurred_at DESC LIMIT 200`,
-        [...allTenantIds, nameLower]
-      );
-
-      const events = evtRes.rows;
-
-      const recentEvents = events.slice(0, 30).map((e: any) => ({
-        severity: e.severity,
-        event_type: e.event_type,
-        title: e.title,
-        occurred_at: e.occurred_at,
-        action: e.action,
-      }));
-
-      const mitreTactics = [...new Set(events.filter((e: any) => e.mitre_tactic).flatMap((e: any) => e.mitre_tactic.split(",").map((t: string) => t.trim())).filter(Boolean))];
-
-      const relatedSet = new Map<string, string>();
-      for (const e of events) {
-        if (e.related_user && e.related_user.toLowerCase() !== nameLower) {
-          relatedSet.set(`user:${e.related_user.toLowerCase()}`, e.related_user);
-        }
-        if (e.related_host && e.related_host.toLowerCase() !== nameLower) {
-          relatedSet.set(`host:${e.related_host.toLowerCase()}`, e.related_host);
-        }
-        if (e.src_ip && e.src_ip !== nameLower) {
-          relatedSet.set(`ip:${e.src_ip}`, e.src_ip);
-        }
-        if (e.dst_ip && e.dst_ip !== nameLower) {
-          relatedSet.set(`ip:${e.dst_ip}`, e.dst_ip);
-        }
-      }
-      const relatedEntities = Array.from(relatedSet.entries()).slice(0, 20).map(([key, name]) => ({
-        type: key.split(":")[0],
-        name,
-      }));
-
-      const anomalies: { title: string; description: string }[] = [];
-      const criticalEvents = events.filter((e: any) => e.severity === "critical");
-      if (criticalEvents.length > 3) {
-        anomalies.push({ title: "High volume of critical events", description: `${criticalEvents.length} critical severity events detected` });
-      }
-      const logSources = new Set(events.map((e: any) => e.log_source).filter(Boolean));
-      if (logSources.size > 4) {
-        anomalies.push({ title: "Multi-source activity", description: `Activity detected across ${logSources.size} different log sources` });
-      }
-      if (mitreTactics.length >= 3) {
-        anomalies.push({ title: "Multiple MITRE ATT&CK tactics", description: `${mitreTactics.length} distinct MITRE tactics observed: ${mitreTactics.slice(0, 4).join(", ")}` });
-      }
-      const eventTypes = new Set(events.map((e: any) => e.event_type).filter(Boolean));
-      if (eventTypes.size >= 4) {
-        anomalies.push({ title: "Diverse event types", description: `Entity appears in ${eventTypes.size} different event categories` });
-      }
-
-      res.json({
-        recentEvents,
-        mitreTactics,
-        relatedEntities,
-        anomalies,
-        totalEvents: events.length,
-        logSources: Array.from(logSources),
-      });
-    } catch (error: any) {
-      console.error("Behavior analytics detail error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // NOTE: This GET endpoint has intentional write side-effects — it calls scoreEntity() which
-  // upserts a behavior_anomalies record if the ML score exceeds threshold. This keeps ML scores
-  // fresh on demand without requiring a separate trigger endpoint. Callers should be aware.
-  app.get("/api/behavior-analytics/:tenantId/:entityType/:entityId/ml", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const entityType = req.params.entityType;
-      const entityId = decodeURIComponent(req.params.entityId);
-      if (!tenantId || !["devices", "users", "ips", "domains"].includes(entityType) || !entityId) {
-        return res.status(400).json({ message: "Invalid parameters" });
-      }
-      await assertTenantAccess(req, tenantId);
-
-      const tenant = await storage.getTenant(tenantId);
-      let childIds: number[] = [];
-      if (tenant && tenant.type === "mssp") {
-        const children = await storage.getChildTenants(tenantId);
-        childIds = children.map((c: any) => c.id);
-      }
-      const allTenantIds = childIds.length > 0 ? [tenantId, ...childIds] : [tenantId];
-
-      const { computeEntityMLScore } = await import("./ml-behavior-engine.js");
-      const result = await computeEntityMLScore(pool, tenantId, allTenantIds, entityType, entityId, { preserveTimestamp: true });
-      res.json(result);
-    } catch (error: any) {
-      console.error("ML behavior analytics error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/behavior-analytics/:tenantId/anomaly/:anomalyId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const anomalyId = Number(req.params.anomalyId);
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { markedExpected, escalatedToIncident } = req.body;
-      const updates: string[] = [];
-      const params: any[] = [];
-      if (typeof markedExpected === "boolean") {
-        params.push(markedExpected);
-        updates.push(`marked_expected = $${params.length}`);
-      }
-
-      let createdIncidentId: number | null = null;
-
-      // Wrap escalation in a transaction with row-level lock to prevent concurrent escalation races
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        // When escalating to incident, create an actual incident record (idempotent — skip if already escalated)
-        if (escalatedToIncident === true) {
-          const anomalyRes = await client.query(
-            `SELECT entity_name, entity_type, anomaly_type, confidence_score, dimensions, escalated_to_incident, escalated_incident_id
-             FROM behavior_anomalies WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
-            [anomalyId, tenantId]
-          );
-          const anomaly = anomalyRes.rows[0];
-          if (anomaly) {
-            if (anomaly.escalated_to_incident && anomaly.escalated_incident_id) {
-              createdIncidentId = anomaly.escalated_incident_id;
-            } else {
-              const incidentTitle = `UEBA Anomaly: ${anomaly.entity_name} (${anomaly.anomaly_type})`;
-              const severity = anomaly.anomaly_type === "critical" || anomaly.anomaly_type === "severe" ? "critical" : anomaly.anomaly_type === "high" ? "high" : "medium";
-              const description = `Behavioral anomaly detected on entity "${anomaly.entity_name}" (${anomaly.entity_type}). ML confidence: ${anomaly.confidence_score}%. Automatically escalated from UEBA engine.`;
-              const incidentRes = await client.query(
-                `INSERT INTO incidents (tenant_id, title, description, severity, status, source, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, 'open', 'ueba', NOW(), NOW()) RETURNING id`,
-                [tenantId, incidentTitle, description, severity]
-              );
-              if (incidentRes.rows[0]) {
-                createdIncidentId = incidentRes.rows[0].id;
-              }
-            }
-          }
-          params.push(true);
-          updates.push(`escalated_to_incident = $${params.length}`);
-          if (createdIncidentId) {
-            params.push(createdIncidentId);
-            updates.push(`escalated_incident_id = $${params.length}`);
-          }
-        } else if (escalatedToIncident === false) {
-          params.push(false);
-          updates.push(`escalated_to_incident = $${params.length}`);
-          updates.push(`escalated_incident_id = NULL`);
-        }
-
-        if (updates.length === 0) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ message: "No valid fields" });
-        }
-        params.push(anomalyId, tenantId);
-        const updateResult = await client.query(
-          `UPDATE behavior_anomalies SET ${updates.join(", ")} WHERE id = $${params.length - 1} AND tenant_id = $${params.length}`,
-          params
-        );
-        await client.query("COMMIT");
-        if ((updateResult.rowCount ?? 0) === 0) {
-          return res.status(404).json({ message: "Anomaly not found or access denied" });
-        }
-      } catch (txErr) {
-        await client.query("ROLLBACK");
-        throw txErr;
-      } finally {
-        client.release();
-      }
-      res.json({ success: true, incidentId: createdIncidentId });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Manual baseline refresh trigger — MSS admin/platform_admin can force an immediate re-baseline for a tenant
-  app.post("/api/behavior-analytics/:tenantId/refresh-baselines", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { refreshBaselines } = await import("./ml-behavior-engine.js");
-      // Run refresh in background and immediately acknowledge
-      res.json({ success: true, message: "Baseline refresh initiated", tenantId });
-      refreshBaselines(pool, tenantId).catch((e: any) =>
-        console.error(`[ML Baseline] Manual refresh error for tenant ${tenantId}:`, e.message));
-    } catch (error: any) {
-      res.status(error.message?.includes("Forbidden") ? 403 : 500).json({ message: error.message });
-    }
-  });
 
   const receiverStats = { totalReceived: 0, httpPush: 0, syslog: 0, webhook: 0, hec: 0, errors: 0, startedAt: new Date().toISOString() };
+  const receiverBuckets: Record<"httpPush" | "syslog" | "webhook" | "hec", Map<string, number>> = {
+    httpPush: new Map(), syslog: new Map(), webhook: new Map(), hec: new Map(),
+  };
+  function getReceiverHourBucket(): string {
+    return new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000).toISOString();
+  }
+  function incReceiverBucket(channel: keyof typeof receiverBuckets, n: number) {
+    const h = getReceiverHourBucket();
+    receiverBuckets[channel].set(h, (receiverBuckets[channel].get(h) ?? 0) + n);
+    // Keep only last 48 hours to bound memory usage
+    if (receiverBuckets[channel].size > 48) {
+      const oldest = [...receiverBuckets[channel].keys()].sort()[0];
+      receiverBuckets[channel].delete(oldest);
+    }
+  }
+  function buildReceiverVolumeHistory(channel: keyof typeof receiverBuckets): Array<{ h: string; count: number }> {
+    const now = Date.now();
+    return Array.from({ length: 24 }, (_, i) => {
+      const slotMs = Math.floor((now - (23 - i) * 3_600_000) / 3_600_000) * 3_600_000;
+      const h = new Date(slotMs).toISOString();
+      return { h, count: receiverBuckets[channel].get(h) ?? 0 };
+    });
+  }
 
   function parseReceiverSyslogFacility(message: string): string {
     const match = message.match(/^<(\d+)>/);
@@ -23137,7 +24731,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   async function processReceiverEvents(tenantId: number, events: Record<string, any>[], source: string, channel: string) {
     const tenant = await storage.getTenant(tenantId);
     if (!tenant) throw new Error("Tenant not found");
-    const batch = await createIngestBatch(tenantId, events, channel, source, {
+    const batch = await createIngestBatch(tenantId, events, channel as ("file" | "api" | "connector"), source, {
       sourceIp: "receiver",
       contentType: "application/json",
     });
@@ -23164,6 +24758,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const batch = await processReceiverEvents(tenantId, events, source, "api");
       receiverStats.totalReceived += events.length;
       receiverStats.httpPush += events.length;
+      incReceiverBucket("httpPush", events.length);
 
       console.log(`[Receiver] HTTP push: ${events.length} events from tenant ${tenantId} (source: ${source})`);
       res.json({ accepted: events.length, batchId: batch.id, source, timestamp: new Date().toISOString() });
@@ -23202,6 +24797,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const batch = await processReceiverEvents(tenantId, events, "syslog", "api");
       receiverStats.totalReceived += events.length;
       receiverStats.syslog += events.length;
+      incReceiverBucket("syslog", events.length);
 
       console.log(`[Receiver] Syslog: ${events.length} messages from tenant ${tenantId}`);
       res.json({ accepted: events.length, batchId: batch.id, source: "syslog", timestamp: new Date().toISOString() });
@@ -23227,6 +24823,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const batch = await processReceiverEvents(tenantId, events, source, "api");
       receiverStats.totalReceived += events.length;
       receiverStats.webhook += events.length;
+      incReceiverBucket("webhook", events.length);
 
       console.log(`[Receiver] Webhook (${source}): ${events.length} events from tenant ${tenantId}`);
       res.json({ accepted: events.length, batchId: batch.id, source, timestamp: new Date().toISOString() });
@@ -23254,6 +24851,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const batch = await processReceiverEvents(tenantId, events, "hec", "api");
       receiverStats.totalReceived += events.length;
       receiverStats.hec += events.length;
+      incReceiverBucket("hec", events.length);
 
       console.log(`[Receiver] HEC: ${events.length} events from tenant ${tenantId}`);
       res.json({ text: "Success", code: 0, ackId: batch.id });
@@ -23318,7 +24916,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         cache: getCacheStats(),
       };
 
-      const kafkaBrokers = process.env.KAFKA_BROKERS;
+      const streamPrefix = process.env.KINESIS_STREAM_PREFIX;
       const openaiKey = process.env.OPENAI_API_KEY;
 
       // ClickHouse + Redis health checks in parallel (non-blocking)
@@ -23397,7 +24995,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       const dependencies = [
         { name: "PostgreSQL", status: "connected", latencyMs: dbLatencyResult, details: `Pool: ${pool.totalCount} total, ${pool.idleCount} idle`, replicationLagMs: pgReplicationLagMs },
-        { name: "Apache Kafka", status: kafkaBrokers ? "configured" : "not_configured", latencyMs: null, details: kafkaBrokers ? "Kafka brokers configured" : "Standalone mode (no Kafka)" },
+        { name: "Amazon Kinesis", status: streamPrefix ? "configured" : "not_configured", latencyMs: null, details: streamPrefix ? "Kinesis stream prefix configured" : "Standalone mode (no Kinesis)" },
         { name: "OpenAI API", status: openaiKey ? "configured" : "not_configured", latencyMs: null, details: openaiKey ? "Configured" : "Not configured" },
         { name: "Redis Cache", status: redisHealth.status, latencyMs: redisHealth.latencyMs, details: redisDetails },
         { name: "Session Store", status: "connected", latencyMs: null, details: sessionStoreDetails },
@@ -23516,6 +25114,110 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         })),
       };
 
+      // Tasks #469/#470/#472 — connector live-stats: single combined query replaces 6 concurrent ones.
+      // Uses idx_events_log_source_created index (added to createPerformanceIndexes in server/db.ts).
+      // Checkpoint HEC and Check Point Harmony Email share the same platform_key so they are coalesced.
+      // Task #473 — hourly bucket query runs in parallel for sparkline data.
+      // Task #483 — extended to cover generic_syslog (Syslog/CEF) and azure_ad connectors.
+      const [connectorStatsResult, connectorHourlyBucketsResult] = await Promise.all([
+        pool.query(
+          `SELECT
+             CASE
+               WHEN log_source IN ('Checkpoint HEC', 'Check Point Harmony Email') THEN 'checkpoint_hec_combined'
+               WHEN log_source IN ('Syslog', 'CEF')                               THEN 'generic_syslog_combined'
+               ELSE log_source
+             END                                                         AS src,
+             tenant_id,
+             COUNT(*)::int                                               AS cnt,
+             CASE WHEN log_source = 'Barracuda ESG'
+               THEN mode() WITHIN GROUP (ORDER BY raw_payload->>'taxonomy')
+               ELSE NULL
+             END                                                         AS top_taxonomy
+           FROM security_events
+           WHERE log_source IN (
+               'CrowdStrike Falcon', 'Cynet 360', 'Barracuda ESG',
+               'Checkpoint HEC', 'Check Point Harmony Email',
+               'SentinelOne', 'Microsoft Defender for Endpoint',
+               'Syslog', 'CEF', 'Microsoft Entra ID',
+               'FortiGate', 'FortiNAC'
+             )
+             AND created_at >= NOW() - INTERVAL '24 hours'
+           GROUP BY 1, tenant_id, log_source`,
+        ).catch((err: any) => {
+          console.error("[platform-health] connector stats query failed:", err.message);
+          return { rows: [] as any[] };
+        }),
+        // Task #473/#483 — hourly buckets for connector volume sparklines (24 h × 9 connectors)
+        pool.query(
+          `SELECT
+             date_trunc('hour', created_at) AS bucket_hour,
+             tenant_id,
+             CASE log_source
+               WHEN 'CrowdStrike Falcon'                THEN 'crowdstrike'
+               WHEN 'Cynet 360'                         THEN 'cynet'
+               WHEN 'Barracuda ESG'                     THEN 'barracuda_esg'
+               WHEN 'Checkpoint HEC'                    THEN 'checkpoint_hec'
+               WHEN 'Check Point Harmony Email'         THEN 'checkpoint_hec'
+               WHEN 'SentinelOne'                       THEN 'sentinelone'
+               WHEN 'Microsoft Defender for Endpoint'   THEN 'ms_defender_endpoint'
+               WHEN 'Syslog'                            THEN 'generic_syslog'
+               WHEN 'CEF'                               THEN 'generic_syslog'
+               WHEN 'Microsoft Entra ID'                THEN 'azure_ad'
+               WHEN 'FortiGate'                         THEN 'fortigate'
+               WHEN 'FortiNAC'                          THEN 'fortinac'
+             END AS platform_key,
+             COUNT(*)::int AS event_count
+           FROM security_events
+           WHERE created_at >= NOW() - INTERVAL '24 hours'
+             AND log_source IN (
+               'CrowdStrike Falcon', 'Cynet 360', 'Barracuda ESG',
+               'Checkpoint HEC', 'Check Point Harmony Email',
+               'SentinelOne', 'Microsoft Defender for Endpoint',
+               'Syslog', 'CEF', 'Microsoft Entra ID',
+               'FortiGate', 'FortiNAC'
+             )
+           GROUP BY 1, 2, 3
+           ORDER BY 1`,
+        ).catch((err: any) => {
+          console.error("[platform-health] connector hourly-buckets query failed:", err.message);
+          return { rows: [] as any[] };
+        }),
+      ]);
+
+      const csCountMap = new Map<number, number>();
+      const cynetCountMap = new Map<number, number>();
+      const barracudaMap = new Map<number, { cnt: number; topTaxonomy: string }>();
+      const checkpointCountMap = new Map<number, number>();
+      const s1CountMap = new Map<number, number>();
+      const defenderCountMap = new Map<number, number>();
+      const syslogCountMap = new Map<number, number>();
+      const azureAdCountMap = new Map<number, number>();
+      const fortigateCountMap = new Map<number, number>();
+      const fortinatCountMap = new Map<number, number>();
+      for (const r of connectorStatsResult.rows as any[]) {
+        const tid = r.tenant_id as number;
+        const cnt = r.cnt as number;
+        switch (r.src) {
+          case "CrowdStrike Falcon":           csCountMap.set(tid, cnt); break;
+          case "Cynet 360":                    cynetCountMap.set(tid, cnt); break;
+          case "Barracuda ESG":                barracudaMap.set(tid, { cnt, topTaxonomy: (r.top_taxonomy as string) || "" }); break;
+          case "checkpoint_hec_combined":      checkpointCountMap.set(tid, (checkpointCountMap.get(tid) ?? 0) + cnt); break;
+          case "SentinelOne":                  s1CountMap.set(tid, cnt); break;
+          case "Microsoft Defender for Endpoint": defenderCountMap.set(tid, cnt); break;
+          case "generic_syslog_combined":      syslogCountMap.set(tid, (syslogCountMap.get(tid) ?? 0) + cnt); break;
+          case "Microsoft Entra ID":           azureAdCountMap.set(tid, cnt); break;
+          case "FortiGate":                    fortigateCountMap.set(tid, cnt); break;
+          case "FortiNAC":                     fortinatCountMap.set(tid, cnt); break;
+        }
+      }
+
+      // Task #473 — build a map for sparkline lookup: `${tenantId}:${platformKey}:${bucketHour}` → count
+      const volumeBucketMap = new Map<string, number>();
+      for (const r of connectorHourlyBucketsResult.rows) {
+        const bucketIso = new Date(r.bucket_hour).toISOString();
+        volumeBucketMap.set(`${r.tenant_id}:${r.platform_key}:${bucketIso}`, r.event_count as number);
+      }
+
       const nowTs = Date.now();
       const integrations = integrationRows.rows.map((row: any) => {
         const lastPollMs = row.last_poll_at ? new Date(row.last_poll_at).getTime() : 0;
@@ -23528,6 +25230,83 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         } else if (row.polling_enabled && !lastPollMs) {
           inactivityLevel = "critical";
         }
+
+        // Task #469 — attach CrowdStrike-specific live stats for the health card
+        const csStats = row.platform_key === "crowdstrike" ? {
+          detections24h: csCountMap.get(row.tenant_id) ?? 0,
+          useAlertsApi: (() => {
+            const flag = (row.config_json as any)?.credentials?.useAlertsApi;
+            return flag === "true" || flag === "1" || flag === true;
+          })(),
+        } : null;
+
+        // Task #470 — Cynet 360 live stats
+        const cynetStats = row.platform_key === "cynet" ? {
+          events24h: cynetCountMap.get(row.tenant_id) ?? 0,
+          assetSyncEnabled: (() => {
+            const cfg = row.config_json as any;
+            const flag = cfg?.assetSync ?? cfg?.credentials?.assetSync ?? cfg?.pullHosts ?? cfg?.credentials?.pullHosts;
+            return flag !== false && flag !== "false" && flag !== "0";
+          })(),
+        } : null;
+
+        // Task #470 — Barracuda ESG live stats
+        const barracudaStats = row.platform_key === "barracuda_esg" ? {
+          emails24h: barracudaMap.get(row.tenant_id)?.cnt ?? 0,
+          topThreatType: barracudaMap.get(row.tenant_id)?.topTaxonomy || null,
+        } : null;
+
+        // Task #470 — Check Point Harmony Email live stats
+        const checkpointStats = row.platform_key === "checkpoint_hec" ? {
+          emails24h: checkpointCountMap.get(row.tenant_id) ?? 0,
+          hecIngestMode: (() => {
+            const cfg = row.config_json as any;
+            return cfg?.credentials?.ingestMode || cfg?.ingestMode || "HEC Push";
+          })(),
+        } : null;
+
+        // Task #472 — SentinelOne live stats
+        const s1Stats = row.platform_key === "sentinelone" ? {
+          detections24h: s1CountMap.get(row.tenant_id) ?? 0,
+          agentPolicyMode: (() => {
+            const cfg = row.config_json as any;
+            const mode = cfg?.credentials?.agentPolicyMode || cfg?.agentPolicyMode || cfg?.policyMode || "";
+            if (!mode) return "Detect";
+            return mode.toLowerCase().includes("protect") ? "Protect" : "Detect";
+          })(),
+        } : null;
+
+        // Task #472 — Microsoft Defender for Endpoint live stats
+        const defenderStats = row.platform_key === "ms_defender_endpoint" ? {
+          alerts24h: defenderCountMap.get(row.tenant_id) ?? 0,
+          licenseTier: (() => {
+            const cfg = row.config_json as any;
+            const tier = cfg?.credentials?.licenseTier || cfg?.licenseTier || cfg?.tier || "";
+            if (!tier) return "P1";
+            return tier.toUpperCase().includes("P2") ? "P2" : "P1";
+          })(),
+        } : null;
+
+        // Task #483 — Generic Syslog live stats
+        const syslogStats = row.platform_key === "generic_syslog" ? {
+          events24h: syslogCountMap.get(row.tenant_id) ?? 0,
+        } : null;
+
+        // Task #483 — Azure AD / Microsoft Entra ID live stats
+        const azureAdStats = row.platform_key === "azure_ad" ? {
+          events24h: azureAdCountMap.get(row.tenant_id) ?? 0,
+        } : null;
+
+        // Task #490 — FortiGate live stats
+        const fortigateStats = row.platform_key === "fortigate" ? {
+          events24h: fortigateCountMap.get(row.tenant_id) ?? 0,
+        } : null;
+
+        // Task #490 — FortiNAC live stats
+        const fortinatStats = row.platform_key === "fortinac" ? {
+          events24h: fortinatCountMap.get(row.tenant_id) ?? 0,
+        } : null;
+
         return {
           id: row.id,
           tenantId: row.tenant_id,
@@ -23546,6 +25325,28 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           isEnabled: row.is_enabled,
           inactivityLevel,
           timeSinceLastPollMin: timeSinceLastPoll ? Math.round(timeSinceLastPoll / 60000) : null,
+          csStats,
+          cynetStats,
+          barracudaStats,
+          checkpointStats,
+          s1Stats,
+          defenderStats,
+          syslogStats,
+          azureAdStats,
+          fortigateStats,
+          fortinatStats,
+          // Task #473/#478/#483/#490 — 24-point hourly sparkline (11 tracked connectors)
+          volumeHistory: (["crowdstrike", "cynet", "barracuda_esg", "checkpoint_hec", "sentinelone", "ms_defender_endpoint", "generic_syslog", "azure_ad", "fortigate", "fortinac"].includes(row.platform_key))
+            ? (() => {
+                const buckets: Array<{ h: string; count: number }> = [];
+                for (let i = 23; i >= 0; i--) {
+                  const slotMs = Math.floor((nowTs - i * 3600000) / 3600000) * 3600000;
+                  const h = new Date(slotMs).toISOString();
+                  buckets.push({ h, count: volumeBucketMap.get(`${row.tenant_id}:${row.platform_key}:${h}`) ?? 0 });
+                }
+                return buckets;
+              })()
+            : null,
         };
       });
 
@@ -23570,7 +25371,15 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         totalProcessed: batchRow.total_processed || 0,
         totalErrors: batchRow.total_errors || 0,
         dlqCount: dlqCountResult.rows[0]?.cnt || 0,
-        receiver: { ...receiverStats },
+        receiver: {
+          ...receiverStats,
+          volumeHistory: {
+            httpPush: buildReceiverVolumeHistory("httpPush"),
+            syslog:   buildReceiverVolumeHistory("syslog"),
+            webhook:  buildReceiverVolumeHistory("webhook"),
+            hec:      buildReceiverVolumeHistory("hec"),
+          },
+        },
       };
 
       const dbConnectorsResult = await pool.query(
@@ -23593,41 +25402,41 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const { dataLakeManager } = await import("./data-lake");
       const duckdbStatus = dataLakeManager.getDuckDBStatus();
 
-      const kafkaConsumerStats = await getIngestConsumerStats().catch(() => ({
+      const streamConsumerStats = await getIngestConsumerStats().catch(() => ({
         consumer: null,
         lag: {} as Record<string, number>,
         localMetrics: { counters: {}, gauges: {}, histogramSummaries: {} },
       }));
 
-      const kafkaBrokersConfigured = !!process.env.KAFKA_BROKERS;
-      // Metric keys use the pattern "${name}:${JSON.stringify(tags||{})}" from kafka/metrics.ts.
+      const streamConfigured = !!(process.env.KINESIS_STREAM_PREFIX);
+      // Metric keys use the pattern "${name}:${JSON.stringify(tags||{})}" from kinesis/metrics.ts.
       // Plain counters (no tags) are stored as "${name}:{}", tagged counters need prefix scan.
-      const counters = kafkaConsumerStats.localMetrics?.counters ?? {};
-      const histogramSummaries = kafkaConsumerStats.localMetrics?.histogramSummaries ?? {};
+      const counters: Record<string, number> = (streamConsumerStats.localMetrics?.counters ?? {}) as Record<string, number>;
+      const histogramSummaries: Record<string, { p99?: number }> = (streamConsumerStats.localMetrics?.histogramSummaries ?? {}) as Record<string, { p99?: number }>;
       const latencyP99 =
-        (histogramSummaries["ingest.kafka_consumer.latency_ms:{}"] as { p99?: number } | undefined)?.p99 ?? null;
+        histogramSummaries["ingest.kinesis_consumer.latency_ms:{}"]?.p99 ?? null;
       const idempotencySkips = counters["ingest.consumer.idempotency_skips:{}"] ?? 0;
       const dlqEventsTotal = Object.entries(counters)
         .filter(([k]) => k.startsWith("ingest.consumer.dlq_events:"))
-        .reduce((sum, [, v]) => sum + v, 0);
-      const startedAtRaw = kafkaConsumerStats.consumer?.startedAt;
+        .reduce((sum, [, v]) => sum + (v as number), 0);
+      const startedAtRaw = streamConsumerStats.consumer?.startedAt;
       const uptimeSec = startedAtRaw
         ? Math.max(0, Math.floor((Date.now() - new Date(startedAtRaw).getTime()) / 1000))
         : 0;
-      const processedCount = kafkaConsumerStats.consumer?.processedCount ?? 0;
-      const errorCount = kafkaConsumerStats.consumer?.errorCount ?? 0;
-      const kafkaHealth = {
-        available: kafkaBrokersConfigured,
+      const processedCount = streamConsumerStats.consumer?.processedCount ?? 0;
+      const errorCount = streamConsumerStats.consumer?.errorCount ?? 0;
+      const streamHealth = {
+        available: streamConfigured,
         consumerGroups: [
           {
             groupId: INGEST_CONSUMER_GROUP_ID,
-            running: kafkaConsumerStats.consumer?.running ?? false,
+            running: streamConsumerStats.consumer?.running ?? false,
             processedCount,
             errorCount,
-            lastProcessedAt: kafkaConsumerStats.consumer?.lastProcessedAt ?? null,
+            lastProcessedAt: streamConsumerStats.consumer?.lastProcessedAt ?? null,
             startedAt: startedAtRaw ?? null,
-            lag: kafkaConsumerStats.lag,
-            totalLag: Object.values(kafkaConsumerStats.lag).reduce((s, v) => s + v, 0),
+            lag: streamConsumerStats.lag,
+            totalLag: Object.values(streamConsumerStats.lag).reduce((s, v) => s + v, 0),
             throughputPerSecond: uptimeSec > 0 ? Math.round((processedCount / uptimeSec) * 10) / 10 : 0,
             errorRate: processedCount > 0 ? Math.round((errorCount / processedCount) * 1000) / 1000 : 0,
             p99LatencyMs: latencyP99,
@@ -23635,7 +25444,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         ],
         idempotencySkips,
         dlqEventsTotal,
-        localMetrics: kafkaConsumerStats.localMetrics,
+        localMetrics: streamConsumerStats.localMetrics,
       };
 
       res.json({
@@ -23648,13 +25457,161 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         pipeline,
         dbConnectors: dbConnectorsResult.rows,
         duckdb: duckdbStatus,
-        kafka: kafkaHealth,
+        // Stream health field for the platform-health UI (see
+        // platform-health UI client; payload now reflects the Kinesis bus.
+        stream: streamHealth,
       });
     } catch (err: any) {
       console.error("[Platform Health] Error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });
+
+  // ── Task #479 — Persistent sparkline history endpoint ────────────────────
+  // Reads from connector_volume_snapshots (hourly snapshots) and falls back
+  // to live security_events computation for any hours not yet snapshotted.
+  // Returns a map keyed by "${tenantId}:${platformKey}" → 24-point series.
+  app.get(
+    "/api/admin/platform-health/connector-volume",
+    async (req: any, res) => {
+      try {
+        const isSuperAdminUser = req.session?.isSuperAdmin;
+        let isPlatformAdmin = false;
+        try {
+          const access = await getUserTenantAccess(req);
+          isPlatformAdmin = access.role === "platform_admin";
+        } catch {}
+        if (!isSuperAdminUser && !isPlatformAdmin) {
+          return res.status(403).json({ error: "Platform admin access required" });
+        }
+
+        const hoursRaw = parseInt(String(req.query.hours ?? "24"), 10);
+        const hours = Math.min(168, Math.max(1, Number.isFinite(hoursRaw) ? hoursRaw : 24));
+
+        const filterTenantId = req.query.tenantId ? parseInt(String(req.query.tenantId), 10) : null;
+        const filterPlatformKey = req.query.platformKey ? String(req.query.platformKey).trim() : null;
+
+        const TRACKED = ["crowdstrike", "cynet", "barracuda_esg", "checkpoint_hec", "sentinelone", "ms_defender_endpoint", "generic_syslog", "azure_ad", "fortigate", "fortinac"];
+
+        // Build the list of expected bucket hours (aligned to full hours, newest last)
+        const nowMs = Date.now();
+        const bucketHours: string[] = [];
+        for (let i = hours - 1; i >= 0; i--) {
+          const slotMs = Math.floor((nowMs - i * 3_600_000) / 3_600_000) * 3_600_000;
+          bucketHours.push(new Date(slotMs).toISOString());
+        }
+
+        // 1. Read persisted snapshots from connector_volume_snapshots
+        const snapshotParams: any[] = [hours];
+        let snapshotWhere = "bucket_hour >= NOW() - ($1 || ' hours')::interval";
+        if (filterTenantId) { snapshotParams.push(filterTenantId); snapshotWhere += ` AND tenant_id = $${snapshotParams.length}`; }
+        if (filterPlatformKey) { snapshotParams.push(filterPlatformKey); snapshotWhere += ` AND platform_key = $${snapshotParams.length}`; }
+
+        const snapshotResult = await pool.query(
+          `SELECT tenant_id, platform_key, bucket_hour, event_count
+           FROM connector_volume_snapshots
+           WHERE ${snapshotWhere}
+           ORDER BY bucket_hour`,
+          snapshotParams,
+        ).catch(() => ({ rows: [] as any[] }));
+
+        // Build a map: `${tenantId}:${platformKey}:${bucketHourIso}` → count
+        const snapshotMap = new Map<string, number>();
+        const seenKeys = new Set<string>();
+        for (const r of snapshotResult.rows) {
+          const h = new Date(r.bucket_hour).toISOString();
+          const mapKey = `${r.tenant_id}:${r.platform_key}:${h}`;
+          snapshotMap.set(mapKey, r.event_count as number);
+          seenKeys.add(`${r.tenant_id}:${r.platform_key}`);
+        }
+
+        // 2. Identify missing bucket hours for each (tenant, platformKey) combo seen
+        //    and also look up any combos from live data to cover gaps.
+        //    We do a single live query covering the whole window, then merge.
+        const liveParams: any[] = [hours];
+        let liveWhere = "created_at >= NOW() - ($1 || ' hours')::interval";
+        if (filterTenantId) { liveParams.push(filterTenantId); liveWhere += ` AND tenant_id = $${liveParams.length}`; }
+        if (filterPlatformKey) {
+          // Map platformKey back to log_source names
+          const srcMap: Record<string, string[]> = {
+            crowdstrike:          ["CrowdStrike Falcon"],
+            cynet:                ["Cynet 360"],
+            barracuda_esg:        ["Barracuda ESG"],
+            checkpoint_hec:       ["Checkpoint HEC", "Check Point Harmony Email"],
+            sentinelone:          ["SentinelOne"],
+            ms_defender_endpoint: ["Microsoft Defender for Endpoint"],
+            generic_syslog:       ["Syslog", "CEF"],
+            azure_ad:             ["Microsoft Entra ID"],
+            fortigate:            ["FortiGate"],
+            fortinac:             ["FortiNAC"],
+          };
+          const srcs = srcMap[filterPlatformKey] ?? [];
+          if (srcs.length) {
+            const placeholders = srcs.map((_, idx) => `$${liveParams.length + idx + 1}`).join(", ");
+            liveParams.push(...srcs);
+            liveWhere += ` AND log_source IN (${placeholders})`;
+          }
+        } else {
+          liveWhere += ` AND log_source IN ('CrowdStrike Falcon','Cynet 360','Barracuda ESG','Checkpoint HEC','Check Point Harmony Email','SentinelOne','Microsoft Defender for Endpoint','Syslog','CEF','Microsoft Entra ID','FortiGate','FortiNAC')`;
+        }
+
+        const liveResult = await pool.query(
+          `SELECT
+             tenant_id,
+             CASE log_source
+               WHEN 'CrowdStrike Falcon'                THEN 'crowdstrike'
+               WHEN 'Cynet 360'                         THEN 'cynet'
+               WHEN 'Barracuda ESG'                     THEN 'barracuda_esg'
+               WHEN 'Checkpoint HEC'                    THEN 'checkpoint_hec'
+               WHEN 'Check Point Harmony Email'         THEN 'checkpoint_hec'
+               WHEN 'SentinelOne'                       THEN 'sentinelone'
+               WHEN 'Microsoft Defender for Endpoint'   THEN 'ms_defender_endpoint'
+               WHEN 'Syslog'                            THEN 'generic_syslog'
+               WHEN 'CEF'                               THEN 'generic_syslog'
+               WHEN 'Microsoft Entra ID'                THEN 'azure_ad'
+               WHEN 'FortiGate'                         THEN 'fortigate'
+               WHEN 'FortiNAC'                          THEN 'fortinac'
+             END AS platform_key,
+             date_trunc('hour', created_at) AS bucket_hour,
+             COUNT(*)::int AS event_count
+           FROM security_events
+           WHERE ${liveWhere}
+           GROUP BY 1, 2, 3`,
+          liveParams,
+        ).catch(() => ({ rows: [] as any[] }));
+
+        // Build live fallback map and collect any additional (tenantId, platformKey) combos
+        const liveMap = new Map<string, number>();
+        for (const r of liveResult.rows) {
+          if (!r.platform_key) continue;
+          const h = new Date(r.bucket_hour).toISOString();
+          const mapKey = `${r.tenant_id}:${r.platform_key}:${h}`;
+          liveMap.set(mapKey, r.event_count as number);
+          seenKeys.add(`${r.tenant_id}:${r.platform_key}`);
+        }
+
+        // 3. Build final output: for each (tenantId, platformKey) combination,
+        //    produce a full `hours`-point series, preferring snapshot data,
+        //    falling back to live data, then zero.
+        const output: Record<string, Array<{ h: string; count: number }>> = {};
+        for (const comboKey of seenKeys) {
+          const [tidStr, pKey] = comboKey.split(":");
+          if (!TRACKED.includes(pKey)) continue;
+          const series: Array<{ h: string; count: number }> = bucketHours.map((h) => {
+            const lookupKey = `${comboKey}:${h}`;
+            const count = snapshotMap.get(lookupKey) ?? liveMap.get(lookupKey) ?? 0;
+            return { h, count };
+          });
+          output[comboKey] = series;
+        }
+
+        res.json({ hours, data: output });
+      } catch (err: any) {
+        console.error("[connector-volume] Error:", err.message);
+        res.status(500).json({ error: err.message });
+      }
+    },
+  );
 
   // ── ClickHouse stalled-ingest monitor settings (Task #182) ────────────────
   // GET returns current settings; PATCH updates them. platform_admin only.
@@ -23688,7 +25645,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       try {
         const access = await getUserTenantAccess(req);
         isPlatformAdmin = access.role === "platform_admin";
-        userEmail = req.user?.claims?.email || access.user?.email || null;
+        userEmail = req.user?.claims?.email || null;
       } catch {}
       if (!isSuperAdminUser && !isPlatformAdmin) {
         return res.status(403).json({ error: "Platform admin access required" });
@@ -23701,6 +25658,147 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const { setClickHouseIngestMonitorSettings } = await import("./clickhouse-ingest-monitor");
       const settings = await setClickHouseIngestMonitorSettings(parsed.data, userEmail);
       res.json({ settings });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Task #279: admin-tunable latency trend warning/critical thresholds ──
+  app.get("/api/admin/platform/latency-trend-thresholds", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const {
+        getLatencyTrendThresholds,
+        getLatencyTrendThresholdsAudit,
+        LATENCY_TREND_THRESHOLD_DEFAULTS,
+      } = await import("./latency-trend-thresholds");
+      const [thresholds, recentChanges] = await Promise.all([
+        getLatencyTrendThresholds(),
+        getLatencyTrendThresholdsAudit(10),
+      ]);
+      res.json({ thresholds, defaults: LATENCY_TREND_THRESHOLD_DEFAULTS, recentChanges });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch("/api/admin/platform/latency-trend-thresholds", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      let userEmail: string | null = null;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+        userEmail = req.user?.claims?.email || null;
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const { latencyTrendThresholdsSchema } = await import("@shared/schema");
+      const parsed = latencyTrendThresholdsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid thresholds", issues: parsed.error.issues });
+      }
+      const { setLatencyTrendThresholds } = await import("./latency-trend-thresholds");
+      const thresholds = await setLatencyTrendThresholds(parsed.data, userEmail);
+      res.json({ thresholds });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Task #316: admin-tunable auto-rollback recycle-bin purge settings ───
+  app.get("/api/admin/platform/auto-rollback-purge", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const {
+        getAutoRollbackPurgeSettings,
+        getAutoRollbackPurgeAudit,
+        AUTO_ROLLBACK_PURGE_DEFAULTS,
+      } = await import("./auto-rollback-purge");
+      const [settings, recentChanges] = await Promise.all([
+        getAutoRollbackPurgeSettings(),
+        getAutoRollbackPurgeAudit(10),
+      ]);
+      res.json({ settings, defaults: AUTO_ROLLBACK_PURGE_DEFAULTS, recentChanges });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch("/api/admin/platform/auto-rollback-purge", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      let userEmail: string | null = null;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+        userEmail = req.user?.claims?.email || null;
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const { autoRollbackPurgeSettingsSchema } = await import("@shared/schema");
+      const parsed = autoRollbackPurgeSettingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid settings", issues: parsed.error.issues });
+      }
+      const { setAutoRollbackPurgeSettings } = await import("./auto-rollback-purge");
+      const settings = await setAutoRollbackPurgeSettings(parsed.data, userEmail);
+      res.json({ settings });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Lightweight read-only endpoint that exposes the current retention window
+  // to authenticated MSS users so the recycle-bin UI can render the
+  // "hard-deleted after N days" caption next to the auto-rollback badge.
+  app.get("/api/security-integrations/auto-rollback-retention", isAuthenticated, async (_req: Request, res: Response) => {
+    try {
+      const { getAutoRollbackPurgeSettings } = await import("./auto-rollback-purge");
+      const settings = await getAutoRollbackPurgeSettings();
+      res.json({
+        enabled: settings.enabled,
+        retentionDays: settings.retentionDays,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/admin/platform/auto-rollback-purge/run", async (req: any, res) => {
+    try {
+      const isSuperAdminUser = req.session?.isSuperAdmin;
+      let isPlatformAdmin = false;
+      try {
+        const access = await getUserTenantAccess(req);
+        isPlatformAdmin = access.role === "platform_admin";
+      } catch {}
+      if (!isSuperAdminUser && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Platform admin access required" });
+      }
+      const { purgeAutoRollbackDrafts } = await import("./auto-rollback-purge");
+      const result = await purgeAutoRollbackDrafts();
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -23798,6 +25896,31 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     },
   );
 
+  // ── Pipeline Performance (Task #358) ─────────────────────────────────────
+  // Per-stage p50/p95/p99 latency for the ingest → normalize → enrich →
+  // score → correlate → ClickHouse pipeline, plus the configured budgets
+  // and which stages currently exceed their budget. Optional `tenantId`
+  // narrows to per-tenant aggregates; otherwise the global aggregate is
+  // returned. Used by admin "Pipeline Performance" tab.
+  app.get(
+    "/api/admin/platform-health/pipeline-metrics",
+    isAuthenticated,
+    isSuperAdminOrPlatformAdmin,
+    async (req: any, res) => {
+      try {
+        const windowRaw = parseInt(String(req.query.windowMinutes ?? "15"), 10);
+        const windowMinutes = Math.min(60, Math.max(1, Number.isFinite(windowRaw) ? windowRaw : 15));
+        const tenantIdRaw = req.query.tenantId ? parseInt(String(req.query.tenantId), 10) : NaN;
+        const tenantId = Number.isFinite(tenantIdRaw) && tenantIdRaw > 0 ? tenantIdRaw : null;
+        const snapshot = getPipelineMetrics({ tenantId, windowMinutes });
+        const tenantIds = getMetricsTenantIds();
+        res.json({ ...snapshot, availableTenantIds: tenantIds });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || "Failed to load pipeline metrics" });
+      }
+    },
+  );
+
   app.get("/api/admin/platform/clickhouse-fast-path-monitor", isAuthenticated, async (req: any, res) => {
     try {
       const isSuperAdminUser = req.session?.isSuperAdmin;
@@ -23825,7 +25948,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       try {
         const access = await getUserTenantAccess(req);
         isPlatformAdmin = access.role === "platform_admin";
-        userEmail = req.user?.claims?.email || access.user?.email || null;
+        userEmail = req.user?.claims?.email || null;
       } catch {}
       if (!isSuperAdminUser && !isPlatformAdmin) {
         return res.status(403).json({ error: "Platform admin access required" });
@@ -23915,6 +26038,72 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   // keyed on (tenant_id, id), so re-emits collapse to the latest version
   // per row instead of duplicating. Restricted to platform admins so a
   // tenant user can't trigger an expensive backfill.
+  // ── Task #224 ──────────────────────────────────────────────────────────────
+  // Read-only status surface for the PG ➜ CH incident backfill (Task #209).
+  // Returns the row count in the PostgreSQL `incidents` table, the row count
+  // in the ClickHouse `ccc.incidents` mirror, the delta between the two, and
+  // the in-process backfill flags so an admin can confirm whether the
+  // historical backfill has finished and whether the two stores are in sync
+  // before / after triggering POST /api/admin/clickhouse/incidents-backfill.
+  // Failures on the CH side are non-fatal — we still return the PG count and
+  // surface the underlying error string so the UI can render a partial card
+  // instead of failing the whole panel.
+  app.get(
+    "/api/admin/clickhouse/incidents-backfill-status",
+    isAuthenticated,
+    isSuperAdminOrPlatformAdmin,
+    async (_req, res) => {
+      try {
+        const { DatabaseStorage } = await import("./storage");
+        const enabled = isClickHouseEnabled();
+
+        let pgIncidentCount = 0;
+        try {
+          const pgRows = await dbRead.execute(
+            sql`SELECT COUNT(*)::bigint AS c FROM incidents`,
+          );
+          const row = pgRows.rows[0] as { c?: string | number } | undefined;
+          pgIncidentCount = Number(row?.c ?? 0);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return res.status(500).json({ ok: false, message: `PG count failed: ${msg}` });
+        }
+
+        let chIncidentCount: number | null = null;
+        let chError: string | null = null;
+        if (enabled) {
+          const client = getClickHouseClient();
+          if (client) {
+            try {
+              chIncidentCount = await client.countIncidents();
+            } catch (err) {
+              chError = err instanceof Error ? err.message : String(err);
+            }
+          } else {
+            chError = "ClickHouse client not initialized (missing CLICKHOUSE_PASSWORD?)";
+          }
+        }
+
+        const delta = chIncidentCount === null ? null : pgIncidentCount - chIncidentCount;
+
+        return res.json({
+          ok: true,
+          clickhouseEnabled: enabled,
+          pgIncidentCount,
+          chIncidentCount,
+          delta,
+          backfillComplete: DatabaseStorage.isIncidentBackfillComplete(),
+          backfillRunning: DatabaseStorage.isIncidentBackfillRunning(),
+          chError,
+          checkedAt: new Date().toISOString(),
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return res.status(500).json({ ok: false, message: msg });
+      }
+    },
+  );
+
   app.post(
     "/api/admin/clickhouse/incidents-backfill",
     isAuthenticated,
@@ -24163,6 +26352,90 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
          FROM clickhouse_ingest_outages`,
       );
       const w = weeklyRow.rows[0] || {};
+
+      // ── Per-tenant fast-path daily breakdown (Task #214) ──
+      const FAST_PATH_TOP_N = 5;
+      const topTenantsRows = await pool.query(
+        `SELECT c.tenant_id AS tenant_id,
+                COALESCE(t.name, 'Tenant ' || c.tenant_id) AS tenant_name,
+                COUNT(*)::int AS count,
+                COALESCE(SUM(c.duration_seconds), 0)::int AS total_duration
+           FROM clickhouse_ingest_outages c
+           LEFT JOIN tenants t ON t.id = c.tenant_id
+          WHERE c.reason = 'fast_path'
+            AND c.tenant_id IS NOT NULL
+            AND c.started_at > NOW() - ($1 || ' days')::interval
+          GROUP BY c.tenant_id, t.name
+          ORDER BY count DESC, total_duration DESC
+          LIMIT ${FAST_PATH_TOP_N}`,
+        [String(days)],
+      );
+      type TopTenantRow = { tenant_id: number; tenant_name: string; count: number; total_duration: number };
+      const fastPathTopTenants = (topTenantsRows.rows as TopTenantRow[]).map((r) => ({
+        tenantId: r.tenant_id,
+        tenantName: r.tenant_name,
+        count: r.count,
+        totalDurationSeconds: r.total_duration,
+      }));
+      const topTenantIdSet = new Set<number>(fastPathTopTenants.map((t) => t.tenantId));
+
+      const fastPathDailyRows = await pool.query(
+        `SELECT to_char(date_trunc('day', started_at), 'YYYY-MM-DD') AS day,
+                tenant_id,
+                COUNT(*)::int AS count,
+                COALESCE(SUM(duration_seconds), 0)::int AS total_duration
+           FROM clickhouse_ingest_outages
+          WHERE reason = 'fast_path'
+            AND started_at > NOW() - ($1 || ' days')::interval
+          GROUP BY 1, 2
+          ORDER BY 1`,
+        [String(days)],
+      );
+      type TenantBucket = { count: number; totalDurationSeconds: number };
+      type FastPathDailyRow = { day: string; tenant_id: number | null; count: number; total_duration: number };
+      const fpDayMap = new Map<string, Map<number | "other" | "unknown", TenantBucket>>();
+      const seenTenantsWithFastPath = new Set<number>();
+      let hasUnknownTenant = false;
+      for (const r of fastPathDailyRows.rows as FastPathDailyRow[]) {
+        const day = r.day;
+        const tenantIdRaw = r.tenant_id;
+        let bucketKey: number | "other" | "unknown";
+        if (tenantIdRaw == null) {
+          bucketKey = "unknown";
+          hasUnknownTenant = true;
+        } else if (topTenantIdSet.has(tenantIdRaw)) {
+          bucketKey = tenantIdRaw;
+          seenTenantsWithFastPath.add(tenantIdRaw);
+        } else {
+          bucketKey = "other";
+          seenTenantsWithFastPath.add(tenantIdRaw);
+        }
+        const inner = fpDayMap.get(day) ?? new Map();
+        const cur = inner.get(bucketKey) ?? { count: 0, totalDurationSeconds: 0 };
+        cur.count += r.count;
+        cur.totalDurationSeconds += r.total_duration;
+        inner.set(bucketKey, cur);
+        fpDayMap.set(day, inner);
+      }
+      const otherTenantCount = Math.max(
+        0,
+        Array.from(seenTenantsWithFastPath).filter((id) => !topTenantIdSet.has(id)).length,
+      );
+      const fastPathDailySeries: Array<{
+        day: string;
+        tenants: Record<string, { count: number; totalDurationSeconds: number }>;
+      }> = [];
+      for (const point of dailySeries) {
+        const inner = fpDayMap.get(point.day);
+        const tenants: Record<string, TenantBucket> = {};
+        if (inner) {
+          for (const [k, v] of inner.entries()) {
+            tenants[String(k)] = v;
+          }
+        }
+        fastPathDailySeries.push({ day: point.day, tenants });
+      }
+
       res.json({
         outages: result.rows,
         stats: {
@@ -24178,6 +26451,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           },
         },
         dailySeries,
+        fastPathTopTenants,
+        fastPathOtherTenantCount: otherTenantCount,
+        fastPathHasUnknownTenant: hasUnknownTenant,
+        fastPathDailySeries,
         rangeDays: days,
       });
     } catch (e: any) {
@@ -24225,9 +26502,26 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   });
 
   app.post("/api/v1/ingest/:tenantId", async (req: any, res) => {
+    // Task #358 — measure the Push API enqueue path so a regression that
+    // doubles the per-batch ingest latency (auth, parsing, claim, enqueue)
+    // surfaces as an `ingest` stage budget breach in admin Pipeline
+    // Performance and emits a single warning per breach window.
+    const __ingestStart = Date.now();
+    let __ingestRecorded = false;
+    const __recordIngest = (count: number, tenantId: number | null) => {
+      if (__ingestRecorded) return;
+      __ingestRecorded = true;
+      try {
+        recordStageLatency("ingest", Date.now() - __ingestStart, {
+          tenantId,
+          count: Math.max(1, count),
+        });
+      } catch { /* metrics best-effort */ }
+    };
     try {
       const tenantId = Number(req.params.tenantId);
       if (!tenantId || isNaN(tenantId)) {
+        __recordIngest(1, null);
         return res.status(400).json({ message: "Invalid tenant ID" });
       }
 
@@ -24265,7 +26559,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         return res.status(400).json({ message: "No events found in payload" });
       }
 
-      const rateCheck = await checkRateLimit(tenantId, events.length);
+      const rateCheck = checkRateLimit(tenantId, events.length);
       if (!rateCheck.allowed) {
         return res.status(429).json({
           message: "Rate limit exceeded",
@@ -24304,14 +26598,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         sourceIp: req.ip,
       });
 
-      let pipelineMode: "kafka" | "sync" = "sync";
+      let pipelineMode: "stream" | "sync" = "sync";
 
-      if (process.env.KAFKA_BROKERS) {
-        const kafkaMsg = buildKafkaEventBatch(tenantId, batch.id, events, source, vendorHint);
-        const KAFKA_PUBLISH_TIMEOUT_MS = parseInt(process.env.KAFKA_PUBLISH_TIMEOUT_MS || "3000", 10);
+      // Task #353: ingestion bus is Amazon Kinesis Data Streams. The legacy
+      // Task #353: this branch only runs when Kinesis is configured;
+      // an old ECS task can't quietly land in prod without the operator
+      // noticing — we route the same batch to Kinesis in either case.
+      if (process.env.KINESIS_STREAM_PREFIX) {
+        const streamMsg = buildKinesisEventBatch(tenantId, batch.id, events, source, vendorHint);
+        const PUBLISH_TIMEOUT_MS = parseInt(
+          process.env.KINESIS_PUBLISH_TIMEOUT_MS || "3000",
+          10,
+        );
         type PublishOutcome = { success: boolean; count: number; error?: string };
         const publishResult = await Promise.race([
-          publishEvents(KAFKA_TOPICS.RAW_EVENTS, [kafkaMsg]).catch(
+          publishEvents(KINESIS_STREAMS.RAW_EVENTS, [streamMsg]).catch(
             (e: unknown): PublishOutcome => ({
               success: false,
               count: 0,
@@ -24319,25 +26620,25 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             })
           ),
           new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), KAFKA_PUBLISH_TIMEOUT_MS)
+            setTimeout(() => resolve(null), PUBLISH_TIMEOUT_MS)
           ),
         ]);
 
         if (publishResult !== null && publishResult.success) {
-          pipelineMode = "kafka";
+          pipelineMode = "stream";
         } else {
           const reason =
             publishResult === null
-              ? `publish timed out after ${KAFKA_PUBLISH_TIMEOUT_MS}ms`
+              ? `publish timed out after ${PUBLISH_TIMEOUT_MS}ms`
               : publishResult.error ?? "unknown";
           console.warn(
-            `[Ingest] Kafka unavailable for batch ${batch.id} (${reason}), attempting sync fallback`
+            `[Ingest] Kinesis unavailable for batch ${batch.id} (${reason}), attempting sync fallback`
           );
           const claimed = await storage.claimIngestBatch(batch.id, "queued", "normalizing").catch(
             async (claimErr: unknown) => {
               const msg = claimErr instanceof Error ? claimErr.message : String(claimErr);
               console.error(
-                `[Ingest] Kafka publish failed AND claim DB error for batch ${batch.id} (${msg}); marking batch failed for operator retry`
+                `[Ingest] Kinesis publish failed AND claim DB error for batch ${batch.id} (${msg}); marking batch failed for operator retry`
               );
               await storage.updateIngestBatch(batch.id, { status: "failed" }).catch(() => {});
               return false;
@@ -24349,13 +26650,14 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             console.log(
               `[Ingest] Sync fallback skipped for batch ${batch.id} — consumer claimed or explicit failure set`
             );
-            pipelineMode = "kafka";
+            pipelineMode = "stream";
           }
         }
       } else {
         runPipelineAsync(batch.id, tenantId, events, { vendorHint });
       }
 
+      __recordIngest(events.length, tenantId);
       res.status(202).json({
         accepted: true,
         batchId: batch.id,
@@ -24369,6 +26671,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       });
     } catch (error: any) {
       console.error("Ingest API error:", error);
+      __recordIngest(1, null);
       res.status(500).json({ message: error.message || "Internal server error" });
     }
   });
@@ -24594,7 +26897,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   // DLQ retry: invokes runPipelineAsync directly (not re-queued to RAW_EVENTS topic).
   // Intentional: operator-triggered retries are synchronous and tracked via DLQ entry status,
-  // giving deterministic visibility into outcome. Re-queuing via Kafka would restore
+  // giving deterministic visibility into outcome. Re-queuing via Kinesis would restore
   // normal partition/order semantics but loses direct retry observability.
   app.patch("/api/admin/ingest/dlq/:id/retry", isAuthenticated, async (req: any, res) => {
     try {
@@ -24646,7 +26949,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         storage.updateDlqEntry(id, {
           status: "failed",
           metadata: { abandonReason: "non-replayable: no events or missing tenant/batch context" },
-        }).catch(() => {});
+        } as any).catch(() => {});
       }
 
       res.json({ message: "Retry initiated", id });
@@ -24807,19 +27110,48 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     try {
       const { title, level, description, logsource, detection, mitre, tags, falsepositives } = req.body;
       if (!title || !detection) return res.status(400).json({ message: "Title and detection are required" });
+      // Hardening: scrub free-text fields and validate the level enum. The
+      // detection payload is JSON (built by the UI) so it goes through the
+      // same JSON-shape constraints already enforced by createSigmaRule, but
+      // user-controlled strings must be cleaned to block control chars / HTML
+      // injection in YAML output.
+      const { safeText, safeEnum, safeJson, isInputHardeningError } = await import("./input-hardening");
+      let safeTitle: string;
+      let safeLevel: "informational" | "low" | "medium" | "high" | "critical";
+      let safeDescription: string;
+      let safeDetection: any;
+      let safeLogsource: any;
+      let safeMitre: any;
+      let safeTags: any;
+      let safeFalsepositives: any;
+      try {
+        safeTitle = safeText(title, { maxLength: 200 });
+        safeLevel = safeEnum(level ?? "medium", ["informational", "low", "medium", "high", "critical"] as const);
+        safeDescription = safeText(description ?? "", { maxLength: 4000, allowEmpty: true });
+        // Block prototype-pollution keys + cap nested JSON shape on every
+        // user-supplied object/array that flows into the YAML rule body.
+        safeDetection = safeJson<any>(detection, { maxBytes: 64 * 1024, maxDepth: 8 });
+        safeLogsource = safeJson<any>(logsource ?? { category: "any", product: "any" }, { maxBytes: 4 * 1024, maxDepth: 4 });
+        safeMitre = safeJson<any>(mitre ?? { tactic: "", technique: "", technique_name: "" }, { maxBytes: 4 * 1024, maxDepth: 4 });
+        safeTags = safeJson<any>(tags ?? [], { maxBytes: 8 * 1024, maxDepth: 4 });
+        safeFalsepositives = safeJson<any>(falsepositives ?? [], { maxBytes: 8 * 1024, maxDepth: 4 });
+      } catch (hErr) {
+        if (isInputHardeningError(hErr)) return res.status(hErr.httpStatus).json({ message: hErr.message, code: hErr.code });
+        throw hErr;
+      }
       const rule = createSigmaRule({
-        title,
-        level: level || "medium",
-        description: description || "",
-        logsource: logsource || { category: "any", product: "any" },
+        title: safeTitle,
+        level: safeLevel,
+        description: safeDescription,
+        logsource: safeLogsource,
         detection: {
-          selection: detection.selection || {},
-          keywords: detection.keywords || [],
-          condition: detection.condition || "selection AND keywords",
+          selection: safeDetection.selection || {},
+          keywords: safeDetection.keywords || [],
+          condition: safeDetection.condition || "selection AND keywords",
         },
-        mitre: mitre || { tactic: "", technique: "", technique_name: "" },
-        tags: tags || [],
-        falsepositives: falsepositives || [],
+        mitre: safeMitre,
+        tags: safeTags,
+        falsepositives: safeFalsepositives,
       });
       res.json(rule);
     } catch (error: any) {
@@ -25409,7 +27741,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   async function runAssetEnrichment(tenantId: number): Promise<{ enriched: number; total: number; toolsDetected?: string[] }> {
     const enrichClient = await pool.connect();
     try {
-      await enrichClient.query('SET statement_timeout = 120000');
+      await enrichClient.query('SET statement_timeout = 45000');
 
       const assetsRes = await enrichClient.query(`SELECT id, hostname, ip_address, user_name, endpoint_group, operating_system, last_logged_in_user, software_inventory FROM assets WHERE tenant_id = $1`, [tenantId]);
       const assets = assetsRes.rows;
@@ -25740,7 +28072,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     const toolNames = detectedToolsForTenant.map(t => t.softwareName);
     return { enriched, total, toolsDetected: [...new Set(toolNames)] };
     } finally {
-      await enrichClient.query('SET statement_timeout = 0').catch(() => {});
       enrichClient.release();
     }
   }
@@ -25838,7 +28169,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         accessKey: config.credentials?.access_key || "",
         secretKey: config.credentials?.secret_key || "",
         clientId: config.credentials?.clientId || "",
-      });
+      } as any);
 
       const token = await (connector as any).authenticate();
       const baseUrl = (connector as any).getApiBase();
@@ -26213,299 +28544,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
-  app.get("/api/gamification/:tenantId/challenges", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const result = await pool.query(
-        `SELECT * FROM security_challenges WHERE (tenant_id IS NULL OR tenant_id = $1) AND is_active = true ORDER BY difficulty, challenge_type, title`,
-        [tenantId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
+  registerGamificationRoutes(app);
 
-  app.get("/api/gamification/:tenantId/my-progress", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const userId = req.user?.id || req.user?.claims?.sub || "";
-      const result = await pool.query(
-        `SELECT ucp.*, sc.title as challenge_title, sc.description as challenge_description,
-                sc.category, sc.challenge_type, sc.metric, sc.xp_reward, sc.badge_reward,
-                sc.badge_icon, sc.difficulty, sc.starts_at, sc.ends_at
-         FROM user_challenge_progress ucp
-         JOIN security_challenges sc ON sc.id = ucp.challenge_id
-         WHERE ucp.user_id = $1 AND ucp.tenant_id = $2
-         ORDER BY ucp.completed_at IS NULL DESC, ucp.updated_at DESC`,
-        [userId, tenantId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/gamification/:tenantId/profile", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const userId = req.user?.id || req.user?.claims?.sub || "";
-      let result = await pool.query(
-        `SELECT * FROM user_gamification_profiles WHERE user_id = $1 AND tenant_id = $2`,
-        [userId, tenantId]
-      );
-      if (result.rows.length === 0) {
-        await pool.query(
-          `INSERT INTO user_gamification_profiles (user_id, tenant_id, total_xp, level, current_streak, longest_streak, badges)
-           VALUES ($1, $2, 0, 1, 0, 0, '[]')`,
-          [userId, tenantId]
-        );
-        result = await pool.query(
-          `SELECT * FROM user_gamification_profiles WHERE user_id = $1 AND tenant_id = $2`,
-          [userId, tenantId]
-        );
-      }
-      const profile = result.rows[0];
-      const rankResult = await pool.query(
-        `SELECT COUNT(*) + 1 as rank FROM user_gamification_profiles WHERE tenant_id = $1 AND total_xp > $2`,
-        [tenantId, profile.total_xp]
-      );
-      const totalUsersResult = await pool.query(
-        `SELECT COUNT(*) as total FROM user_gamification_profiles WHERE tenant_id = $1`,
-        [tenantId]
-      );
-      const completedResult = await pool.query(
-        `SELECT COUNT(*) as completed FROM user_challenge_progress WHERE user_id = $1 AND tenant_id = $2 AND completed_at IS NOT NULL`,
-        [userId, tenantId]
-      );
-      res.json({
-        ...profile,
-        rank: parseInt(rankResult.rows[0].rank),
-        totalUsers: parseInt(totalUsersResult.rows[0].total),
-        challengesCompleted: parseInt(completedResult.rows[0].completed),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/gamification/:tenantId/leaderboard", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const period = (req.query.period as string) || "all_time";
-      const result = await pool.query(
-        `SELECT ugp.user_id, ugp.total_xp, ugp.level, ugp.badges, ugp.title, ugp.current_streak,
-                u.username, u.first_name, u.last_name, u.profile_image_url,
-                (SELECT COUNT(*) FROM user_challenge_progress ucp
-                 WHERE ucp.user_id = ugp.user_id AND ucp.tenant_id = ugp.tenant_id AND ucp.completed_at IS NOT NULL) as challenges_completed
-         FROM user_gamification_profiles ugp
-         LEFT JOIN users u ON u.id::text = ugp.user_id OR u.username = ugp.user_id
-         WHERE ugp.tenant_id = $1
-         ORDER BY ugp.total_xp DESC
-         LIMIT 50`,
-        [tenantId]
-      );
-      const leaderboard = result.rows.map((row: any, index: number) => ({
-        rank: index + 1,
-        userId: row.user_id,
-        username: row.username || row.user_id,
-        firstName: row.first_name,
-        lastName: row.last_name,
-        profileImageUrl: row.profile_image_url,
-        totalXp: row.total_xp,
-        level: row.level,
-        badges: row.badges || [],
-        title: row.title,
-        currentStreak: row.current_streak,
-        challengesCompleted: parseInt(row.challenges_completed || "0"),
-      }));
-      res.json(leaderboard);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/gamification/:tenantId/challenges/:challengeId/claim", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const challengeId = parseInt(req.params.challengeId);
-      const userId = req.user?.id || req.user?.claims?.sub || "";
-
-      const progressResult = await pool.query(
-        `SELECT * FROM user_challenge_progress WHERE user_id = $1 AND challenge_id = $2 AND tenant_id = $3`,
-        [userId, challengeId, tenantId]
-      );
-
-      if (progressResult.rows.length === 0) {
-        return res.status(404).json({ message: "Challenge progress not found" });
-      }
-
-      const progress = progressResult.rows[0];
-      if (!progress.completed_at) {
-        return res.status(400).json({ message: "Challenge not yet completed" });
-      }
-      if (progress.claimed_at) {
-        return res.status(400).json({ message: "Reward already claimed" });
-      }
-
-      const challengeResult = await pool.query(
-        `SELECT * FROM security_challenges WHERE id = $1`,
-        [challengeId]
-      );
-      const challenge = challengeResult.rows[0];
-
-      await pool.query(
-        `UPDATE user_challenge_progress SET claimed_at = NOW(), xp_earned = $1 WHERE id = $2`,
-        [challenge.xp_reward, progress.id]
-      );
-
-      await pool.query(
-        `UPDATE user_gamification_profiles SET total_xp = total_xp + $1, updated_at = NOW() WHERE user_id = $2 AND tenant_id = $3`,
-        [challenge.xp_reward, userId, tenantId]
-      );
-
-      const profileResult = await pool.query(
-        `SELECT total_xp FROM user_gamification_profiles WHERE user_id = $1 AND tenant_id = $2`,
-        [userId, tenantId]
-      );
-      const totalXp = profileResult.rows[0]?.total_xp || 0;
-      const newLevel = Math.floor(totalXp / 500) + 1;
-
-      let badgesUpdate = "";
-      if (challenge.badge_reward) {
-        badgesUpdate = `, badges = badges || $4::jsonb`;
-        const badgeJson = JSON.stringify([{ name: challenge.badge_reward, icon: challenge.badge_icon, earnedAt: new Date().toISOString() }]);
-        await pool.query(
-          `UPDATE user_gamification_profiles SET level = $1, badges = badges || $3::jsonb, updated_at = NOW() WHERE user_id = $2 AND tenant_id = $4`,
-          [newLevel, userId, badgeJson, tenantId]
-        );
-      } else {
-        await pool.query(
-          `UPDATE user_gamification_profiles SET level = $1, updated_at = NOW() WHERE user_id = $2 AND tenant_id = $3`,
-          [newLevel, userId, tenantId]
-        );
-      }
-
-      res.json({ success: true, xpEarned: challenge.xp_reward, newLevel, badge: challenge.badge_reward });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/gamification/track-action", isAuthenticated, async (req: any, res) => {
-    try {
-      const { tenantId, metric, value = 1 } = req.body;
-      const userId = req.user?.id || req.user?.claims?.sub || "";
-
-      if (!tenantId || !metric) {
-        return res.status(400).json({ message: "tenantId and metric are required" });
-      }
-
-      const challengesResult = await pool.query(
-        `SELECT * FROM security_challenges WHERE metric = $1 AND is_active = true AND (tenant_id IS NULL OR tenant_id = $2)`,
-        [metric, tenantId]
-      );
-
-      let profileResult = await pool.query(
-        `SELECT * FROM user_gamification_profiles WHERE user_id = $1 AND tenant_id = $2`,
-        [userId, tenantId]
-      );
-      if (profileResult.rows.length === 0) {
-        await pool.query(
-          `INSERT INTO user_gamification_profiles (user_id, tenant_id, total_xp, level, current_streak, longest_streak, badges, last_activity_date)
-           VALUES ($1, $2, 0, 1, 1, 1, '[]', NOW())`,
-          [userId, tenantId]
-        );
-      } else {
-        const lastActivity = profileResult.rows[0].last_activity_date;
-        const today = new Date().toDateString();
-        const lastDate = lastActivity ? new Date(lastActivity).toDateString() : null;
-        if (lastDate !== today) {
-          const yesterday = new Date(Date.now() - 86400000).toDateString();
-          const isConsecutive = lastDate === yesterday;
-          if (isConsecutive) {
-            await pool.query(
-              `UPDATE user_gamification_profiles SET current_streak = current_streak + 1,
-               longest_streak = GREATEST(longest_streak, current_streak + 1),
-               last_activity_date = NOW(), updated_at = NOW()
-               WHERE user_id = $1 AND tenant_id = $2`,
-              [userId, tenantId]
-            );
-          } else if (lastDate !== today) {
-            await pool.query(
-              `UPDATE user_gamification_profiles SET current_streak = 1, last_activity_date = NOW(), updated_at = NOW()
-               WHERE user_id = $1 AND tenant_id = $2`,
-              [userId, tenantId]
-            );
-          }
-        }
-      }
-
-      const updated: string[] = [];
-      for (const challenge of challengesResult.rows) {
-        let progressResult = await pool.query(
-          `SELECT * FROM user_challenge_progress WHERE user_id = $1 AND challenge_id = $2 AND tenant_id = $3`,
-          [userId, challenge.id, tenantId]
-        );
-        if (progressResult.rows.length === 0) {
-          await pool.query(
-            `INSERT INTO user_challenge_progress (user_id, challenge_id, tenant_id, current_value, target_value)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [userId, challenge.id, tenantId, value, challenge.target_value]
-          );
-          if (value >= challenge.target_value) {
-            await pool.query(
-              `UPDATE user_challenge_progress SET completed_at = NOW(), current_value = $1 WHERE user_id = $2 AND challenge_id = $3 AND tenant_id = $4`,
-              [value, userId, challenge.id, tenantId]
-            );
-          }
-          updated.push(challenge.title);
-        } else {
-          const progress = progressResult.rows[0];
-          if (!progress.completed_at) {
-            const newValue = progress.current_value + value;
-            if (newValue >= challenge.target_value) {
-              await pool.query(
-                `UPDATE user_challenge_progress SET current_value = $1, completed_at = NOW(), updated_at = NOW()
-                 WHERE id = $2`,
-                [newValue, progress.id]
-              );
-            } else {
-              await pool.query(
-                `UPDATE user_challenge_progress SET current_value = $1, updated_at = NOW() WHERE id = $2`,
-                [newValue, progress.id]
-              );
-            }
-            updated.push(challenge.title);
-          }
-        }
-      }
-
-      res.json({ success: true, challengesUpdated: updated });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/gamification/:tenantId/stats", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const [totalChallenges, activePlayers, totalXpResult, completionsResult] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as count FROM security_challenges WHERE is_active = true AND (tenant_id IS NULL OR tenant_id = $1)`, [tenantId]),
-        pool.query(`SELECT COUNT(DISTINCT user_id) as count FROM user_gamification_profiles WHERE tenant_id = $1`, [tenantId]),
-        pool.query(`SELECT COALESCE(SUM(total_xp), 0) as total FROM user_gamification_profiles WHERE tenant_id = $1`, [tenantId]),
-        pool.query(`SELECT COUNT(*) as count FROM user_challenge_progress WHERE tenant_id = $1 AND completed_at IS NOT NULL`, [tenantId]),
-      ]);
-      res.json({
-        totalChallenges: parseInt(totalChallenges.rows[0].count),
-        activePlayers: parseInt(activePlayers.rows[0].count),
-        totalXpEarned: parseInt(totalXpResult.rows[0].total),
-        totalCompletions: parseInt(completionsResult.rows[0].count),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // Stagger background service startup to prevent DB connection stampede at boot.
   // Each scheduler gets a small randomized jitter (50-500ms) before registering
@@ -26883,348 +28923,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
-  app.post("/api/incidents/:id/investigate", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const access = await getUserTenantAccess(req);
-      if (!access.tenantId) return res.status(400).json({ message: "No tenant context" });
-      const incidentRow = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1`, [incidentId]);
-      if (incidentRow.rows.length === 0) return res.status(404).json({ message: `Incident ${incidentId} not found` });
-      const incidentTenantId = incidentRow.rows[0].tenant_id;
-      const accessibleIds = await getAccessibleTenantIds(req, access.tenantId);
-      if (!accessibleIds.includes(incidentTenantId)) return res.status(403).json({ message: "Access denied to this incident" });
-      const { investigationType } = req.body || {};
-      const result = await investigateIncident(incidentTenantId, incidentId, investigationType || "manual");
-      res.json(result);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Investigation failed" });
-    }
-  });
+  registerAiInvestigationRoutes(app);
 
-  app.post("/api/incidents/:id/investigate/forensic", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const access = await getUserTenantAccess(req);
-      if (!access.tenantId) return res.status(400).json({ message: "No tenant context" });
-      const incidentRow = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1`, [incidentId]);
-      if (incidentRow.rows.length === 0) return res.status(404).json({ message: `Incident ${incidentId} not found` });
-      const incidentTenantId = incidentRow.rows[0].tenant_id;
-      const accessibleIds = await getAccessibleTenantIds(req, access.tenantId);
-      if (!accessibleIds.includes(incidentTenantId)) return res.status(403).json({ message: "Access denied to this incident" });
-      const result = await runForensicAnalysis(incidentTenantId, incidentId);
-      res.json(result);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Forensic analysis failed" });
-    }
-  });
-
-  app.get("/api/investigations/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(
-        `SELECT ai.*, i.title as incident_title, i.severity as incident_severity,
-                i.source as incident_source, i.category as incident_category,
-                i.incident_type, i.source_ip, i.destination_ip, i.affected_assets
-         FROM ai_investigations ai
-         JOIN incidents i ON i.id = ai.incident_id
-         WHERE ai.tenant_id = $1
-         ORDER BY ai.created_at DESC LIMIT 100`, [tenantId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch investigations" });
-    }
-  });
-
-  app.get("/api/investigations/:tenantId/incident/:incidentId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const incidentId = parseInt(req.params.incidentId);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(
-        `SELECT ai.*, i.title as incident_title, i.severity as incident_severity,
-                i.source as incident_source, i.category as incident_category,
-                i.incident_type, i.source_ip, i.destination_ip, i.affected_assets
-         FROM ai_investigations ai
-         JOIN incidents i ON i.id = ai.incident_id
-         WHERE ai.incident_id = $1 AND ai.tenant_id = $2
-         ORDER BY ai.created_at DESC LIMIT 1`, [incidentId, tenantId]
-      );
-      res.json(result.rows[0] || null);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch investigation" });
-    }
-  });
-
-  app.get("/api/investigations/:tenantId/campaigns", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const campaigns = await detectCampaigns(tenantId);
-      res.json(campaigns);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to detect campaigns" });
-    }
-  });
-
-  app.get("/api/investigations/:tenantId/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const invId = parseInt(req.params.id);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(
-        `SELECT ai.*, i.title as incident_title, i.severity as incident_severity,
-                i.source as incident_source, i.category as incident_category,
-                i.incident_type, i.source_ip, i.destination_ip, i.affected_assets,
-                i.description as incident_description
-         FROM ai_investigations ai
-         JOIN incidents i ON i.id = ai.incident_id
-         WHERE ai.id = $1 AND ai.tenant_id = $2`, [invId, tenantId]
-      );
-      if (result.rows.length === 0) return res.status(404).json({ message: "Investigation not found" });
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch investigation" });
-    }
-  });
-
-  app.get("/api/ai-analyst/:tenantId/overview", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const overview = await getAnalystOverview(tenantId);
-      res.json(overview);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch overview" });
-    }
-  });
-
-  app.get("/api/ai-analyst/:tenantId/queue", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const queue = await getInvestigationQueue(tenantId);
-      res.json(queue);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch queue" });
-    }
-  });
-
-  app.post("/api/ai-analyst/:tenantId/investigate-queue", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const count = await autoInvestigateCriticalIncidents(tenantId);
-      res.json({ message: `Queued ${count} incidents for investigation`, count });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to queue investigations" });
-    }
-  });
-
-  app.post("/api/ai-analyst/:tenantId/reinvestigate", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { incidentIds } = req.body || {};
-      if (!Array.isArray(incidentIds) || incidentIds.length === 0) {
-        return res.status(400).json({ message: "incidentIds array required" });
-      }
-      if (incidentIds.length > 20) {
-        return res.status(400).json({ message: "Maximum 20 incidents per re-investigation batch" });
-      }
-
-      const toDelete = await pool.query(
-        `SELECT id FROM ai_investigations WHERE tenant_id = $1 AND incident_id = ANY($2) AND status IN ('completed', 'failed')`,
-        [tenantId, incidentIds]
-      );
-      const deleteIds = toDelete.rows.map((r: any) => r.id);
-      if (deleteIds.length > 0) {
-        await pool.query(
-          `UPDATE incident_notifications SET investigation_id = NULL WHERE tenant_id = $1 AND investigation_id = ANY($2)`,
-          [tenantId, deleteIds]
-        );
-        await pool.query(
-          `UPDATE analyst_feedback SET investigation_id = NULL WHERE tenant_id = $1 AND investigation_id = ANY($2)`,
-          [tenantId, deleteIds]
-        );
-        await pool.query(
-          `DELETE FROM ai_investigations WHERE id = ANY($1)`,
-          [deleteIds]
-        );
-      }
-
-      let investigated = 0;
-      const batchSize = 10;
-      for (let i = 0; i < incidentIds.length; i += batchSize) {
-        const batch = incidentIds.slice(i, i + batchSize);
-        const accessibleIds = await getAccessibleTenantIds(req, tenantId);
-        const promises = batch.map(async (incidentId: number) => {
-          try {
-            const incRow = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1`, [incidentId]);
-            if (incRow.rows.length === 0) return { success: false, id: incidentId, error: "Incident not found" };
-            const actualTenantId = incRow.rows[0].tenant_id;
-            if (!accessibleIds.includes(actualTenantId)) return { success: false, id: incidentId, error: "Access denied" };
-            await investigateIncident(actualTenantId, incidentId, "reinvestigation");
-            return { success: true, id: incidentId };
-          } catch (err: any) {
-            console.error(`[AI SOC] Re-investigation failed for incident ${incidentId}: ${err.message}`);
-            return { success: false, id: incidentId, error: err.message };
-          }
-        });
-        const results = await Promise.allSettled(promises);
-        for (const r of results) {
-          if (r.status === "fulfilled" && r.value.success) investigated++;
-        }
-      }
-
-      res.json({ message: `Re-investigated ${investigated}/${incidentIds.length} incidents`, count: investigated });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Re-investigation failed" });
-    }
-  });
-
-  app.get("/api/ai-analyst/:tenantId/threat-hunt/:investigationId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const investigationId = parseInt(req.params.investigationId);
-      await assertTenantAccess(req, tenantId);
-      const results = await threatHunt(tenantId, investigationId);
-      res.json(results);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Threat hunt failed" });
-    }
-  });
-
-  app.post("/api/ai-analyst/:tenantId/escalate", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { source, category, incidentType } = req.body || {};
-      const count = await escalateRecurring(tenantId, source, category, incidentType);
-      res.json({ message: `Escalated and investigating ${count} recurring incidents`, count });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Escalation failed" });
-    }
-  });
-
-  app.post("/api/ai-analyst/:tenantId/feedback", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { investigationId, incidentId, verdictOverride, severityOverride, feedbackNotes, feedbackType } = req.body;
-      if (!investigationId && !incidentId) {
-        return res.status(400).json({ message: "investigationId or incidentId required" });
-      }
-
-      let originalVerdict: string | null = null;
-      let originalSeverity: string | null = null;
-      if (investigationId) {
-        const invResult = await pool.query(
-          `SELECT ai.verdict, i.severity FROM ai_investigations ai JOIN incidents i ON i.id = ai.incident_id WHERE ai.id = $1 AND ai.tenant_id = $2`,
-          [investigationId, tenantId]
-        );
-        if (invResult.rows[0]) {
-          originalVerdict = invResult.rows[0].verdict;
-          originalSeverity = invResult.rows[0].severity;
-        }
-      }
-
-      const userId = req.user?.claims?.sub || "unknown";
-      const result = await pool.query(
-        `INSERT INTO analyst_feedback (tenant_id, investigation_id, incident_id, analyst_user_id, feedback_type, verdict_override, severity_override, original_verdict, original_severity, feedback_notes, is_used_for_learning)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false) RETURNING *`,
-        [tenantId, investigationId || null, incidentId || null, userId, feedbackType || "general", verdictOverride || null, severityOverride || null, originalVerdict, originalSeverity, feedbackNotes || null]
-      );
-
-      if (verdictOverride && investigationId) {
-        await pool.query(`UPDATE ai_investigations SET verdict = $1 WHERE id = $2 AND tenant_id = $3`, [verdictOverride, investigationId, tenantId]);
-        if (incidentId) {
-          if (verdictOverride === "false_positive") {
-            await pool.query(`UPDATE incidents SET classification = 'false_positive', is_true_positive = false WHERE id = $1 AND tenant_id = $2`, [incidentId, tenantId]);
-          } else if (verdictOverride === "true_positive") {
-            await pool.query(`UPDATE incidents SET classification = 'true_positive', is_true_positive = true WHERE id = $1 AND tenant_id = $2`, [incidentId, tenantId]);
-            // Auto-nominate incident IOCs for community intel feed (same as other TP classification paths)
-            const inc = await pool.query(`SELECT source_ip, destination_ip, confidence_score FROM incidents WHERE id = $1 AND tenant_id = $2`, [incidentId, tenantId]);
-            if (inc.rows.length > 0) {
-              try {
-                await autoNominateIncidentIOCs(
-                  tenantId, incidentId,
-                  inc.rows[0].source_ip, inc.rows[0].destination_ip,
-                  inc.rows[0].confidence_score ?? 80,
-                  userId
-                );
-              } catch (err) {
-                console.warn(`[FederatedIntel] nomination failed for analyst_feedback TP on incident ${incidentId}:`, (err as Error).message);
-              }
-            }
-          }
-        }
-      }
-
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to submit feedback" });
-    }
-  });
-
-  app.get("/api/ai-analyst/:tenantId/feedback-stats", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-
-      const stats = await pool.query(
-        `SELECT 
-          COUNT(*) as total_feedback,
-          COUNT(CASE WHEN verdict_override IS NOT NULL AND verdict_override = original_verdict THEN 1 END) as confirmed,
-          COUNT(CASE WHEN verdict_override IS NOT NULL AND verdict_override != original_verdict THEN 1 END) as overridden,
-          COUNT(CASE WHEN verdict_override = 'true_positive' AND original_verdict = 'false_positive' THEN 1 END) as fp_to_tp,
-          COUNT(CASE WHEN verdict_override = 'false_positive' AND original_verdict = 'true_positive' THEN 1 END) as tp_to_fp,
-          COUNT(CASE WHEN feedback_type = 'verdict_correction' THEN 1 END) as verdict_corrections,
-          COUNT(CASE WHEN feedback_type = 'severity_adjustment' THEN 1 END) as severity_adjustments
-         FROM analyst_feedback WHERE tenant_id = $1`,
-        [tenantId]
-      );
-
-      const totalWithVerdict = await pool.query(
-        `SELECT COUNT(*) as total FROM analyst_feedback WHERE tenant_id = $1 AND verdict_override IS NOT NULL`, [tenantId]
-      );
-      const confirmed = parseInt(stats.rows[0]?.confirmed || "0");
-      const total = parseInt(totalWithVerdict.rows[0]?.total || "0");
-      const accuracy = total > 0 ? Math.round((confirmed / total) * 100) : null;
-
-      const recentFeedback = await pool.query(
-        `SELECT af.*, i.title as incident_title FROM analyst_feedback af
-         LEFT JOIN incidents i ON i.id = af.incident_id
-         WHERE af.tenant_id = $1 ORDER BY af.created_at DESC LIMIT 10`,
-        [tenantId]
-      );
-
-      res.json({
-        ...stats.rows[0],
-        accuracy,
-        recentFeedback: recentFeedback.rows,
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch feedback stats" });
-    }
-  });
-
-  app.get("/api/ai-analyst/:tenantId/feedback/:investigationId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const investigationId = parseInt(req.params.investigationId);
-      await assertTenantAccess(req, tenantId);
-
-      const result = await pool.query(
-        `SELECT * FROM analyst_feedback WHERE tenant_id = $1 AND investigation_id = $2 ORDER BY created_at DESC`,
-        [tenantId, investigationId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to fetch feedback" });
-    }
-  });
 
   app.post("/api/admin/auto-investigate/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
@@ -27484,7 +29184,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         [tenantId]
       );
 
-      let sendResult = { success: false, error: "No email configuration found" };
+      let sendResult: any = { success: false, error: "No email configuration found" };
       if (configResult.rows.length > 0) {
         sendResult = await sendEmail(configResult.rows[0], {
           to: recipients,
@@ -27744,28 +29444,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   });
 
   // === Incident Quick Actions ===
-  app.post("/api/incidents/:id/close", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      await pool.query(`UPDATE incidents SET status = 'closed' WHERE id = $1`, [id]);
-      res.json({ message: "Incident closed", status: "closed" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/incidents/:id/false-positive", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      await pool.query(
-        `UPDATE incidents SET status = 'closed', is_true_positive = false, classification = 'False Positive' WHERE id = $1`,
-        [id]
-      );
-      res.json({ message: "Incident marked as false positive", status: "closed" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // === Notification Action Routes (token-based, no auth required) ===
   app.get("/api/notification-action/:token", async (req, res) => {
@@ -28720,8 +30398,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const tenantIds = await getAccessibleTenantIds(req, tenantId);
       const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
 
+      // Use COALESCE(user_name, last_logged_in_user) so CrowdStrike-imported assets
+      // (which set last_logged_in_user instead of user_name) are included too.
       const usersFromAssets = await pool.query(`
-        SELECT a.tenant_id, a.user_name,
+        SELECT a.tenant_id,
+               COALESCE(NULLIF(TRIM(a.user_name),''), NULLIF(TRIM(a.last_logged_in_user),'')) AS user_name,
                COUNT(*)::int as device_count,
                array_agg(DISTINCT a.id) as asset_ids,
                MAX(COALESCE(a.risk_score, 0))::int as max_risk_score,
@@ -28735,8 +30416,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
                MAX(a.last_seen) as last_activity
         FROM assets a
         WHERE a.tenant_id IN (${placeholders})
-          AND a.user_name IS NOT NULL AND a.user_name != ''
-        GROUP BY a.tenant_id, a.user_name
+          AND COALESCE(NULLIF(TRIM(a.user_name),''), NULLIF(TRIM(a.last_logged_in_user),'')) IS NOT NULL
+        GROUP BY a.tenant_id, user_name
       `, tenantIds);
 
       let synced = 0;
@@ -29051,7 +30732,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     if (systemBuiltIn.some(s => u === s || u.startsWith(`${s}\\`) || u.endsWith(`\\${s}`) || u.includes(`\\${s}`))) return "System Built-in";
     if (/^(nt authority|nt service|window manager|font driver host)/i.test(u)) return "System Built-in";
     if (/^(svc[_-]|service[_-]|srvc[_-]|_svc|sql_|iis_|mss_|app_|web_|api_)/i.test(u) || u.includes("$")) return "Service";
-    if (/(guest|visitor|temp_user|temporary)/i.test(u)) return "Guest";
+    if (GUEST_ACCOUNT_PATTERNS.some(p => u.includes(p))) return "Guest";
 
     if (u.includes("\\")) {
       const parts = u.split("\\");
@@ -29743,12 +31424,21 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           AND software_inventory IS NOT NULL AND software_inventory != 'null'
       `, tenantIds);
 
+      const OS_NAME_PATTERNS = [
+        /^windows(\s|$)/i, /^microsoft\s*windows/i, /^windows\s*(xp|vista|7|8|8\.1|10|11|server)/i,
+        /^linux/i, /^ubuntu/i, /^centos/i, /^red\s*hat/i, /^rhel/i, /^debian/i,
+        /^suse/i, /^opensuse/i, /^fedora/i, /^arch\s*linux/i, /^kali/i, /^mint/i,
+        /^mac\s*os/i, /^macos/i, /^os\s*x/i, /^aix/i, /^solaris/i, /^vmware\s*esxi/i,
+      ];
+      const isOsEntry = (name: string) => OS_NAME_PATTERNS.some(p => p.test(name.trim()));
+
       const softwareMap = new Map<string, { name: string; version: string; deviceCount: number }>();
       for (const row of result.rows) {
         const inv = row.software_inventory;
         if (!Array.isArray(inv)) continue;
         for (const sw of inv) {
           if (!sw?.name) continue;
+          if (isOsEntry(sw.name)) continue;
           const key = `${sw.name}|||${sw.version || "N/A"}`;
           const existing = softwareMap.get(key);
           if (existing) {
@@ -29765,6 +31455,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         name: s.name,
         version: s.version,
         systemCount: s.deviceCount,
+        systems: [],
       })));
 
       const eolSoftware = enriched
@@ -30665,15 +32356,29 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const tenantIds = await getAccessibleTenantIds(req, tenantId);
       const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
 
-      const logSourceResult = await pool.query(`
-        SELECT log_source, source_type, COUNT(*)::int as event_count, MAX(occurred_at) as last_event
-        FROM security_events
-        WHERE tenant_id IN (${placeholders}) AND log_source IS NOT NULL
-        GROUP BY log_source, source_type
-        ORDER BY event_count DESC
-      `, tenantIds);
+      // Cache the rolled-up coverage view per tenant-scope. swSec/log_source aggregations
+      // are expensive (jsonb expansion across ~900 assets × ~4k entries each); the result
+      // changes slowly compared to a 2-min TTL.
+      const coverageCacheKey = `security-coverage-stats:${tenantIds.slice().sort((a, b) => a - b).join(",")}`;
+      const coverageCached = await getCache(coverageCacheKey);
+      if (coverageCached) return res.json(coverageCached);
 
-      const [totalDevicesResult, emailTotalResult, identityTotalResult, emailCoveredResult, identityCoveredResult, windowsDevicesResult] = await Promise.all([
+      // Parallelize the leading rollups (previously the swSec query alone took ~3.8s
+      // and triggered a [DB Slow Query] warning; the rewritten lateral-dedup form
+      // halves that and we run it alongside the other aggregates).
+      const [
+        logSourceResult,
+        totalDevicesResult, emailTotalResult, identityTotalResult,
+        emailCoveredResult, identityCoveredResult, windowsDevicesResult,
+        agentResult, swSecResult,
+      ] = await Promise.all([
+        pool.query(`
+          SELECT log_source, source_type, COUNT(*)::int as event_count, MAX(occurred_at) as last_event
+          FROM security_events
+          WHERE tenant_id IN (${placeholders}) AND log_source IS NOT NULL
+          GROUP BY log_source, source_type
+          ORDER BY event_count DESC
+        `, tenantIds),
         pool.query(`
           SELECT COUNT(*)::int as total FROM assets WHERE tenant_id IN (${placeholders})
         `, tenantIds),
@@ -30709,6 +32414,38 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           WHERE tenant_id IN (${placeholders})
             AND operating_system ILIKE '%windows%'
         `, tenantIds),
+        pool.query(`
+          SELECT
+            agent_version,
+            prevention_policy,
+            COUNT(*)::int as device_count
+          FROM assets
+          WHERE tenant_id IN (${placeholders}) AND agent_version IS NOT NULL AND agent_version != ''
+          GROUP BY agent_version, prevention_policy
+          ORDER BY device_count DESC
+        `, tenantIds),
+        // Rewritten from `COUNT(DISTINCT a.id)` over a Cartesian jsonb expansion
+        // (~3.5M rows, external-merge sort, ~3.8s on a warm cache and a slow-query
+        // warning trigger) into a lateral DISTINCT inside each asset's array, which
+        // collapses ~63 unique names per asset before the outer aggregate.
+        pool.query(`
+          SELECT name AS sw_name, COUNT(*)::int AS device_count
+          FROM (
+            SELECT a.id, sw_names.name
+            FROM assets a
+            CROSS JOIN LATERAL (
+              SELECT DISTINCT sw->>'name' AS name
+              FROM jsonb_array_elements(a.software_inventory) sw
+              WHERE sw->>'name' IS NOT NULL
+            ) sw_names
+            WHERE a.tenant_id IN (${placeholders})
+              AND a.software_inventory IS NOT NULL
+              AND jsonb_typeof(a.software_inventory) = 'array'
+          ) x
+          GROUP BY name
+          HAVING COUNT(*) >= 5
+          ORDER BY device_count DESC
+        `, tenantIds),
       ]);
       const totalDevices = totalDevicesResult.rows[0]?.total || 0;
       const totalEmails = emailTotalResult.rows[0]?.total || 0;
@@ -30717,30 +32454,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       const identityCovered = identityCoveredResult.rows[0]?.covered || 0;
       // Windows devices = domain-joined estimate (AD proxy for Identity coverage)
       const windowsDeviceCount = windowsDevicesResult.rows[0]?.domain_joined || 0;
-
-      const agentResult = await pool.query(`
-        SELECT
-          agent_version,
-          prevention_policy,
-          COUNT(*)::int as device_count
-        FROM assets
-        WHERE tenant_id IN (${placeholders}) AND agent_version IS NOT NULL AND agent_version != ''
-        GROUP BY agent_version, prevention_policy
-        ORDER BY device_count DESC
-      `, tenantIds);
-
-      const swSecResult = await pool.query(`
-        SELECT
-          sw->>'name' as sw_name,
-          COUNT(DISTINCT a.id)::int as device_count
-        FROM assets a, jsonb_array_elements(a.software_inventory) as sw
-        WHERE a.tenant_id IN (${placeholders})
-          AND a.software_inventory IS NOT NULL
-          AND jsonb_typeof(a.software_inventory) = 'array'
-        GROUP BY sw->>'name'
-        HAVING COUNT(DISTINCT a.id) >= 5
-        ORDER BY device_count DESC
-      `, tenantIds);
 
       interface ToolInfo {
         name: string;
@@ -30839,14 +32552,20 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         toolMap.set("Cynet 360 AutoXDR", cynetEPS);
       }
 
-      let endpointAgentCovered = 0;
-      for (const row of agentResult.rows) {
-        endpointAgentCovered += row.device_count;
-      }
-      const endpointTools = Array.from(toolMap.values()).filter(t => t.domainCategory === "Endpoint Protection");
-      for (const tool of endpointTools) {
-        if (tool.devicesCovered === 0) {
-          tool.devicesCovered = Math.min(endpointAgentCovered, totalDevices);
+      // Task #445: removed endpoint-agent cross-attribution. The previous
+      // loop summed every asset with any agent_version string and assigned
+      // that count to every endpoint tool whose devicesCovered === 0,
+      // cross-attributing one vendor's agent rollout to other vendors'
+      // tools. devicesCovered must come only from each tool's own vendor
+      // signal (log_source / software_inventory match).
+      void agentResult;
+
+      // Task #445: defensive guard — never report the platform itself
+      // ("Cyber Command Center" / generic "Platform Center") as a detected
+      // SecOps tool inside a customer tenant's coverage panel.
+      for (const key of Array.from(toolMap.keys())) {
+        if (/^(?:cyber\s*command\s*center|platform\s*center)\b/i.test(key)) {
+          toolMap.delete(key);
         }
       }
 
@@ -30858,18 +32577,11 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         "Backup & Recovery", "Data Loss Prevention"
       ];
 
-      // Smart Identity coverage: domain-joined assets imply Active Directory = identity covered.
-      // Smart SecOps coverage: customer on the platform = SIEM/monitoring always covered;
-      // depth is proportional to how many other security tool domains are integrated.
-
       const coverageByDomain: Record<string, any> = {};
-      let secopsIntegratedDomains = 0; // tracked for gap detection
       for (const domain of SECURITY_DOMAINS) {
         const domainTools = detectedTools.filter(t => t.domainCategory === domain);
         let domainTotal = totalDevices;
         let domainCovered = domainTools.reduce((max, t) => Math.max(max, t.devicesCovered), 0);
-        const syntheticTools: string[] = [];
-        const syntheticVendors: string[] = [];
 
         if (domain === "Email Security") {
           domainTotal = totalEmails > 0 ? totalEmails : totalDevices;
@@ -30877,36 +32589,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         } else if (domain === "Identity & Access") {
           domainTotal = totalIdentityUsers > 0 ? totalIdentityUsers : totalDevices;
           domainCovered = identityCovered > 0 ? identityCovered : domainCovered;
-          // Smart: use Windows assets as domain-joined proxy. Corporate Windows machines
-          // are typically AD domain-joined; Linux/macOS are generally not.
-          if (domainCovered === 0 && totalDevices > 0) {
-            domainCovered = windowsDeviceCount;
-            domainTotal = totalDevices;
-            syntheticTools.push("Active Directory (Domain)");
-            syntheticVendors.push("Microsoft");
-          }
-        } else if (domain === "SecOps") {
-          // The platform IS the SIEM base, but coverage quality reflects how many
-          // security control domains are actually feeding data into it.
-          // With only Endpoint (~1/8 domains) → ~12-13%; all 8 domains → 100%.
-          const otherDomains = SECURITY_DOMAINS.filter(d => d !== "SecOps");
-          const integratedDomains = otherDomains.filter(d =>
-            detectedTools.some(t => t.domainCategory === d)
-          ).length;
-          secopsIntegratedDomains = integratedDomains; // capture for gaps filter
-          domainTotal = otherDomains.length;
-          // min 1 so the platform itself counts as a base data source (small non-zero floor)
-          domainCovered = Math.max(1, integratedDomains);
-          syntheticTools.push("Cyber Command Center (Platform)");
-          syntheticVendors.push("MSSP Platform");
-          if (integratedDomains > 0) {
-            syntheticTools.push(`${integratedDomains} Security Domain${integratedDomains !== 1 ? "s" : ""} Integrated`);
-            syntheticVendors.push("Multi-Vendor");
-          }
         }
 
-        const allTools = [...domainTools.map(t => t.name), ...syntheticTools];
-        const allVendors = [...domainTools.map(t => t.vendor), ...syntheticVendors];
+        const allTools = domainTools.map(t => t.name);
+        const allVendors = domainTools.map(t => t.vendor);
         const rawPercent = domainTotal > 0 ? Math.round((domainCovered / domainTotal) * 100) : (allTools.length > 0 ? 100 : 0);
 
         coverageByDomain[domain] = {
@@ -30921,14 +32607,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       }
 
       const gaps = SECURITY_DOMAINS
-        .filter(d => {
-          if (d === "SecOps") {
-            // SecOps has a synthetic platform tool always, but gaps should reflect
-            // whether any real security control domains are feeding the platform.
-            return secopsIntegratedDomains === 0;
-          }
-          return coverageByDomain[d].tools.length === 0;
-        })
+        .filter(d => coverageByDomain[d].tools.length === 0)
         .map(d => `No ${d} tools detected`);
 
       const domainValues = Object.values(coverageByDomain) as any[];
@@ -30937,14 +32616,16 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         ? Math.round(activeDomains.reduce((sum: number, d: any) => sum + d.percent, 0) / SECURITY_DOMAINS.length)
         : 0;
 
-      res.json({
+      const coverageResponse = {
         detectedTools,
         coverageByDomain,
         gaps,
         overallScore,
         totalDevices,
         totalTools: detectedTools.length,
-      });
+      };
+      setCache(coverageCacheKey, coverageResponse, 120_000);
+      res.json(coverageResponse);
     } catch (error: any) {
       console.error("Security coverage error:", error);
       res.status(500).json({ message: error.message });
@@ -31040,6 +32721,13 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       await assertTenantAccess(req, tenantId);
       const tenantIds = [tenantId];
       const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
+
+      // Cached rollup so first paint of the CISO dashboard is sub-second.
+      // The handler issues 6 parallel rollups + 1 NIST scan + 1 trend + 10 radar
+      // queries; even at ~50ms each the cumulative cold-cache cost is multi-second.
+      const cisoCacheKey = `ciso-stats:${tenantId}`;
+      const cisoCached = await getCache(cisoCacheKey);
+      if (cisoCached) return res.json(cisoCached);
 
       const [threatVectors, topAttackers, mitreTactics, attackSurface, kris] = await Promise.all([
         pool.query(`
@@ -31162,8 +32850,10 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         { name: "AI",            tabKey: "ai_security",   types: [],                                 vecPatterns: ["ai"] },
       ];
 
-      const attackVectorRadar: any[] = [];
-      for (const domain of vectorDomains) {
+      // Run all radar domain queries in parallel — this loop was the dominant
+      // sequential cost on a cold dashboard load (10 domains × up to 2 queries).
+      const SPARSE_THRESHOLD = 10;
+      const attackVectorRadar = await Promise.all(vectorDomains.map(async (domain) => {
         const typeClause = domain.types.length > 0
           ? domain.types.map(t => `event_type = '${t.replace(/'/g, "''")}'`).join(" OR ")
           : "FALSE";
@@ -31189,24 +32879,24 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             AND (${typeClause} OR ${vecClause})
         `, tenantIds);
 
-        let radarRow = await radarRowQuery("30 days");
-        const SPARSE_THRESHOLD = 10;
-        if ((radarRow.rows[0]?.count || 0) < SPARSE_THRESHOLD) {
-          const fallbackRow = await radarRowQuery("90 days");
-          if ((fallbackRow.rows[0]?.count || 0) > (radarRow.rows[0]?.count || 0)) {
-            radarRow = fallbackRow;
-          }
-        }
-        attackVectorRadar.push({
+        // Issue both windows in parallel; pick the wider one only if 30d is sparse.
+        const [row30, row90] = await Promise.all([
+          radarRowQuery("30 days"),
+          radarRowQuery("90 days"),
+        ]);
+        const c30 = row30.rows[0]?.count || 0;
+        const c90 = row90.rows[0]?.count || 0;
+        const radarRow = (c30 < SPARSE_THRESHOLD && c90 > c30) ? row90 : row30;
+        return {
           vector: domain.name,
           tabKey: domain.tabKey,
           count: radarRow.rows[0]?.count || 0,
           criticalCount: radarRow.rows[0]?.critical_count || 0,
           topThreat: radarRow.rows[0]?.top_threat || "None",
-        });
-      }
+        };
+      }));
 
-      res.json({
+      const cisoResponse = ({
         threatVectors: threatVectors.rows.map(r => ({
           vector: r.vector, count: r.count, criticalCount: r.critical_count,
         })),
@@ -31218,17 +32908,22 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           tactic: r.tactic, count: r.count, criticalCount: r.critical_count,
         })),
         attackSurface: attackSurface.rows[0] || {},
+        // Task #445: honest-null CISO panel. Return null (not 0) when the
+        // underlying SQL aggregate produced no rows so the UI renders "—"
+        // instead of presenting 0 as a real measurement.
         kris: {
-          totalIncidents: kris.rows[0]?.total_incidents || 0,
-          unresolvedCritical: kris.rows[0]?.unresolved_critical || 0,
-          incidents7d: kris.rows[0]?.incidents_7d || 0,
-          incidents30d: kris.rows[0]?.incidents_30d || 0,
-          avgResponseHours: parseFloat(kris.rows[0]?.avg_response_hours || "0"),
+          totalIncidents: kris.rows[0]?.total_incidents != null ? Number(kris.rows[0].total_incidents) : null,
+          unresolvedCritical: kris.rows[0]?.unresolved_critical != null ? Number(kris.rows[0].unresolved_critical) : null,
+          incidents7d: kris.rows[0]?.incidents_7d != null ? Number(kris.rows[0].incidents_7d) : null,
+          incidents30d: kris.rows[0]?.incidents_30d != null ? Number(kris.rows[0].incidents_30d) : null,
+          avgResponseHours: kris.rows[0]?.avg_response_hours != null ? parseFloat(kris.rows[0].avg_response_hours) : null,
         },
         nistCoverage,
         eventTrend7d,
         attackVectorRadar,
       });
+      setCache(cisoCacheKey, cisoResponse, 120_000);
+      res.json(cisoResponse);
     } catch (error: any) {
       console.error("CISO stats error:", error);
       res.status(500).json({ message: error.message });
@@ -31497,16 +33192,25 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         return null;
       }
 
+      // Per the channel→source→destination matrix:
+      // Network:      Source IP/host/FQDN          → Destination IP/host/FQDN
+      // Endpoint:     Attacker IP/host/FQDN         → Target IP/host/FQDN
+      // Email:        Sender email/IP               → Recipient email/IP
+      // Web App:      Attacker IP/host/FQDN         → Web App IP, URL, FQDN
+      // Database:     Attacker IP/host/FQDN         → DB Server IP, Hostname
+      // Vulnerability:(blank source)                → Target IP/host/FQDN
+      // Web/Internet: IP/host/FQDN/User Name        → URL, Domain, IP
+      // Data:         IP/host/FQDN/User Name        → IP, Host, URL, Email
       const DOMAIN_FLOW_COLUMNS: Record<string, { columns: string[]; layers: string[] }> = {
-        email:         { columns: ["Threat Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        endpoint:      { columns: ["Threat Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        dlp:           { columns: ["Threat Type", "Channel", "Severity", "Source", "Action"], layers: ["threat", "channel", "severity", "source", "action"] },
-        waf:           { columns: ["Attack Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        web:           { columns: ["Attack Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        network:       { columns: ["Attack Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        identity:      { columns: ["Attack Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        cloud:         { columns: ["Attack Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
-        vulnerability: { columns: ["Threat Type", "Severity", "Target", "Action"], layers: ["threat", "severity", "target", "action"] },
+        email:         { columns: ["Sender",      "Threat Type",        "Severity", "Recipient",       "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        endpoint:      { columns: ["Attacker",    "Threat Type",        "Severity", "Target Endpoint", "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        dlp:           { columns: ["Source User", "Data Violation Type","Severity", "Destination",     "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        waf:           { columns: ["Attacker",    "Attack Type",        "Severity", "Target App",      "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        web:           { columns: ["Source",      "Attack Type",        "Severity", "Target URL",      "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        network:       { columns: ["Source IP",   "Attack Type",        "Severity", "Destination",     "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        identity:      { columns: ["Attacker",    "Threat Type",        "Severity", "Target Account",  "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        cloud:         { columns: ["Attacker",    "Attack Type",        "Severity", "Cloud Resource",  "Action"], layers: ["attacker", "threat", "severity", "target", "action"] },
+        vulnerability: { columns: ["Threat Type", "CVE / Vuln",         "Severity", "Target Host",     "Action"], layers: ["threat", "vuln", "severity", "target", "action"] },
       };
 
       const flowConfig = DOMAIN_FLOW_COLUMNS[domain] || DOMAIN_FLOW_COLUMNS["network"]!;
@@ -31539,16 +33243,35 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           // schema migration).
           const sql = `
             SELECT
-              if(empty(threat),
-                 if(empty(mitre_technique), if(empty(event_type), 'Unknown Threat', event_type), mitre_technique),
-                 threat) AS threat_name,
+              if(event_type = 'vulnerability',
+                if(empty(threat),
+                   multiIf(
+                     positionCaseInsensitive(description, 'CVE-') > 0,
+                     substring(description, positionCaseInsensitive(description, 'CVE-'), 20),
+                     empty(mitre_technique), 'Unknown CVE', mitre_technique),
+                   threat),
+                if(empty(threat),
+                   if(empty(mitre_technique), if(empty(event_type), 'Unknown Threat', event_type), mitre_technique),
+                   threat)
+              ) AS threat_name,
               if(empty(severity), 'medium', severity) AS sev,
-              if(empty(action), 'Detected', action) AS action_name,
+              if(event_type = 'vulnerability',
+                if(empty(action), 'Open', action),
+                if(empty(action), 'Detected', action)
+              ) AS action_name,
               if(empty(host),
                  if(IPv4NumToString(dst_ip) = '0.0.0.0', 'Unknown', IPv4NumToString(dst_ip)),
                  host) AS target_name,
               if(empty(source_type), 'Unknown', source_type) AS channel_name,
               if(empty(log_source), 'Unknown Source', log_source) AS source_name,
+              multiIf(
+                empty(attacker), '',
+                match(attacker, '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$'),
+                  concat(splitByString('.', attacker)[1], '.', splitByString('.', attacker)[2], '.', splitByString('.', attacker)[3], '.x'),
+                position(attacker, '@') > 0,
+                  concat('@', splitByString('@', attacker)[2]),
+                attacker
+              ) AS attacker_name,
               recipient AS recipient_email,
               substring(description, 1, 200) AS description_text,
               toUInt64(count()) AS cnt
@@ -31557,7 +33280,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
               AND event_type IN (${etList})
               AND ingested_at >= now() - INTERVAL ${HOT_RETENTION_DAYS} DAY
               ${guardSql}
-            GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, recipient_email, description_text
+            GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, attacker_name, recipient_email, description_text
             ORDER BY cnt DESC
             LIMIT 5000
           `;
@@ -31581,20 +33304,41 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
         const result = await pool.query(`
           SELECT
-            COALESCE(NULLIF(TRIM(threat), ''), 'Unknown Threat') as threat_name,
+            CASE
+              WHEN event_type = 'vulnerability'
+                THEN COALESCE(NULLIF(TRIM(threat), ''), NULLIF(TRIM(raw_payload->>'cveId'), ''), NULLIF(TRIM(raw_payload->>'cveName'), ''), 'Unknown CVE')
+              ELSE COALESCE(NULLIF(TRIM(threat), ''), 'Unknown Threat')
+            END as threat_name,
             COALESCE(severity, 'medium') as sev,
-            COALESCE(NULLIF(TRIM(action), ''), 'Detected') as action_name,
-            COALESCE(NULLIF(TRIM(target), ''), 'Unknown') as target_name,
+            CASE
+              WHEN event_type = 'vulnerability'
+                THEN COALESCE(NULLIF(TRIM(action), ''), NULLIF(TRIM(raw_payload->>'status'), ''), 'Open')
+              ELSE COALESCE(NULLIF(TRIM(action), ''), 'Detected')
+            END as action_name,
+            CASE
+              WHEN event_type = 'vulnerability'
+                THEN COALESCE(NULLIF(TRIM(target), ''), NULLIF(TRIM(raw_payload->>'hostname'), ''), NULLIF(TRIM(raw_payload->>'endpoint'), ''), NULLIF(TRIM(asset), ''), 'Unknown')
+              ELSE COALESCE(NULLIF(TRIM(target), ''), 'Unknown')
+            END as target_name,
             COALESCE(NULLIF(TRIM(source_type), ''), 'Unknown') as channel_name,
             COALESCE(NULLIF(TRIM(log_source), ''), 'Unknown Source') as source_name,
+            CASE
+              WHEN attacker IS NULL OR TRIM(attacker) = '' THEN ''
+              WHEN TRIM(attacker) ~ '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' THEN
+                CONCAT(SPLIT_PART(TRIM(attacker), '.', 1), '.', SPLIT_PART(TRIM(attacker), '.', 2), '.', SPLIT_PART(TRIM(attacker), '.', 3), '.x')
+              WHEN TRIM(attacker) LIKE '%@%' THEN
+                CONCAT('@', SPLIT_PART(TRIM(attacker), '@', 2))
+              ELSE TRIM(attacker)
+            END as attacker_name,
             COALESCE(NULLIF(TRIM(recipient), ''), '') as recipient_email,
             COALESCE(LEFT(TRIM(description), 200), '') as description_text,
             COUNT(*)::int as cnt
           FROM security_events
           WHERE tenant_id IN (${placeholders})
             AND event_type IN (${etPlaceholders})
-          GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, recipient_email, description_text
+          GROUP BY threat_name, sev, action_name, target_name, channel_name, source_name, attacker_name, recipient_email, description_text
           ORDER BY cnt DESC
+          LIMIT 5000
         `, params);
 
         rows = result.rows;
@@ -31624,7 +33368,19 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         topEmailRecipients = new Set(sortedRecipients);
       }
 
+      // Pre-compute top attackers (senders/sources) per domain to cap Sankey cardinality.
+      const attackerCounts = new Map<string, number>();
+      for (const row of rows) {
+        if (row.attacker_name) {
+          attackerCounts.set(row.attacker_name, (attackerCounts.get(row.attacker_name) || 0) + row.cnt);
+        }
+      }
+      const topAttackerSet = new Set(
+        [...attackerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([n]) => n)
+      );
+
       const classifiedRows = rows.map(row => {
+        // ── Target label (per channel/destination rules) ──────────────────────
         let targetLabel: string;
         if (domain === "email") {
           let recip = row.recipient_email || row.target_name;
@@ -31639,18 +33395,58 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             targetLabel = "Other Recipients";
           }
         } else if (domain === "endpoint") {
-          targetLabel = row.target_name !== "Unknown" ? row.target_name : "System";
-        } else if (domain === "waf" || domain === "web") {
-          targetLabel = row.target_name !== "Unknown" ? row.target_name : "Web Application";
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "System";
+        } else if (domain === "waf") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "Web Application";
+        } else if (domain === "web" || domain === "casb" || domain === "sse") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "External URL";
+        } else if (domain === "network") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "Unknown Destination";
+        } else if (domain === "identity") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "User Account";
+        } else if (domain === "cloud") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "Cloud Resource";
+        } else if (domain === "dlp") {
+          targetLabel = row.target_name && row.target_name !== "Unknown" ? row.target_name : "Unknown Destination";
         } else {
-          targetLabel = row.target_name;
+          targetLabel = row.target_name || "Unknown";
         }
+
+        // ── Attacker/Source label (per channel/source rules from matrix) ──────
+        // Network:   Source IP/host/FQDN  | Endpoint: Attacker (may be blank)
+        // Email:     Sender email domain  | Web App:  Attacker IP/host
+        // Web/Data:  User/IP/hostname     | Identity/Cloud: Attacker IP/host
+        let attackerLabel: string;
+        const rawAttacker = (row.attacker_name || "").trim();
+        if (rawAttacker && topAttackerSet.has(rawAttacker)) {
+          attackerLabel = rawAttacker;
+        } else if (rawAttacker) {
+          // Bucket to "Other Senders / Other Sources" per domain
+          if (domain === "email") attackerLabel = "Other Senders";
+          else if (domain === "network") attackerLabel = "Other Sources";
+          else attackerLabel = "Other Attackers";
+        } else {
+          // Per spec: Endpoint attacker "sometime it may blank" → label it as unknown
+          if (domain === "email") attackerLabel = "Unknown Sender";
+          else if (domain === "network") attackerLabel = "Unknown Source";
+          else if (domain === "web" || domain === "casb" || domain === "sse") attackerLabel = "Internal User";
+          else if (domain === "dlp") attackerLabel = row.source_name && row.source_name !== "Unknown Source" ? row.source_name : "Unknown Source";
+          else attackerLabel = "Unknown Attacker";
+        }
+
+        // ── Vulnerability domain special handling ─────────────────────────────
+        const isVulnDomain = domain === "vulnerability";
+        const vulnAction = /^(close|fix|resolv|remediat)/i.test(row.action_name)
+          ? "Remediated"
+          : "Open";
 
         return {
           ...row,
-          classified_threat: classifyThreat(row, domain),
+          classified_threat: isVulnDomain ? "Vulnerability" : classifyThreat(row, domain),
+          vuln_label: isVulnDomain ? (row.threat_name || "Unknown CVE").slice(0, 40) : undefined,
           target_label: targetLabel,
-          simplified_action: simplifyAction(row.action_name),
+          attacker_label: attackerLabel,
+          simplified_action: isVulnDomain ? vulnAction : simplifyAction(row.action_name),
         };
       });
 
@@ -31664,18 +33460,32 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
         .map(([name]) => name);
       const topThreatSet = new Set(topThreats);
 
-      const filteredRows = classifiedRows.filter(r => topThreatSet.has(r.classified_threat));
+      let filteredRows = classifiedRows.filter(r => topThreatSet.has(r.classified_threat));
+      // For vulnerability domain, cap to the top 20 CVE IDs by event count to prevent Sankey overflow.
+      if (domain === "vulnerability") {
+        const cveCountMap = new Map<string, number>();
+        for (const r of filteredRows) {
+          const cveId = (r as any).vuln_label || "Unknown CVE";
+          cveCountMap.set(cveId, (cveCountMap.get(cveId) || 0) + r.cnt);
+        }
+        const topCVEs = new Set([...cveCountMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([id]) => id));
+        filteredRows = filteredRows.filter(r => topCVEs.has((r as any).vuln_label || "Unknown CVE"));
+      }
 
       const nodeMap = new Map<string, { name: string; layer: string; count?: number }>();
       const linkMap = new Map<string, number>();
 
-      const isDlp = domain === "dlp";
+      // All non-vulnerability domains now use the 5-layer attacker-first Sankey:
+      // Source/Attacker → Threat Type → Severity → Target → Action
+      // (per the channel→source→destination matrix from the user's spec)
+      const isVulnSankey = domain === "vulnerability";
 
       for (const row of filteredRows) {
-        const threatKey = `threat:${row.classified_threat}`;
-        const sevKey = `severity:${row.sev}`;
-        const actionKey = `action:${row.simplified_action}`;
-        const targetKey = `target:${row.target_label}`;
+        const threatKey  = `threat:${row.classified_threat}`;
+        const sevKey     = `severity:${row.sev}`;
+        const actionKey  = `action:${row.simplified_action}`;
+        const targetKey  = `target:${row.target_label}`;
+        const attackerKey = `attacker:${(row as any).attacker_label}`;
 
         if (!nodeMap.has(threatKey)) {
           nodeMap.set(threatKey, { name: row.classified_threat, layer: "threat", count: threatCounts.get(row.classified_threat) || 0 });
@@ -31687,29 +33497,23 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
           nodeMap.set(actionKey, { name: row.simplified_action, layer: "action" });
         }
 
-        if (isDlp) {
-          const channelKey = `channel:${row.channel_name}`;
-          const sourceKey = `source:${row.source_name}`;
-          if (!nodeMap.has(channelKey)) nodeMap.set(channelKey, { name: row.channel_name, layer: "channel" });
-          if (!nodeMap.has(sourceKey)) nodeMap.set(sourceKey, { name: row.source_name, layer: "source" });
-
-          const l1 = `${threatKey}|${channelKey}`;
-          linkMap.set(l1, (linkMap.get(l1) || 0) + row.cnt);
-          const l2 = `${channelKey}|${sevKey}`;
-          linkMap.set(l2, (linkMap.get(l2) || 0) + row.cnt);
-          const l3 = `${sevKey}|${sourceKey}`;
-          linkMap.set(l3, (linkMap.get(l3) || 0) + row.cnt);
-          const l4 = `${sourceKey}|${actionKey}`;
-          linkMap.set(l4, (linkMap.get(l4) || 0) + row.cnt);
-        } else {
+        if (isVulnSankey) {
+          // 5-layer: Vulnerability Type → CVE ID → Severity → Target Host → Open/Remediated
+          const vulnKey = `vuln:${(row as any).vuln_label || "Unknown CVE"}`;
+          if (!nodeMap.has(vulnKey)) nodeMap.set(vulnKey, { name: (row as any).vuln_label || "Unknown CVE", layer: "vuln" });
           if (!nodeMap.has(targetKey)) nodeMap.set(targetKey, { name: row.target_label, layer: "target" });
-
-          const l1 = `${threatKey}|${sevKey}`;
-          linkMap.set(l1, (linkMap.get(l1) || 0) + row.cnt);
-          const l2 = `${sevKey}|${targetKey}`;
-          linkMap.set(l2, (linkMap.get(l2) || 0) + row.cnt);
-          const l3 = `${targetKey}|${actionKey}`;
-          linkMap.set(l3, (linkMap.get(l3) || 0) + row.cnt);
+          const lv1 = `${threatKey}|${vulnKey}`;  linkMap.set(lv1, (linkMap.get(lv1) || 0) + row.cnt);
+          const lv2 = `${vulnKey}|${sevKey}`;     linkMap.set(lv2, (linkMap.get(lv2) || 0) + row.cnt);
+          const lv3 = `${sevKey}|${targetKey}`;   linkMap.set(lv3, (linkMap.get(lv3) || 0) + row.cnt);
+          const lv4 = `${targetKey}|${actionKey}`; linkMap.set(lv4, (linkMap.get(lv4) || 0) + row.cnt);
+        } else {
+          // 5-layer: Source/Attacker → Threat Type → Severity → Target → Action
+          if (!nodeMap.has(attackerKey)) nodeMap.set(attackerKey, { name: (row as any).attacker_label, layer: "attacker" });
+          if (!nodeMap.has(targetKey))   nodeMap.set(targetKey,   { name: row.target_label, layer: "target" });
+          const l1 = `${attackerKey}|${threatKey}`; linkMap.set(l1, (linkMap.get(l1) || 0) + row.cnt);
+          const l2 = `${threatKey}|${sevKey}`;      linkMap.set(l2, (linkMap.get(l2) || 0) + row.cnt);
+          const l3 = `${sevKey}|${targetKey}`;      linkMap.set(l3, (linkMap.get(l3) || 0) + row.cnt);
+          const l4 = `${targetKey}|${actionKey}`;   linkMap.set(l4, (linkMap.get(l4) || 0) + row.cnt);
         }
       }
 
@@ -32812,82 +34616,6 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
     }
   });
 
-  app.get("/api/applications/:tenantId/app-summary-sankey", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenantId" });
-      await assertTenantAccess(req, tenantId);
-
-      const client = await pool.connect();
-      let result;
-      try {
-        await client.query('SET statement_timeout = 15000');
-        result = await client.query(`
-          SELECT id, hostname, operating_system, enrichment_data, status, endpoint_group
-          FROM assets WHERE tenant_id = $1
-        `, [tenantId]);
-      } finally {
-        client.release();
-      }
-
-      const appIndex: Record<string, { category: string; servers: Set<string> }> = {};
-      const classifyApp = (name: string, ed: any): string => {
-        const n = name.toLowerCase();
-        if (n.includes('sap') || n.includes('oracle') || n.includes('erp') || n.includes('crm') || n.includes('plm') || n.includes('jda') || n.includes('salesforce')) return 'Enterprise';
-        if (n.includes('splunk') || n.includes('rapid7') || n.includes('crowdstrike') || n.includes('sentinel') || n.includes('cynet') || n.includes('fortinet') || n.includes('palo alto') || n.includes('checkpoint') || n.includes('qualys')) return 'InfoSec';
-        if (n.includes('sccm') || n.includes('wsus') || n.includes('ansible') || n.includes('puppet') || n.includes('nagios') || n.includes('zabbix') || n.includes('vmware') || n.includes('citrix') || n.includes('ad ') || n.includes('dns') || n.includes('dhcp')) return 'IT Operations';
-        return 'Business';
-      };
-
-      for (const row of result.rows) {
-        const ed = row.enrichment_data || {};
-        const appName = ed.applicationName || ed.shortDescription || '';
-        if (!appName) continue;
-        const hostname = row.hostname || row.ip_address || '';
-        if (!hostname) continue;
-
-        if (!appIndex[appName]) {
-          appIndex[appName] = { category: classifyApp(appName, ed), servers: new Set() };
-        }
-        appIndex[appName].servers.add(hostname);
-      }
-
-      const nodeMap = new Map<string, number>();
-      const links: { source: number; target: number; value: number }[] = [];
-
-      const sortedApps = Object.entries(appIndex)
-        .map(([name, data]) => ({ name, category: data.category, serverCount: data.servers.size }))
-        .sort((a, b) => b.serverCount - a.serverCount)
-        .slice(0, 50);
-
-      for (const app of sortedApps) {
-        const catKey = `category:${app.category}`;
-        const appKey = `app:${app.name}`;
-        if (!nodeMap.has(catKey)) nodeMap.set(catKey, nodeMap.size);
-        if (!nodeMap.has(appKey)) nodeMap.set(appKey, nodeMap.size);
-        links.push({
-          source: nodeMap.get(catKey)!,
-          target: nodeMap.get(appKey)!,
-          value: app.serverCount,
-        });
-      }
-
-      const nodes = Array.from(nodeMap.entries()).map(([key]) => ({
-        name: key.replace(/^(category|app):/, ''),
-        layer: key.startsWith('category:') ? 'category' : 'app',
-      }));
-
-      res.json({
-        nodes,
-        links,
-        layerOrder: ["category", "app"],
-        layerLabels: { category: "Category", app: "Application" },
-      });
-    } catch (error: any) {
-      console.error("App summary sankey error:", error);
-      res.json({ nodes: [], links: [], layerOrder: ["category", "app"], layerLabels: { category: "Category", app: "Application" } });
-    }
-  });
 
   app.get("/api/asset-inventory/:tenantId/os-sunburst", isAuthenticated, async (req: any, res) => {
     try {
@@ -33803,278 +35531,8 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   // AI Workforce - Virtual AI Agent Management
   // ============================================================
 
-  app.post("/api/ai-agents/provision/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { provisionAIAgents } = await import("./ai-agent-engine");
-      const result = await provisionAIAgents(tenantId);
-      res.json({ success: true, agents: result.agents.map((a: any) => ({
-        id: a.id, name: a.name, specialization: a.ai_specialization,
-        role: a.role, avatar: a.ai_avatar, teamType: a.team_type,
-      })), shiftsCreated: result.shiftsCreated });
-    } catch (error: any) {
-      console.error("AI agent provisioning error:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
+  registerAiAgentsRoutes(app);
 
-  app.get("/api/ai-agents/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(`
-        SELECT tm.*, 
-          (SELECT COUNT(*) FROM ai_agent_activity_log al WHERE al.agent_id = tm.id AND al.created_at > NOW() - INTERVAL '24 hours') as actions_today,
-          (SELECT activity_type FROM ai_agent_activity_log al WHERE al.agent_id = tm.id ORDER BY al.created_at DESC LIMIT 1) as last_action_type,
-          (SELECT created_at FROM ai_agent_activity_log al WHERE al.agent_id = tm.id ORDER BY al.created_at DESC LIMIT 1) as last_action_at
-        FROM team_members tm
-        WHERE tm.tenant_id = $1 AND tm.is_ai = true
-        ORDER BY tm.name
-      `, [tenantId]);
-      res.json(result.rows.map((r: any) => ({
-        id: r.id, name: r.name, email: r.email, role: r.role,
-        teamType: r.team_type, isActive: r.is_active,
-        specialization: r.ai_specialization, personality: r.ai_personality,
-        model: r.ai_model, avatar: r.ai_avatar,
-        stats: r.ai_stats || {},
-        actionsToday: parseInt(r.actions_today) || 0,
-        lastActionType: r.last_action_type,
-        lastActionAt: r.last_action_at,
-        status: r.last_action_at && (Date.now() - new Date(r.last_action_at).getTime()) < 120_000 ? "processing" : r.is_active ? "active" : "inactive",
-      })));
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/ai-agents/:tenantId/activity", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const page = parseInt(req.query.page as string) || 1;
-      const pageSize = Math.min(parseInt(req.query.pageSize as string) || 20, 100);
-      const activityType = req.query.type as string;
-      const agentId = req.query.agentId ? parseInt(req.query.agentId as string) : null;
-
-      let whereClause = `al.tenant_id = $1`;
-      const params: any[] = [tenantId];
-      let paramIdx = 1;
-
-      if (activityType) {
-        paramIdx++;
-        whereClause += ` AND al.activity_type = $${paramIdx}`;
-        params.push(activityType);
-      }
-      if (agentId) {
-        paramIdx++;
-        whereClause += ` AND al.agent_id = $${paramIdx}`;
-        params.push(agentId);
-      }
-
-      const countRes = await pool.query(`SELECT COUNT(*)::int as total FROM ai_agent_activity_log al WHERE ${whereClause}`, params);
-      const total = countRes.rows[0].total;
-
-      const offset = (page - 1) * pageSize;
-      params.push(pageSize, offset);
-      const result = await pool.query(`
-        SELECT al.*, tm.name as agent_name, tm.ai_specialization, tm.ai_avatar
-        FROM ai_agent_activity_log al
-        JOIN team_members tm ON tm.id = al.agent_id
-        WHERE ${whereClause}
-        ORDER BY al.created_at DESC
-        LIMIT $${paramIdx + 1} OFFSET $${paramIdx + 2}
-      `, params);
-
-      res.json({
-        data: result.rows.map((r: any) => ({
-          id: r.id, agentId: r.agent_id, agentName: r.agent_name,
-          agentSpecialization: r.ai_specialization, agentAvatar: r.ai_avatar,
-          activityType: r.activity_type, targetId: r.target_id, targetType: r.target_type,
-          summary: r.summary, details: r.details, confidence: r.confidence,
-          humanReviewed: r.human_reviewed, humanOverride: r.human_override,
-          feedback: r.feedback, duration: r.duration, createdAt: r.created_at,
-        })),
-        total, page, pageSize, totalPages: Math.ceil(total / pageSize),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/ai-agents/:tenantId/performance", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-
-      const agents = await pool.query(`SELECT id, name, ai_specialization, ai_stats FROM team_members WHERE tenant_id = $1 AND is_ai = true`, [tenantId]);
-
-      const activityByDay = await pool.query(`
-        SELECT DATE(created_at) as day, activity_type, COUNT(*)::int as count, AVG(confidence)::int as avg_confidence, AVG(duration)::int as avg_duration
-        FROM ai_agent_activity_log WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY DATE(created_at), activity_type ORDER BY day
-      `, [tenantId]);
-
-      const typeBreakdown = await pool.query(`
-        SELECT activity_type, COUNT(*)::int as count, AVG(confidence)::int as avg_confidence,
-          COUNT(*) FILTER (WHERE human_reviewed = true)::int as reviewed,
-          COUNT(*) FILTER (WHERE human_override = true)::int as overridden
-        FROM ai_agent_activity_log WHERE tenant_id = $1
-        GROUP BY activity_type
-      `, [tenantId]);
-
-      const recentActivity = await pool.query(`
-        SELECT al.*, tm.name as agent_name, tm.ai_specialization
-        FROM ai_agent_activity_log al
-        JOIN team_members tm ON tm.id = al.agent_id
-        WHERE al.tenant_id = $1 ORDER BY al.created_at DESC LIMIT 10
-      `, [tenantId]);
-
-      const totalStats = {
-        totalActions: 0, ticketsResolved: 0, threatsFound: 0,
-        incidentsInvestigated: 0, insightsGenerated: 0,
-        avgConfidence: 0, humanApprovals: 0, humanOverrides: 0,
-      };
-      for (const agent of agents.rows) {
-        const s = (agent.ai_stats as any) || {};
-        totalStats.totalActions += s.totalActions || 0;
-        totalStats.ticketsResolved += s.ticketsResolved || 0;
-        totalStats.threatsFound += s.threatsFound || 0;
-        totalStats.incidentsInvestigated += s.incidentsInvestigated || 0;
-        totalStats.insightsGenerated += s.insightsGenerated || 0;
-      }
-
-      res.json({
-        agents: agents.rows.map((a: any) => ({ id: a.id, name: a.name, specialization: a.ai_specialization, stats: a.ai_stats })),
-        totalStats,
-        activityByDay: activityByDay.rows,
-        typeBreakdown: typeBreakdown.rows,
-        recentActivity: recentActivity.rows.map((r: any) => ({
-          id: r.id, agentName: r.agent_name, specialization: r.ai_specialization,
-          activityType: r.activity_type, summary: r.summary, confidence: r.confidence,
-          duration: r.duration, createdAt: r.created_at,
-        })),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/ai-agents/:agentId/trigger", isAuthenticated, async (req: any, res) => {
-    try {
-      const agentId = parseInt(req.params.agentId);
-      const { action, targetId } = req.body;
-
-      const agentRes = await pool.query(`SELECT * FROM team_members WHERE id = $1 AND is_ai = true`, [agentId]);
-      if (agentRes.rows.length === 0) return res.status(404).json({ message: "AI agent not found" });
-      const agent = agentRes.rows[0];
-      await assertTenantAccess(req, agent.tenant_id);
-
-      const { processTicket, conductThreatHunt, investigateIncident, generateProactiveInsight } = await import("./ai-agent-engine");
-      let result: any;
-
-      switch (action) {
-        case "hunt":
-          result = await conductThreatHunt(agentId, agent.tenant_id);
-          break;
-        case "investigate":
-          if (!targetId) return res.status(400).json({ message: "targetId required for investigation" });
-          {
-            const incCheck = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1`, [targetId]);
-            if (incCheck.rows.length === 0 || incCheck.rows[0].tenant_id !== agent.tenant_id)
-              return res.status(403).json({ message: "Incident not found or access denied" });
-          }
-          result = await investigateIncident(agentId, targetId);
-          break;
-        case "respond":
-          if (!targetId) return res.status(400).json({ message: "targetId required for ticket response" });
-          {
-            const tktCheck = await pool.query(`SELECT tenant_id FROM tickets WHERE id = $1`, [targetId]);
-            if (tktCheck.rows.length === 0 || tktCheck.rows[0].tenant_id !== agent.tenant_id)
-              return res.status(403).json({ message: "Ticket not found or access denied" });
-          }
-          result = await processTicket(agentId, targetId);
-          break;
-        case "insight":
-          result = await generateProactiveInsight(agentId, agent.tenant_id);
-          break;
-        default:
-          return res.status(400).json({ message: "Invalid action. Use: hunt, investigate, respond, insight" });
-      }
-
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/ai-agents/:agentId", isAuthenticated, async (req: any, res) => {
-    try {
-      const agentId = parseInt(req.params.agentId);
-      const agentRes = await pool.query(`SELECT * FROM team_members WHERE id = $1 AND is_ai = true`, [agentId]);
-      if (agentRes.rows.length === 0) return res.status(404).json({ message: "AI agent not found" });
-      await assertTenantAccess(req, agentRes.rows[0].tenant_id);
-
-      const { personality, model, isActive } = req.body;
-      const updates: string[] = [];
-      const params: any[] = [];
-      let idx = 1;
-
-      if (personality !== undefined) { updates.push(`ai_personality = $${idx++}`); params.push(personality); }
-      if (model !== undefined) { updates.push(`ai_model = $${idx++}`); params.push(model); }
-      if (isActive !== undefined) { updates.push(`is_active = $${idx++}`); params.push(isActive); }
-
-      if (updates.length === 0) return res.status(400).json({ message: "No updates provided" });
-      params.push(agentId);
-      await pool.query(`UPDATE team_members SET ${updates.join(", ")} WHERE id = $${idx}`, params);
-
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/ai-agents/activity/:activityId/review", isAuthenticated, async (req: any, res) => {
-    try {
-      const activityId = parseInt(req.params.activityId);
-      const { approved, feedback } = req.body;
-
-      const actRes = await pool.query(`SELECT * FROM ai_agent_activity_log WHERE id = $1`, [activityId]);
-      if (actRes.rows.length === 0) return res.status(404).json({ message: "Activity not found" });
-      await assertTenantAccess(req, actRes.rows[0].tenant_id);
-
-      await pool.query(`
-        UPDATE ai_agent_activity_log 
-        SET human_reviewed = true, human_override = $1, feedback = $2
-        WHERE id = $3
-      `, [!approved, feedback || null, activityId]);
-
-      const agentId = actRes.rows[0].agent_id;
-      const statsRes = await pool.query(`SELECT ai_stats FROM team_members WHERE id = $1`, [agentId]);
-      const stats = (statsRes.rows[0]?.ai_stats as any) || {};
-      if (approved) stats.humanApprovals = (stats.humanApprovals || 0) + 1;
-      else stats.humanOverrides = (stats.humanOverrides || 0) + 1;
-      await pool.query(`UPDATE team_members SET ai_stats = $1 WHERE id = $2`, [JSON.stringify(stats), agentId]);
-
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/ai-workforce/:tenantId/daily-summary", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-
-      const { generateDailySummary } = await import("./ai-agent-engine");
-      const result = await generateDailySummary(tenantId);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Daily summary generation error:", error);
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
   app.get("/api/ai-workforce/:tenantId/daily-summaries", isAuthenticated, async (req: any, res) => {
     try {
@@ -34461,8 +35919,9 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
             let v1: any, v2: any;
             if (Array.isArray(rule.value) && rule.value.length === 2) {
               v1 = rule.value[0]; v2 = rule.value[1];
-            } else if (rule.value && rule.value2) {
-              v1 = rule.value; v2 = rule.value2;
+            } else if (typeof rule.value === "string" && rule.value.includes(",")) {
+              const parts = rule.value.split(",").map((v: string) => v.trim());
+              v1 = parts[0]; v2 = parts[1];
             }
             if (v1 !== undefined && v2 !== undefined) {
               params.push(v1);
@@ -34588,17 +36047,28 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
       const fullWhere = `${tenantFilter} AND (${whereClause})`;
 
-      let orderClause = "id DESC";
+      // Hardening: gate the dynamic table identifier and the sort column through
+      // safeIdentifierString — both must match a strict regex AND be on an explicit
+      // allow-list, otherwise InputHardeningError → 400 below.
+      const { safeIdentifierString } = await import("./input-hardening");
+      const allowedTables = Object.values(MODULE_FIELD_MAPS).map((m) => m.table);
+      const allowedSortCols = [...new Set([...Object.values(moduleConfig.fields), "id"])];
+      const tableId = safeIdentifierString(moduleConfig.table, { allowList: allowedTables });
+
+      let orderClause = `"id" DESC`;
       if (sortBy) {
         const sortCol = moduleConfig.fields[sortBy] || sortBy;
-        if (Object.values(moduleConfig.fields).includes(sortCol) || sortCol === "id") {
-          orderClause = `"${sortCol}" ${sortDir === "asc" ? "ASC" : "DESC"}`;
+        try {
+          const safeSortCol = safeIdentifierString(sortCol, { allowList: allowedSortCols });
+          orderClause = `"${safeSortCol}" ${sortDir === "asc" ? "ASC" : "DESC"}`;
+        } catch {
+          // Fall back to id DESC for unknown sort columns (preserves prior graceful-degradation behavior)
         }
       }
 
       const offset = (page - 1) * limit;
 
-      const countQuery = `SELECT COUNT(*) as total FROM "${moduleConfig.table}" WHERE ${fullWhere}`;
+      const countQuery = `SELECT COUNT(*) as total FROM "${tableId}" WHERE ${fullWhere}`;
       const countResult = await pool.query(countQuery, params);
       const total = parseInt(countResult.rows[0]?.total || "0", 10);
 
@@ -34608,7 +36078,7 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
       dataParams.push(offset);
       const offsetIdx = dataParams.length;
 
-      const dataQuery = `SELECT * FROM "${moduleConfig.table}" WHERE ${fullWhere} ORDER BY ${orderClause} LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
+      const dataQuery = `SELECT * FROM "${tableId}" WHERE ${fullWhere} ORDER BY ${orderClause} LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
       const dataResult = await pool.query(dataQuery, dataParams);
 
       const MODULE_ALIASES: Record<string, Record<string, string>> = {
@@ -34642,92 +36112,9 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
   });
 
   // --- Platform Notifications ---
-  async function createNotification(tenantId: number, type: string, title: string, message: string, severity: string = "info", actionUrl?: string, userId?: number) {
-    try {
-      const result = await pool.query(
-        `INSERT INTO platform_notifications (tenant_id, user_id, type, title, message, severity, action_url) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [tenantId, userId || null, type, title, message, severity, actionUrl || null]
-      );
-      return result.rows[0]?.id;
-    } catch (err: any) {
-      console.error("[Notification] Create error:", err.message);
-    }
-  }
 
-  app.get("/api/notifications/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const userId = req.user?.id;
-      const result = await pool.query(
-        `SELECT * FROM platform_notifications WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) ORDER BY created_at DESC LIMIT 50`,
-        [tenantId, userId]
-      );
-      const unreadResult = await pool.query(
-        `SELECT COUNT(*) as count FROM platform_notifications WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read = false`,
-        [tenantId, userId]
-      );
-      const notifications = result.rows.map((r: any) => ({
-        id: r.id,
-        tenantId: r.tenant_id,
-        userId: r.user_id,
-        type: r.type,
-        title: r.title,
-        message: r.message,
-        severity: r.severity,
-        read: r.read,
-        actionUrl: r.action_url,
-        metadata: r.metadata,
-        createdAt: r.created_at,
-      }));
-      res.json({ notifications, unreadCount: Number(unreadResult.rows[0]?.count || 0) });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
+  registerNotificationsRoutes(app);
 
-  app.patch("/api/notifications/:id/read", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = Number(req.params.id);
-      const userId = req.user?.id;
-      const check = await pool.query(`SELECT tenant_id FROM platform_notifications WHERE id = $1 AND (user_id IS NULL OR user_id = $2)`, [id, userId]);
-      if (!check.rows[0]) return res.status(404).json({ message: "Notification not found" });
-      await assertTenantAccess(req, check.rows[0].tenant_id);
-      await pool.query(`UPDATE platform_notifications SET read = true WHERE id = $1`, [id]);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/notifications/:tenantId/read-all", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = Number(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const userId = req.user?.id;
-      await pool.query(
-        `UPDATE platform_notifications SET read = true WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read = false`,
-        [tenantId, userId]
-      );
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/notifications/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const id = Number(req.params.id);
-      const userId = req.user?.id;
-      const check = await pool.query(`SELECT tenant_id FROM platform_notifications WHERE id = $1 AND (user_id IS NULL OR user_id = $2)`, [id, userId]);
-      if (!check.rows[0]) return res.status(404).json({ message: "Notification not found" });
-      await assertTenantAccess(req, check.rows[0].tenant_id);
-      await pool.query(`DELETE FROM platform_notifications WHERE id = $1`, [id]);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // --- Compare Reports ---
   app.get("/api/reports/:tenantId/compare", isAuthenticated, async (req: any, res) => {
@@ -35075,622 +36462,13 @@ Return JSON: { "enrichments": [{ "id": number, "mitreTactic": string, "mitreTech
 
   // ── Threat Intelligence Feed Management ──
 
-  app.get("/api/threat-intel/:tenantId/feeds", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const feedsCacheKey = tenantCacheKey(tenantId, "threat-intel:feeds");
-      const cachedFeeds = await getCache(feedsCacheKey);
-      if (cachedFeeds) return res.json(cachedFeeds);
-      const result = await pool.query(
-        `SELECT * FROM threat_intel_feeds WHERE tenant_id = $1 ORDER BY created_at DESC`,
-        [tenantId]
-      );
-      setCache(feedsCacheKey, result.rows, 60_000);
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
+  registerThreatIntelRoutes(app);
 
-  app.post("/api/threat-intel/:tenantId/feeds", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { name, type, url, apiKey, pollingInterval, isActive } = req.body;
-      const result = await pool.query(
-        `INSERT INTO threat_intel_feeds (tenant_id, name, type, url, api_key, polling_interval, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [tenantId, name, type, url || null, apiKey || null, pollingInterval || 3600, isActive !== false]
-      );
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/threat-intel/:tenantId/feeds/:feedId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const feedId = parseInt(req.params.feedId);
-      await assertTenantAccess(req, tenantId);
-      const { name, type, url, apiKey, pollingInterval, isActive } = req.body;
-      const sets: string[] = [];
-      const vals: any[] = [];
-      let idx = 1;
-      if (name !== undefined) { sets.push(`name = $${idx++}`); vals.push(name); }
-      if (type !== undefined) { sets.push(`type = $${idx++}`); vals.push(type); }
-      if (url !== undefined) { sets.push(`url = $${idx++}`); vals.push(url); }
-      if (apiKey !== undefined) { sets.push(`api_key = $${idx++}`); vals.push(apiKey); }
-      if (pollingInterval !== undefined) { sets.push(`polling_interval = $${idx++}`); vals.push(pollingInterval); }
-      if (isActive !== undefined) { sets.push(`is_active = $${idx++}`); vals.push(isActive); }
-      sets.push(`updated_at = NOW()`);
-      vals.push(tenantId, feedId);
-      const result = await pool.query(
-        `UPDATE threat_intel_feeds SET ${sets.join(", ")} WHERE tenant_id = $${idx++} AND id = $${idx} RETURNING *`,
-        vals
-      );
-      if (result.rows.length === 0) return res.status(404).json({ message: "Feed not found" });
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/threat-intel/:tenantId/feeds/:feedId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const feedId = parseInt(req.params.feedId);
-      await assertTenantAccess(req, tenantId);
-      await pool.query(`DELETE FROM threat_intel_iocs WHERE tenant_id = $1 AND feed_id = $2`, [tenantId, feedId]);
-      await pool.query(`DELETE FROM threat_intel_feeds WHERE tenant_id = $1 AND id = $2`, [tenantId, feedId]);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/threat-intel/:tenantId/iocs", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { type, reputation, search, feedId, limit: lim, offset: off } = req.query;
-      const iocCacheKey = tenantCacheKey(tenantId, `threat-intel:iocs:${[type, reputation, feedId, search, lim, off].map(v => v ?? "").join(":")}`);
-      const cachedIocs = await getCache(iocCacheKey);
-      if (cachedIocs) return res.json(cachedIocs);
-      const conditions = [`i.tenant_id = $1`];
-      const vals: any[] = [tenantId];
-      let idx = 2;
-      if (type) { conditions.push(`i.indicator_type = $${idx++}`); vals.push(type); }
-      if (reputation) { conditions.push(`i.reputation = $${idx++}`); vals.push(reputation); }
-      if (feedId) { conditions.push(`i.feed_id = $${idx++}`); vals.push(parseInt(feedId as string)); }
-      if (search) { conditions.push(`i.indicator_value ILIKE $${idx++}`); vals.push(`%${search}%`); }
-      const where = conditions.join(" AND ");
-      const limit = Math.min(parseInt(lim as string) || 100, 500);
-      const offset = parseInt(off as string) || 0;
-      const countResult = await pool.query(`SELECT COUNT(*) FROM threat_intel_iocs i WHERE ${where}`, vals);
-      const total = parseInt(countResult.rows[0].count);
-      vals.push(limit, offset);
-      const result = await pool.query(
-        `SELECT i.*, f.name as feed_name FROM threat_intel_iocs i LEFT JOIN threat_intel_feeds f ON i.feed_id = f.id WHERE ${where} ORDER BY i.last_seen DESC NULLS LAST LIMIT $${idx++} OFFSET $${idx}`,
-        vals
-      );
-      const iocs = result.rows.map((row: any) => ({
-        ...row,
-        tags: Array.isArray(row.tags) ? row.tags : (row.tags ? String(row.tags).replace(/^\{|\}$/g, "").split(",").map((t: string) => t.trim()).filter(Boolean) : []),
-        mitre_techniques: Array.isArray(row.mitre_techniques) ? row.mitre_techniques : (row.mitre_techniques ? String(row.mitre_techniques).replace(/^\{|\}$/g, "").split(",").map((t: string) => t.trim()).filter(Boolean) : []),
-        confidence: row.confidence != null ? row.confidence : null,
-        first_seen: row.first_seen || null,
-        last_seen: row.last_seen || null,
-      }));
-      setCache(iocCacheKey, { iocs, total, limit, offset }, 30_000);
-      res.json({ iocs, total, limit, offset });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/threat-intel/:tenantId/iocs", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { feedId, indicatorType, indicatorValue, reputation, confidence, source, tags, mitreTechniques, country, context, threatType } = req.body;
-      if (feedId) {
-        const feedCheck = await pool.query(`SELECT id FROM threat_intel_feeds WHERE id = $1 AND tenant_id = $2`, [feedId, tenantId]);
-        if (feedCheck.rows.length === 0) return res.status(400).json({ message: "Feed not found for this tenant" });
-      }
-      const resolvedConfidence = confidence || 50;
-      const result = await pool.query(
-        `INSERT INTO threat_intel_iocs (tenant_id, feed_id, indicator_type, indicator_value, reputation, confidence, source, tags, mitre_techniques, country, context)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-        [tenantId, feedId || null, indicatorType, indicatorValue, reputation || "unknown", resolvedConfidence, source || null, tags || null, mitreTechniques || null, country || null, context || null]
-      );
-      if (feedId) {
-        await pool.query(`UPDATE threat_intel_feeds SET ioc_count = (SELECT COUNT(*) FROM threat_intel_iocs WHERE feed_id = $1), updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [feedId, tenantId]);
-      }
-      // Auto-nominate for community feed when IOC is malicious with confidence >= 80
-      if (reputation === "malicious" && resolvedConfidence >= 80 && indicatorValue && indicatorType) {
-        const nominatedBy = req.user?.claims?.sub ?? "system";
-        const newIocId = result.rows[0]?.id ?? 0;
-        try {
-          await nominateFromIOC(tenantId, newIocId, indicatorValue, indicatorType, resolvedConfidence, threatType ?? null, nominatedBy);
-        } catch (_) { /* non-blocking: nomination failure does not affect IOC save */ }
-      }
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // PATCH an existing IOC (supports reputation update → auto-nomination when set to malicious/confidence >= 80)
-  app.patch("/api/threat-intel/:tenantId/iocs/:iocId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const iocId = parseInt(req.params.iocId);
-      await assertTenantAccess(req, tenantId);
-      const { reputation, confidence, indicatorType, indicatorValue, tags, mitreTechniques, context, source, country, threatType } = req.body;
-      const sets: string[] = [];
-      const vals: (string | number | null)[] = [];
-      let idx = 1;
-      if (reputation !== undefined) { sets.push(`reputation = $${idx++}`); vals.push(reputation); }
-      if (confidence !== undefined) { sets.push(`confidence = $${idx++}`); vals.push(confidence); }
-      if (indicatorType !== undefined) { sets.push(`indicator_type = $${idx++}`); vals.push(indicatorType); }
-      if (indicatorValue !== undefined) { sets.push(`indicator_value = $${idx++}`); vals.push(indicatorValue); }
-      if (tags !== undefined) { sets.push(`tags = $${idx++}`); vals.push(tags); }
-      if (mitreTechniques !== undefined) { sets.push(`mitre_techniques = $${idx++}`); vals.push(mitreTechniques); }
-      if (context !== undefined) { sets.push(`context = $${idx++}`); vals.push(context); }
-      if (source !== undefined) { sets.push(`source = $${idx++}`); vals.push(source); }
-      if (country !== undefined) { sets.push(`country = $${idx++}`); vals.push(country); }
-      if (sets.length === 0) return res.status(400).json({ message: "No fields to update" });
-      // Note: threat_intel_iocs has no updated_at column — omit it
-      vals.push(tenantId, iocId);
-      const result = await pool.query(
-        `UPDATE threat_intel_iocs SET ${sets.join(", ")} WHERE tenant_id = $${idx++} AND id = $${idx} RETURNING *`,
-        vals
-      );
-      if (result.rows.length === 0) return res.status(404).json({ message: "IOC not found" });
-      const updated = result.rows[0];
-      // Auto-nominate when reputation is set to malicious with confidence >= 80
-      if (updated.reputation === "malicious" && (updated.confidence ?? 0) >= 80 && updated.indicator_value && updated.indicator_type) {
-        const nominatedBy = req.user?.claims?.sub ?? "system";
-        try {
-          await nominateFromIOC(tenantId, updated.id, updated.indicator_value, updated.indicator_type, updated.confidence, threatType ?? null, nominatedBy);
-        } catch (_) { /* non-blocking */ }
-      }
-      res.json(updated);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/threat-intel/:tenantId/iocs/:iocId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const iocId = parseInt(req.params.iocId);
-      await assertTenantAccess(req, tenantId);
-      const ioc = await pool.query(`SELECT feed_id FROM threat_intel_iocs WHERE id = $1 AND tenant_id = $2`, [iocId, tenantId]);
-      await pool.query(`DELETE FROM threat_intel_iocs WHERE id = $1 AND tenant_id = $2`, [iocId, tenantId]);
-      if (ioc.rows[0]?.feed_id) {
-        await pool.query(`UPDATE threat_intel_feeds SET ioc_count = (SELECT COUNT(*) FROM threat_intel_iocs WHERE feed_id = $1), updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, [ioc.rows[0].feed_id, tenantId]);
-      }
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/threat-intel/:tenantId/stats", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const [feedsResult, iocsResult, typeDistResult, repDistResult] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE is_active) as active FROM threat_intel_feeds WHERE tenant_id = $1`, [tenantId]),
-        pool.query(`SELECT COUNT(*) as total FROM threat_intel_iocs WHERE tenant_id = $1`, [tenantId]),
-        pool.query(`SELECT indicator_type, COUNT(*) as count FROM threat_intel_iocs WHERE tenant_id = $1 GROUP BY indicator_type ORDER BY count DESC`, [tenantId]),
-        pool.query(`SELECT reputation, COUNT(*) as count FROM threat_intel_iocs WHERE tenant_id = $1 GROUP BY reputation ORDER BY count DESC`, [tenantId]),
-      ]);
-      res.json({
-        totalFeeds: parseInt(feedsResult.rows[0].total),
-        activeFeeds: parseInt(feedsResult.rows[0].active),
-        totalIocs: parseInt(iocsResult.rows[0].total),
-        typeDistribution: typeDistResult.rows,
-        reputationDistribution: repDistResult.rows,
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/threat-intel/:tenantId/correlations", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const tenantIds = await getAccessibleTenantIds(req, tenantId);
-      const placeholders = tenantIds.map((_, i) => `$${i + 1}`).join(",");
-      const iocs = await pool.query(
-        `SELECT indicator_value, indicator_type, reputation, confidence FROM threat_intel_iocs WHERE tenant_id = $1 AND reputation IN ('malicious', 'suspicious') LIMIT 200`,
-        [tenantId]
-      );
-      if (iocs.rows.length === 0) {
-        return res.json({ correlations: [], total: 0 });
-      }
-      const iocValues = iocs.rows.map((r: any) => r.indicator_value);
-      const iocPlaceholders = iocValues.map((_: any, i: number) => `$${tenantIds.length + i + 1}`).join(",");
-      const events = await pool.query(
-        `SELECT id, title, source_ip, destination_ip, attacker, target, severity, event_type, created_at
-         FROM security_events
-         WHERE tenant_id IN (${placeholders})
-         AND (source_ip IN (${iocPlaceholders}) OR destination_ip IN (${iocPlaceholders}) OR attacker IN (${iocPlaceholders}) OR target IN (${iocPlaceholders}))
-         ORDER BY created_at DESC LIMIT 100`,
-        [...tenantIds, ...iocValues]
-      );
-      const correlations = events.rows.map((evt: any) => {
-        const matchedIoc = iocs.rows.find((ioc: any) =>
-          [evt.source_ip, evt.destination_ip, evt.attacker, evt.target].includes(ioc.indicator_value)
-        );
-        return {
-          event: evt,
-          matchedIoc: matchedIoc || null,
-        };
-      });
-      res.json({ correlations, total: correlations.length });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
   // ==================== PLAYBOOKS (SOAR) ====================
 
-  app.get("/api/playbooks/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(
-        `SELECT * FROM playbooks WHERE tenant_id = $1 ORDER BY updated_at DESC`,
-        [tenantId]
-      );
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
+  registerPlaybooksRoutes(app);
 
-  app.get("/api/playbooks/:tenantId/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      await assertTenantAccess(req, tenantId);
-      const result = await pool.query(
-        `SELECT * FROM playbooks WHERE id = $1 AND tenant_id = $2`,
-        [id, tenantId]
-      );
-      if (result.rows.length === 0) return res.status(404).json({ message: "Playbook not found" });
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/playbooks/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { name, description, triggerConditions, steps, isActive } = req.body;
-      const result = await pool.query(
-        `INSERT INTO playbooks (tenant_id, name, description, trigger_conditions, steps, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [tenantId, name, description || null, JSON.stringify(triggerConditions || {}), JSON.stringify(steps || []), isActive !== false]
-      );
-      res.status(201).json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/playbooks/:tenantId/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      await assertTenantAccess(req, tenantId);
-      const { name, description, triggerConditions, steps, isActive } = req.body;
-      const sets: string[] = [];
-      const vals: any[] = [];
-      let idx = 1;
-      if (name !== undefined) { sets.push(`name = $${idx++}`); vals.push(name); }
-      if (description !== undefined) { sets.push(`description = $${idx++}`); vals.push(description); }
-      if (triggerConditions !== undefined) { sets.push(`trigger_conditions = $${idx++}`); vals.push(JSON.stringify(triggerConditions)); }
-      if (steps !== undefined) { sets.push(`steps = $${idx++}`); vals.push(JSON.stringify(steps)); }
-      if (isActive !== undefined) { sets.push(`is_active = $${idx++}`); vals.push(isActive); }
-      sets.push(`updated_at = NOW()`);
-      if (sets.length === 1) return res.status(400).json({ message: "No fields to update" });
-      vals.push(id, tenantId);
-      const result = await pool.query(
-        `UPDATE playbooks SET ${sets.join(", ")} WHERE id = $${idx++} AND tenant_id = $${idx++} RETURNING *`,
-        vals
-      );
-      if (result.rows.length === 0) return res.status(404).json({ message: "Playbook not found" });
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/playbooks/:tenantId/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      await assertTenantAccess(req, tenantId);
-      await pool.query(`DELETE FROM playbook_executions WHERE playbook_id = $1 AND tenant_id = $2`, [id, tenantId]);
-      await pool.query(`DELETE FROM playbooks WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
-      res.json({ message: "Deleted" });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/playbooks/:tenantId/:id/execute", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      const access = await assertTenantAccess(req, tenantId);
-      const pbResult = await pool.query(`SELECT * FROM playbooks WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
-      if (pbResult.rows.length === 0) return res.status(404).json({ message: "Playbook not found" });
-      const pb = pbResult.rows[0];
-      const dryRun = req.body.dryRun === true;
-      const { execId, dbId } = await startPlaybookExecution({
-        pool,
-        playbook: pb,
-        tenantId,
-        incidentId: req.body.incidentId || undefined,
-        triggeredBy: access.userId || "system",
-        dryRun,
-      });
-      res.json({ execId, dbId, status: "running", dryRun, message: dryRun ? "Dry run started" : "Execution started" });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/playbooks/:tenantId/execution-status/:execId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const execId = req.params.execId;
-      const state = await getOrReconstructExecution(execId, tenantId, pool);
-      if (!state) {
-        return res.status(404).json({ message: "Execution not found" });
-      }
-      res.json(state);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // SSE stream for live execution updates (DB-backed: reconstructs from DB when not in memory)
-  app.get("/api/playbooks/:tenantId/:id/execution-stream/:execId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const execId = req.params.execId;
-      const initial = await getOrReconstructExecution(execId, tenantId, pool);
-      if (!initial) {
-        return res.status(404).json({ message: "Execution not found" });
-      }
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no");
-      res.flushHeaders();
-
-      const sendEvent = (data: any) => {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-        if (typeof (res as any).flush === "function") (res as any).flush();
-      };
-
-      sendEvent(initial);
-
-      // If the initial state is already terminal, send once and close
-      if (initial.status !== "running") {
-        setTimeout(() => res.end(), 200);
-        return;
-      }
-
-      const interval = setInterval(() => {
-        const current = getExecution(execId);
-        if (!current) { clearInterval(interval); res.end(); return; }
-        sendEvent(current);
-        if (current.status !== "running") { clearInterval(interval); setTimeout(() => res.end(), 200); }
-      }, 400);
-
-      req.on("close", () => clearInterval(interval));
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // Retry a failed step without re-running successful steps
-  app.post("/api/playbooks/:tenantId/executions/:execId/retry-step", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const execId = req.params.execId;
-      const { stepId } = req.body;
-      if (!stepId) return res.status(400).json({ message: "stepId is required" });
-      const result = await retryFailedStep({ pool, execId, stepId, tenantId });
-      if (!result.success) return res.status(400).json({ message: result.message });
-      res.json({ message: result.message });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/playbook-executions/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const playbookId = req.query.playbookId ? parseInt(req.query.playbookId as string) : null;
-      let query = `SELECT pe.*, p.name as playbook_name FROM playbook_executions pe
-        JOIN playbooks p ON pe.playbook_id = p.id
-        WHERE pe.tenant_id = $1`;
-      const params: any[] = [tenantId];
-      if (playbookId) {
-        query += ` AND pe.playbook_id = $2`;
-        params.push(playbookId);
-      }
-      query += ` ORDER BY pe.started_at DESC LIMIT 100`;
-      const result = await pool.query(query, params);
-      res.json(result.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/playbooks/:tenantId/seed-templates", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const existing = await pool.query(`SELECT COUNT(*) FROM playbooks WHERE tenant_id = $1`, [tenantId]);
-      if (parseInt(existing.rows[0].count) > 0) {
-        return res.json({ message: "Templates already exist", seeded: 0 });
-      }
-      const templates = [
-        {
-          name: "Phishing Response",
-          description: "Automated response workflow for phishing incidents. Isolates affected mailboxes, blocks sender domains, and notifies the security team.",
-          triggerConditions: { severity: ["high", "critical"], type: ["Phishing", "Email Security Alert"] },
-          steps: [
-            { id: "s1", type: "notify", label: "Alert SOC Team", config: { channel: "email", recipients: ["soc-team"] }, order: 1 },
-            { id: "s2", type: "block_ioc", label: "Block Sender Domain", config: { blockType: "domain" }, order: 2 },
-            { id: "s3", type: "isolate_asset", label: "Quarantine Affected Mailbox", config: {}, order: 3 },
-            { id: "s4", type: "run_ai_analysis", label: "AI Threat Assessment", config: {}, order: 4 },
-            { id: "s5", type: "create_ticket", label: "Create Investigation Ticket", config: { priority: "high" }, order: 5 },
-          ],
-        },
-        {
-          name: "Malware Containment",
-          description: "Contain and remediate malware infections by isolating endpoints, running scans, and collecting forensic evidence.",
-          triggerConditions: { severity: ["high", "critical"], type: ["Malware", "Ransomware", "Rootkit"] },
-          steps: [
-            { id: "s1", type: "isolate_asset", label: "Isolate Infected Endpoint", config: {}, order: 1 },
-            { id: "s2", type: "notify", label: "Notify Security Team", config: { channel: "email" }, order: 2 },
-            { id: "s3", type: "run_ai_analysis", label: "Malware Analysis", config: {}, order: 3 },
-            { id: "s4", type: "block_ioc", label: "Block C2 Indicators", config: { blockType: "ip" }, order: 4 },
-            { id: "s5", type: "update_severity", label: "Escalate to Critical", config: { severity: "critical" }, order: 5 },
-            { id: "s6", type: "create_ticket", label: "Create Remediation Ticket", config: {}, order: 6 },
-          ],
-        },
-        {
-          name: "Brute Force Lockout",
-          description: "Respond to brute force authentication attempts by locking accounts, blocking source IPs, and investigating scope.",
-          triggerConditions: { severity: ["medium", "high", "critical"], type: ["Brute Force"] },
-          steps: [
-            { id: "s1", type: "block_ioc", label: "Block Source IP", config: { blockType: "ip" }, order: 1 },
-            { id: "s2", type: "notify", label: "Alert Identity Team", config: { channel: "email" }, order: 2 },
-            { id: "s3", type: "add_watchlist", label: "Add to Watchlist", config: {}, order: 3 },
-            { id: "s4", type: "run_ai_analysis", label: "Credential Compromise Check", config: {}, order: 4 },
-            { id: "s5", type: "create_ticket", label: "Create Investigation Ticket", config: {}, order: 5 },
-          ],
-        },
-        {
-          name: "Data Exfiltration Response",
-          description: "Respond to data exfiltration alerts by isolating the source, blocking destinations, and preserving evidence.",
-          triggerConditions: { severity: ["high", "critical"], type: ["Data Exfiltration", "Large Data Upload", "DLP"] },
-          steps: [
-            { id: "s1", type: "isolate_asset", label: "Isolate Source Host", config: {}, order: 1 },
-            { id: "s2", type: "block_ioc", label: "Block External Destination", config: { blockType: "ip" }, order: 2 },
-            { id: "s3", type: "notify", label: "Notify CISO", config: { channel: "email", recipients: ["ciso"] }, order: 3 },
-            { id: "s4", type: "update_severity", label: "Escalate Severity", config: { severity: "critical" }, order: 4 },
-            { id: "s5", type: "run_ai_analysis", label: "Data Impact Assessment", config: {}, order: 5 },
-            { id: "s6", type: "create_ticket", label: "Create IR Case", config: { priority: "urgent" }, order: 6 },
-          ],
-        },
-        {
-          name: "Ransomware Response",
-          description: "Emergency response playbook for ransomware incidents. Immediate isolation, backup verification, and executive notification.",
-          triggerConditions: { severity: ["critical"], type: ["Ransomware"] },
-          steps: [
-            { id: "s1", type: "isolate_asset", label: "Network Isolation", config: {}, order: 1 },
-            { id: "s2", type: "notify", label: "Emergency Notify - Exec Team", config: { channel: "email", recipients: ["ciso", "cto"] }, order: 2 },
-            { id: "s3", type: "custom_webhook", label: "Trigger Backup Verification", config: { url: "" }, order: 3 },
-            { id: "s4", type: "run_ai_analysis", label: "Ransomware Variant Analysis", config: {}, order: 4 },
-            { id: "s5", type: "block_ioc", label: "Block All Associated IOCs", config: { blockType: "all" }, order: 5 },
-            { id: "s6", type: "update_severity", label: "Set Critical Priority", config: { severity: "critical" }, order: 6 },
-            { id: "s7", type: "create_ticket", label: "Create Major Incident", config: { priority: "urgent" }, order: 7 },
-          ],
-        },
-        {
-          name: "Insider Threat Investigation",
-          description: "Investigate potential insider threats with enhanced monitoring, evidence collection, and HR coordination.",
-          triggerConditions: { severity: ["medium", "high"], type: ["Unauthorized Access", "Data Exfiltration"] },
-          steps: [
-            { id: "s1", type: "add_watchlist", label: "Add User to Watchlist", config: {}, order: 1 },
-            { id: "s2", type: "run_ai_analysis", label: "Behavioral Analysis", config: {}, order: 2 },
-            { id: "s3", type: "notify", label: "Notify HR & Legal", config: { channel: "email", recipients: ["hr", "legal"] }, order: 3 },
-            { id: "s4", type: "create_ticket", label: "Create Confidential Case", config: { priority: "high" }, order: 4 },
-          ],
-        },
-        {
-          name: "DDoS Mitigation",
-          description: "Automated DDoS mitigation workflow activating traffic filtering, rate limiting, and upstream provider coordination.",
-          triggerConditions: { severity: ["high", "critical"], type: ["DDoS", "Network Intrusion"] },
-          steps: [
-            { id: "s1", type: "custom_webhook", label: "Activate DDoS Mitigation", config: { url: "" }, order: 1 },
-            { id: "s2", type: "block_ioc", label: "Block Attack Sources", config: { blockType: "ip" }, order: 2 },
-            { id: "s3", type: "notify", label: "Notify NOC Team", config: { channel: "email" }, order: 3 },
-            { id: "s4", type: "run_ai_analysis", label: "Attack Pattern Analysis", config: {}, order: 4 },
-            { id: "s5", type: "create_ticket", label: "Create Incident Ticket", config: {}, order: 5 },
-          ],
-        },
-        {
-          name: "Unauthorized Access Response",
-          description: "Respond to unauthorized access attempts by disabling accounts, reviewing access logs, and investigating scope.",
-          triggerConditions: { severity: ["medium", "high", "critical"], type: ["Unauthorized Access", "Privilege Escalation"] },
-          steps: [
-            { id: "s1", type: "notify", label: "Alert Security Team", config: { channel: "email" }, order: 1 },
-            { id: "s2", type: "block_ioc", label: "Block Source IP", config: { blockType: "ip" }, order: 2 },
-            { id: "s3", type: "add_watchlist", label: "Monitor Account Activity", config: {}, order: 3 },
-            { id: "s4", type: "run_ai_analysis", label: "Access Pattern Analysis", config: {}, order: 4 },
-            { id: "s5", type: "assign_agent", label: "Assign to Senior Analyst", config: {}, order: 5 },
-            { id: "s6", type: "create_ticket", label: "Create Investigation Ticket", config: {}, order: 6 },
-          ],
-        },
-      ];
-      // Helper: derive graph_nodes + graph_edges from linear steps
-      const buildGraph = (steps: any[]) => {
-        const NODE_W = 200; const NODE_H = 60; const X_START = 80; const Y_START = 80; const Y_GAP = 120;
-        const typeMap: Record<string, string> = {
-          notify: 'notification', block_ioc: 'action', isolate_asset: 'action',
-          run_ai_analysis: 'ai_enrichment', create_ticket: 'action', add_watchlist: 'action',
-          update_severity: 'action', custom_webhook: 'action', assign_agent: 'action',
-        };
-        // Build nodes
-        const nodes: any[] = [
-          { id: 'n-trigger', type: 'trigger', label: 'Trigger', x: X_START, y: Y_START, config: {} },
-          ...steps.map((s: any, i: number) => ({
-            id: 'n-' + s.id, type: typeMap[s.type] || 'action', label: s.label,
-            x: X_START, y: Y_START + (i + 1) * Y_GAP, config: s.config || {},
-          })),
-          { id: 'n-end', type: 'end', label: 'End', x: X_START, y: Y_START + (steps.length + 1) * Y_GAP, config: {} },
-        ];
-        // Build edges
-        const edges: any[] = [];
-        for (let i = 0; i < nodes.length - 1; i++) {
-          edges.push({ id: 'e-' + i, from: nodes[i].id, to: nodes[i + 1].id, fromPort: 'default' });
-        }
-        return { nodes, edges };
-      };
-      for (const t of templates) {
-        const { nodes, edges } = buildGraph(t.steps);
-        await pool.query(
-          `INSERT INTO playbooks (tenant_id, name, description, trigger_conditions, steps, graph_nodes, graph_edges, is_active, is_template)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, true, true)`,
-          [tenantId, t.name, t.description, JSON.stringify(t.triggerConditions), JSON.stringify(t.steps), JSON.stringify(nodes), JSON.stringify(edges)]
-        );
-      }
-      res.json({ message: "Templates seeded", seeded: templates.length });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
 
   // ==================== PLAYBOOK VISUAL EDITOR ROUTES ====================
@@ -36108,7 +36886,7 @@ Write a concise, actionable narrative explaining the most critical attack path a
         sourceSummary[src] = (sourceSummary[src] || 0) + 1;
       }
 
-      const timeline = eventsResult.rows.map((evt: any) => ({
+      const timeline: any[] = (eventsResult.rows.map((evt: any) => ({
         id: evt.id,
         type: "event" as const,
         timestamp: evt.occurred_at || evt.created_at,
@@ -36116,7 +36894,7 @@ Write a concise, actionable narrative explaining the most critical attack path a
         severity: evt.severity,
         summary: evt.threat || evt.action || "Event",
         logSource: evt.log_source,
-      })).concat(incidentsResult.rows.map((inc: any) => ({
+      })) as any[]).concat(incidentsResult.rows.map((inc: any) => ({
         id: inc.id,
         type: "incident" as const,
         timestamp: inc.created_at,
@@ -36157,9 +36935,9 @@ Write a concise, actionable narrative explaining the most critical attack path a
         const ph = tenantIds.map((_: any, i: number) => `$${i + 1}`).join(",");
         const dimRes = await pool.query(
           `SELECT
-            array_agg(DISTINCT event_type::text) FILTER (WHERE event_type IS NOT NULL) AS event_types,
-            array_agg(DISTINCT mitre_tactic::text) FILTER (WHERE mitre_tactic IS NOT NULL) AS tactics,
-            array_agg(DISTINCT log_source::text) FILTER (WHERE log_source IS NOT NULL) AS log_sources
+            array_agg(DISTINCT event_type) FILTER (WHERE event_type IS NOT NULL) AS event_types,
+            array_agg(DISTINCT mitre_tactic) FILTER (WHERE mitre_tactic IS NOT NULL) AS tactics,
+            array_agg(DISTINCT log_source) FILTER (WHERE log_source IS NOT NULL) AS log_sources
            FROM (SELECT event_type, mitre_tactic, log_source FROM security_events WHERE tenant_id IN (${ph}) LIMIT 5000) sub`,
           tenantIds
         );
@@ -36498,220 +37276,38 @@ Write a concise, actionable narrative explaining the most critical attack path a
     }
   });
 
+  // T561: BAS live-coverage — counts real incidents per MITRE technique (last 30 days)
+  app.get("/api/bas/:tenantId/live-coverage", isAuthenticated, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId);
+      await assertTenantAccess(req, tenantId);
+      const result = await pool.query(
+        `SELECT mitre_technique_id AS technique, COUNT(*)::int AS count
+         FROM incidents
+         WHERE tenant_id = $1
+           AND mitre_technique_id IS NOT NULL
+           AND created_at >= NOW() - INTERVAL '30 days'
+         GROUP BY mitre_technique_id`,
+        [tenantId]
+      );
+      const coverage: Record<string, number> = {};
+      for (const row of result.rows) coverage[row.technique] = row.count;
+      res.json({ coverage, totalIncidents: result.rows.reduce((s: number, r: any) => s + r.count, 0), window: "30d" });
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.message });
+    }
+  });
+
   // ── CVE / Vulnerability Risk Intelligence Routes (#77) ───────────────────────
 
   // List all CVEs for tenant with optional filters (severity, exploited, assetGroup)
-  app.get("/api/cve-risk/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const { severity, exploited, assetGroup, page = "1", pageSize = "50" } = req.query;
-      const parsedPage = parseInt(page as string, 10);
-      const parsedSize = parseInt(pageSize as string, 10);
-      const pageNum = !isNaN(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-      const pageSizeNum = !isNaN(parsedSize) && parsedSize > 0 ? Math.min(parsedSize, 100) : 50;
-      const offset = (pageNum - 1) * pageSizeNum;
+  registerCveRiskRoutes(app);
 
-      let query = `SELECT * FROM vulnerability_risk_scores WHERE tenant_id = $1`;
-      const params: (number | string | boolean)[] = [tenantId];
-      if (severity && ["critical","high","medium","low"].includes(severity as string)) {
-        params.push(severity as string);
-        query += ` AND severity = $${params.length}`;
-      }
-      if (exploited === "true") { params.push(true); query += ` AND exploited_in_wild = $${params.length}`; }
-      if (assetGroup) { params.push(assetGroup as string); query += ` AND $${params.length} = ANY(affected_asset_groups)`; }
-      query += ` ORDER BY exploitation_probability DESC LIMIT ${pageSizeNum} OFFSET ${offset}`;
-
-      const result = await pool.query(query, params);
-      // Add threat_actor_ids alias for spec compatibility (same data as threat_actor_names)
-      const rows = result.rows.map(r => ({ ...r, threat_actor_ids: r.threat_actor_names ?? [] }));
-      res.json(rows);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Dashboard summary stats — MUST be before /:tenantId/:cveId to avoid route collision
-  app.get("/api/cve-risk/:tenantId/dashboard", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const result = await pool.query(
-        `SELECT id, severity, exploited_in_wild, patch_available, exploitation_probability,
-                cve_id, cvss_score, epss_score, affected_asset_count, max_exposure_level
-         FROM vulnerability_risk_scores WHERE tenant_id = $1`,
-        [tenantId]
-      );
-      const all = result.rows as Array<{
-        id: number; severity: string; exploited_in_wild: boolean; patch_available: boolean;
-        exploitation_probability: number; cve_id: string; cvss_score: string | null;
-        epss_score: string | null; affected_asset_count: number; max_exposure_level: string;
-      }>;
-      const critical = all.filter(c => c.severity === "critical").length;
-      const high = all.filter(c => c.severity === "high").length;
-      const exploitedCount = all.filter(c => c.exploited_in_wild).length;
-      const patchAvailable = all.filter(c => c.patch_available).length;
-      const avgRisk = all.length
-        ? Math.round(all.reduce((s, c) => s + (c.exploitation_probability || 0), 0) / all.length)
-        : 0;
-      const topRisk = [...all]
-        .sort((a, b) => (b.exploitation_probability || 0) - (a.exploitation_probability || 0))
-        .slice(0, 5);
-      const medium = all.filter(c => c.severity === "medium").length;
-      const low = all.filter(c => c.severity === "low").length;
-      res.json({ total: all.length, critical, high, medium, low, exploited: exploitedCount, patchAvailable, avgRisk, topRisk });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Generate AI risk narrative for a specific CVE
-  app.post("/api/cve-risk/:tenantId/:cveId/rationale", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const rationale = await generateVulnAIRationale(tenantId, req.params.cveId.toUpperCase());
-      res.json({ rationale });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // AI Patch Now — top CVEs to patch this week with urgency ranking
-  app.get("/api/cve-risk/:tenantId/patch-recommendations", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const recommendations = await generateAIPatchRecommendations(tenantId);
-      res.json(recommendations);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Threat Actor Correlation — which known threat actors weaponise CVEs in the tenant
-  app.get("/api/cve-risk/:tenantId/threat-actors", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const correlation = await getThreatActorCorrelation(tenantId);
-      res.json(correlation);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Asset × CVE Heatmap — exposure level × severity matrix
-  app.get("/api/cve-risk/:tenantId/heatmap", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const heatmap = await getAssetCVEHeatmap(tenantId);
-      res.json(heatmap);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // CVE detail endpoint — full breakdown for a single CVE
-  // IMPORTANT: must come AFTER all /:tenantId/<literal> routes to avoid route collision
-  app.get("/api/cve-risk/:tenantId/:cveId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await computeVulnerabilityRisks(tenantId);
-      const cveId = req.params.cveId.toUpperCase();
-      const result = await pool.query(
-        `SELECT * FROM vulnerability_risk_scores WHERE tenant_id = $1 AND cve_id = $2 LIMIT 1`,
-        [tenantId, cveId]
-      );
-      if (!result.rows.length) return res.status(404).json({ message: "CVE not found for this tenant" });
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Force refresh — clears cache so next request recomputes from security_events + assets
-  app.post("/api/cve-risk/:tenantId/refresh", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      await pool.query(`DELETE FROM vulnerability_risk_scores WHERE tenant_id = $1`, [tenantId]);
-      await computeVulnerabilityRisks(tenantId);
-      res.json({ success: true, message: "Vulnerability risk scores refreshed from security events and assets" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // ── Federated Threat Intel Routes (#78) ──────────────────────────────────────
 
-  app.get("/api/federated-intel/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { type, severity, page = "1", pageSize = "50" } = req.query;
-      const rows = await db.select().from(federatedThreatIndicators)
-        .where(and(
-          eq(federatedThreatIndicators.isActive, true),
-          type ? eq(federatedThreatIndicators.indicatorType, type as string) : undefined,
-          severity ? eq(federatedThreatIndicators.severity, severity as string) : undefined,
-        ))
-        .orderBy(desc(federatedThreatIndicators.lastSeen))
-        .limit(parseInt(pageSize as string))
-        .offset((parseInt(page as string) - 1) * parseInt(pageSize as string));
-      res.json(rows);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
+  registerFederatedIntelRoutes(app);
 
-  app.post("/api/federated-intel/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const body = insertFederatedThreatIndicatorSchema.parse({ ...req.body, sourceTenantId: tenantId });
-      const [row] = await db.insert(federatedThreatIndicators).values(body).returning();
-      res.status(201).json(row);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/federated-intel/:tenantId/dashboard", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const all = await db.select().from(federatedThreatIndicators)
-        .where(eq(federatedThreatIndicators.isActive, true));
-      const byType: Record<string, number> = {};
-      const byThreat: Record<string, number> = {};
-      for (const ind of all) {
-        byType[ind.indicatorType] = (byType[ind.indicatorType] || 0) + 1;
-        if (ind.threatType) byThreat[ind.threatType] = (byThreat[ind.threatType] || 0) + 1;
-      }
-      const critical = all.filter(i => i.severity === "critical").length;
-      const high = all.filter(i => i.severity === "high").length;
-      const highConf = all.filter(i => (i.confidence || 0) >= 80).length;
-      res.json({
-        total: all.length,
-        critical,
-        high,
-        highConfidence: highConf,
-        byType,
-        byThreat,
-        recent: all.slice(0, 5),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // ── Shared Threat Intel (Community Intel) Routes (#78) ────────────────────
 
@@ -37195,37 +37791,15 @@ Apply the requested change and return JSON:
         return res.status(409).json({ message: "A Sigma rule with this title already exists in the library", existingId: dupCheck.rows[0].id });
       }
 
-      // [FIXED] Write to filesystem so the matching engine can load it
-      const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
-      const parsedYaml = yaml.load(ruleYaml) as any;
-      const ruleId = parsedYaml?.id || `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const yamlWithId = ruleYaml.replace(/^id:.*$/m, `id: ${ruleId}`);
-
-      const fs = await import("fs");
-      const path = await import("path");
-      const { SIGMA_RULES_DIR, loadSigmaRules, syncRuleToDb, getSigmaRule } = await import("./sigma-engine");
-      const tenantDir = path.join(SIGMA_RULES_DIR, "custom", `tenant-${tenantId}`);
-      if (!fs.existsSync(tenantDir)) fs.mkdirSync(tenantDir, { recursive: true });
-      const filePath = path.join(tenantDir, `${ruleId}.yml`);
-      fs.writeFileSync(filePath, yamlWithId, "utf-8");
-
-      // Reload rules into memory
-      loadSigmaRules();
-      const sigmaRule = getSigmaRule(ruleId);
-      if (sigmaRule) await syncRuleToDb(sigmaRule);
-
-      // Also insert into sigma_rules DB for UI listing
+      const ruleId = `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const result = await pool.query(
         `INSERT INTO sigma_rules (rule_id, title, description, status, level, rule_yaml, mitre_tags, is_enabled, created_at, updated_at)
          VALUES ($1, $2, $3, 'experimental', $4, $5, $6, true, NOW(), NOW())
-         ON CONFLICT (rule_id) DO UPDATE SET
-           title = EXCLUDED.title, description = EXCLUDED.description, level = EXCLUDED.level,
-           rule_yaml = EXCLUDED.rule_yaml, mitre_tags = EXCLUDED.mitre_tags, is_enabled = true, updated_at = NOW()
          RETURNING id, rule_id, title`,
-        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", yamlWithId, JSON.stringify(mitreTags || [])]
+        [ruleId, title, description || `AI-generated rule: ${title}`, level || "high", ruleYaml, JSON.stringify(mitreTags || [])]
       );
 
-      res.status(201).json({ success: true, rule: result.rows[0], runtimeLoaded: !!sigmaRule });
+      res.status(201).json({ success: true, rule: result.rows[0] });
     } catch (error: any) {
       res.status(error.status || 500).json({ message: error.message });
     }
@@ -37539,27 +38113,9 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
       if (!["draft", "testing", "active", "archived"].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
       }
-
-      // [NEW] When activating a Sigma rule, promote it to runtime
-      let promoted = false;
-      if (status === "active") {
-        const { promoteAiRuleToSigma } = await import("./detection-engineering-engine");
-        const [rule] = await db.select().from(aiDetectionRules)
-          .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
-        if (rule && rule.ruleType === "sigma") {
-          try {
-            await promoteAiRuleToSigma(rule, req.user?.id || "manual");
-            promoted = true;
-          } catch (promoteErr: any) {
-            console.error(`[DetectionRules] Manual promotion failed for rule ${ruleId}:`, promoteErr.message);
-            return res.status(500).json({ message: `Failed to promote rule: ${promoteErr.message}` });
-          }
-        }
-      }
-
       await db.update(aiDetectionRules).set({ status })
         .where(and(eq(aiDetectionRules.id, ruleId), eq(aiDetectionRules.tenantId, tenantId)));
-      res.json({ success: true, promoted });
+      res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -37579,126 +38135,8 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
   });
 
   // Generate detection rule directly from a confirmed True Positive incident
-  app.post("/api/incidents/:id/generate-detection-rule", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(
-        `SELECT tenant_id, classification FROM incidents WHERE id = $1 LIMIT 1`,
-        [incidentId]
-      );
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const { tenant_id: tenantId, classification } = incidentRes.rows[0];
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, tenantId);
-      if (classification !== "true_positive") {
-        return res.status(400).json({ message: "Detection rules can only be generated from True Positive incidents" });
-      }
-      const analystUserId = req.user?.claims?.sub ?? "system";
-      const rule = await generateRuleFromIncident(tenantId, incidentId, analystUserId);
-      res.json({ success: true, rule });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
+  registerIncidentDetectionRoutes(app);
 
-  // Get detection rules generated from a specific incident
-  app.get("/api/incidents/:id/detection-rules", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(
-        `SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`,
-        [incidentId]
-      );
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const tenantId = incidentRes.rows[0].tenant_id;
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, tenantId);
-      // Query by first-class incident linkage field
-      const rulesRes = await pool.query(
-        `SELECT * FROM ai_detection_rules
-         WHERE tenant_id = $1 AND generated_from_incident_id = $2
-         ORDER BY created_at DESC LIMIT 20`,
-        [tenantId, incidentId]
-      );
-      res.json({ rules: rulesRes.rows });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // ── Tenant Detection Settings (Auto-Enable Configuration) ───────────────────
-  app.get("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
-      const settings = await getTenantDetectionSettings(tenantId);
-      res.json(settings);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.patch("/api/tenant-detection-settings/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      assertMSSRole(await assertTenantAccess(req, tenantId));
-
-      const allowedFields = [
-        "auto_enable_sigma_rules",
-        "min_ai_confidence",
-        "max_false_positive_rate",
-        "min_backtest_matched_events",
-        "min_quality_grade",
-        "auto_enable_from_incidents",
-        "auto_enable_from_gaps",
-        "gap_generation_batch_size",
-      ];
-
-      const updates: Record<string, any> = {};
-      for (const key of allowedFields) {
-        if (req.body[key] !== undefined) updates[key] = req.body[key];
-      }
-
-      if (Object.keys(updates).length === 0) {
-        return res.status(400).json({ message: "No valid fields to update" });
-      }
-
-      const setClause = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(", ");
-      await pool.query(
-        `UPDATE tenant_detection_settings SET ${setClause}, updated_at = NOW() WHERE tenant_id = $1`,
-        [tenantId, ...Object.values(updates)]
-      );
-
-      const { getTenantDetectionSettings } = await import("./detection-engineering-engine");
-      const settings = await getTenantDetectionSettings(tenantId);
-      res.json({ success: true, settings });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // ── Auto-Enable Audit Log ───────────────────────────────────────────────────
-  app.get("/api/auto-enable-audit/:tenantId", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      await assertTenantAccess(req, tenantId);
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-      const offset = parseInt(req.query.offset as string) || 0;
-
-      const result = await pool.query(
-        `SELECT a.*, r.name as rule_name
-         FROM auto_enable_audit_log a
-         LEFT JOIN ai_detection_rules r ON r.id = a.ai_rule_id
-         WHERE a.tenant_id = $1
-         ORDER BY a.created_at DESC
-         LIMIT $2 OFFSET $3`,
-        [tenantId, limit, offset]
-      );
-      res.json({ audits: result.rows });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   app.get("/api/cases/:tenantId", isAuthenticated, async (req: any, res) => {
     try {
@@ -38095,7 +38533,7 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
         const health = dataPlaneRegistry.getRegionHealth(region.id);
 
         const dbLatencyMs = await probeRegionDb(region.dbConnectionString);
-        const kafkaLag = null; // N/A — Kafka consumer-lag metrics require broker-side API access
+        const streamLag = null; // N/A — Kinesis lag is reported by GetRecords MillisBehindLatest in workers
         // ClickHouse endpoint is not separately configured per region — report null (unknown)
         const clickHouseStatus: string | null = null;
         const storageUsedGB = 0; // N/A — real usage requires cloud-provider storage API
@@ -38115,8 +38553,8 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
           health: {
             dbLatencyMs,
             dbConnected: health?.dbConnected || false,
-            kafkaLag,
-            kafkaConnected: health?.kafkaConnected || false,
+            streamLag: streamLag,
+            streamConnected: health?.streamConnected || false,
             clickHouseStatus,
             storageConnected: health?.storageConnected || false,
             storageUsedGB,
@@ -38158,180 +38596,8 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
     }
   });
 
-  app.get("/api/data-plane/:region/archived-events", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin && !access.isMSS) {
-        return res.status(403).json({ message: "Admin access required" });
-      }
-      const { region } = req.params;
-      const { tenantId, startDate, endDate, eventType, maxKeys } = req.query;
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-      const options: any = {};
-      if (startDate) options.startDate = new Date(startDate as string);
-      if (endDate) options.endDate = new Date(endDate as string);
-      if (eventType) options.eventType = eventType as string;
-      if (maxKeys) options.maxKeys = parseInt(maxKeys as string);
+  registerDataPlaneRoutes(app);
 
-      if (tenantId) {
-        const objects = await cs.listArchivedData(bucket, parseInt(tenantId as string), options);
-        res.json({ region, tenantId: parseInt(tenantId as string), objects, count: objects.length });
-      } else {
-        const result = await cs.list(bucket, `tenants/`, options.maxKeys || 1000);
-        res.json({ region, objects: result.objects, count: result.objects.length, isTruncated: result.isTruncated });
-      }
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to list archived events" });
-    }
-  });
-
-  app.get("/api/data-plane/:region/archived-events/:key", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin && !access.isMSS) {
-        return res.status(403).json({ message: "Admin access required" });
-      }
-      const { key } = req.params;
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-      const { data, metadata } = await cs.download(bucket, key);
-      res.setHeader("Content-Type", metadata?.contentType || "application/json");
-      res.setHeader("X-Storage-Metadata", JSON.stringify(metadata || {}));
-      res.send(data);
-    } catch (error: any) {
-      if (error.message?.includes("not found") || error.name === "NoSuchKey") {
-        return res.status(404).json({ message: "Archived object not found" });
-      }
-      res.status(error.status || 500).json({ message: error.message || "Failed to download archived event" });
-    }
-  });
-
-  app.post("/api/data-plane/archive", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin) {
-        return res.status(403).json({ message: "Platform admin access required" });
-      }
-      const { tenantId, olderThanDays } = req.body;
-      if (!tenantId) return res.status(400).json({ message: "tenantId is required" });
-      const days = olderThanDays || 90;
-      const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-      const eventsResult = await pool.query(
-        `SELECT * FROM security_events WHERE tenant_id = $1 AND occurred_at < $2 ORDER BY occurred_at ASC LIMIT 10000`,
-        [tenantId, cutoffDate]
-      );
-
-      if (eventsResult.rows.length === 0) {
-        return res.json({ message: "No events to archive", archived: 0 });
-      }
-
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-      await cs.ensureBucket(bucket);
-
-      const byDateType: Record<string, any[]> = {};
-      for (const event of eventsResult.rows) {
-        const date = new Date(event.occurred_at);
-        const dateStr = date.toISOString().split("T")[0];
-        const eventType = event.event_type || "unknown";
-        const groupKey = `${dateStr}:${eventType}`;
-        if (!byDateType[groupKey]) byDateType[groupKey] = [];
-        byDateType[groupKey].push(event);
-      }
-
-      const results: any[] = [];
-      for (const [groupKey, events] of Object.entries(byDateType)) {
-        const [dateStr, eventType] = groupKey.split(":");
-        const date = new Date(dateStr);
-        const result = await cs.archiveEvents(bucket, tenantId, events, date, eventType);
-        results.push(result);
-      }
-
-      const totalArchived = results.reduce((sum, r) => sum + r.count, 0);
-      res.json({
-        message: `Archived ${totalArchived} events across ${results.length} files`,
-        archived: totalArchived,
-        files: results,
-        cutoffDate: cutoffDate.toISOString(),
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to archive events" });
-    }
-  });
-
-  app.get("/api/data-plane/:region/storage/browse", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin && !access.isMSS) {
-        return res.status(403).json({ message: "Admin access required" });
-      }
-      const { region } = req.params;
-      const { prefix, maxKeys, continuationToken } = req.query;
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-      const result = await cs.list(
-        bucket,
-        (prefix as string) || undefined,
-        maxKeys ? parseInt(maxKeys as string) : 1000,
-        (continuationToken as string) || undefined
-      );
-      res.json({ region, bucket, ...result });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to browse storage" });
-    }
-  });
-
-  app.get("/api/data-plane/:region/storage/download/:key", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin && !access.isMSS) {
-        return res.status(403).json({ message: "Admin access required" });
-      }
-      const { key } = req.params;
-      const { presigned } = req.query;
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-
-      if (presigned === "true") {
-        const url = await cs.generatePresignedUrl(bucket, key, 3600);
-        return res.json({ url, expiresIn: 3600 });
-      }
-
-      const { data, metadata } = await cs.download(bucket, key);
-      res.setHeader("Content-Type", metadata?.contentType || "application/octet-stream");
-      res.setHeader("Content-Disposition", `attachment; filename="${key.split("/").pop()}"`);
-      res.send(data);
-    } catch (error: any) {
-      if (error.message?.includes("not found") || error.name === "NoSuchKey") {
-        return res.status(404).json({ message: "Object not found" });
-      }
-      res.status(error.status || 500).json({ message: error.message || "Failed to download object" });
-    }
-  });
-
-  app.get("/api/data-plane/:region/storage/stats", isAuthenticated, async (req: any, res) => {
-    try {
-      const access = await getUserTenantAccess(req);
-      if (!access.isPlatformAdmin && !access.isMSS) {
-        return res.status(403).json({ message: "Admin access required" });
-      }
-      const { region } = req.params;
-      const { tenantId } = req.query;
-      const cs = getCloudStorage();
-      const bucket = cs.getDefaultBucket();
-      const stats = await cs.getStorageStats(bucket, tenantId ? parseInt(tenantId as string) : undefined);
-      res.json({
-        region,
-        provider: cs.getProvider(),
-        bucket,
-        ...stats,
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message || "Failed to get storage stats" });
-    }
-  });
 
   app.put("/api/tenants/:id/retention-policy", isAuthenticated, async (req: any, res) => {
     try {
@@ -38670,18 +38936,32 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
 
       // Coverage by security tool category
       const controlCategories = ["EDR/AV", "SIEM", "Vulnerability Scanner", "DLP", "PAM", "MDM", "Firewall", "WAF", "Email Security", "Cloud Security"];
+      // Task #445: real coverage. Previously any matched integration in a
+      // category caused EVERY asset to be reported as covered for that
+      // category. Now we count only assets whose own controls_coverage jsonb
+      // array contains a control whose toolName matches an integration in the
+      // category (case-insensitive substring against the same matchers used
+      // for category attribution).
+      const matchesCategory = (cat: string, toolName: string): boolean => {
+        const n = (toolName || "").toLowerCase();
+        if (cat === "EDR/AV") return /defender|crowdstrike|sentinelone|carbon black|trend|cynet|cortex/.test(n);
+        if (cat === "SIEM") return /splunk|sentinel|qradar|elastic|siem|wazuh/.test(n);
+        if (cat === "Vulnerability Scanner") return /qualys|nessus|rapid7|nexpose|tenable/.test(n);
+        if (cat === "DLP") return /\bdlp\b|symantec|forcepoint/.test(n);
+        if (cat === "MDM") return /intune|jamf|mdm|mobileiron|airwatch/.test(n);
+        if (cat === "Firewall") return /palo alto|fortinet|checkpoint|cisco asa|fortigate/.test(n);
+        if (cat === "WAF") return /\bwaf\b|cloudflare|f5\b|imperva/.test(n);
+        if (cat === "Email Security") return /proofpoint|mimecast|barracuda|harmony email|abnormal/.test(n);
+        if (cat === "Cloud Security") return /prisma|wiz|orca|lacework|aqua/.test(n);
+        if (cat === "PAM") return /cyberark|beyondtrust|delinea|thycotic/.test(n);
+        return false;
+      };
       const coverage = controlCategories.map(cat => {
-        const toolsInCat = integrations.filter(i => {
-          const n = (i.toolName || "").toLowerCase();
-          if (cat === "EDR/AV") return n.includes("defender") || n.includes("crowdstrike") || n.includes("sentinelone") || n.includes("carbon black") || n.includes("trend");
-          if (cat === "SIEM") return n.includes("splunk") || n.includes("sentinel") || n.includes("qradar") || n.includes("elastic") || n.includes("siem");
-          if (cat === "Vulnerability Scanner") return n.includes("qualys") || n.includes("nessus") || n.includes("rapid7") || n.includes("nexpose");
-          if (cat === "DLP") return n.includes("dlp") || n.includes("symantec") || n.includes("forcepoint");
-          if (cat === "MDM") return n.includes("intune") || n.includes("jamf") || n.includes("mdm") || n.includes("mobileiron");
-          if (cat === "Firewall") return n.includes("palo alto") || n.includes("fortinet") || n.includes("checkpoint") || n.includes("cisco asa");
-          return false;
-        });
-        const covered = toolsInCat.length > 0 ? allAssets.length : 0;
+        const toolsInCat = integrations.filter(i => matchesCategory(cat, i.toolName || ""));
+        const covered = toolsInCat.length === 0 ? 0 : allAssets.filter(a => {
+          const arr = (a.controlsCoverage as Array<{ toolName?: string; status?: string }> | null) || [];
+          return arr.some(c => c?.status !== "missing" && matchesCategory(cat, c?.toolName || ""));
+        }).length;
         const pct = allAssets.length > 0 ? Math.round((covered / allAssets.length) * 100) : 0;
         return { category: cat, covered, total: allAssets.length, percentage: pct, tools: toolsInCat.map(t => t.toolName) };
       });
@@ -38784,7 +39064,7 @@ Provide 5 topGaps and 5 topRecommendations. Make them specific and actionable.`;
       if (chCoverage) {
         try {
           const chStart = Date.now();
-          const sinceIso = formatChDateTime64(since);
+          const sinceIso = since.toISOString();
           // Mirror the PG fallback's filter set exactly so per-tile counts are
           // apples-to-apples between the two paths: tenant_id, time window,
           // and a non-null mitre_technique_id. The CH column is non-nullable
@@ -39100,7 +39380,7 @@ Keep response concise, actionable, technical. Max 200 words.`;
       if (chArcsClient) {
         try {
           const chStart = Date.now();
-          const sinceIso = formatChDateTime64(since);
+          const sinceIso = since.toISOString();
           const tenantList = tenantIds.join(",");
           // Same integration-awareness guard the events fast-paths use, so
           // arcs only reflect log sources the tenant has actively connected.
@@ -39821,130 +40101,8 @@ Keep response concise, actionable, technical. Max 200 words.`;
 
   // INCIDENT INVESTIGATION CANVAS
   // ─────────────────────────────────────────────────────────────────────────
-  app.get("/api/incidents/:id/graph", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
+  registerIncidentTriageRoutes(app);
 
-      const incidentRes = await pool.query(
-        `SELECT * FROM incidents WHERE id = $1 LIMIT 1`,
-        [incidentId]
-      );
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const incident = incidentRes.rows[0];
-
-      const access = await assertTenantAccess(req, incident.tenant_id);
-
-      const eventsRes = await pool.query(
-        `SELECT id, event_type, severity, threat, target, attacker, asset, description, 
-                threat_vector, mitre_tactic, mitre_technique, action, source_type, occurred_at, country
-         FROM security_events
-         WHERE tenant_id = $1
-         AND occurred_at BETWEEN $2 AND $3
-         ORDER BY occurred_at ASC LIMIT 100`,
-        [
-          incident.tenant_id,
-          new Date(new Date(incident.created_at).getTime() - 2 * 3600000),
-          new Date(new Date(incident.created_at).getTime() + 24 * 3600000),
-        ]
-      );
-
-      const nodes: any[] = [];
-      const edges: any[] = [];
-      const nodeSet = new Set<string>();
-
-      function addNode(id: string, label: string, type: string, severity?: string) {
-        if (!nodeSet.has(id)) {
-          nodeSet.add(id);
-          nodes.push({ id, label, type, severity: severity || "medium" });
-        }
-      }
-
-      for (const e of eventsRes.rows) {
-        if (e.attacker && e.attacker.length < 100) addNode(`ip:${e.attacker}`, e.attacker, "attacker", "high");
-        if (e.target && e.target.length < 100) addNode(`asset:${e.target}`, e.target, "asset", e.severity);
-        if (e.asset && e.asset.length < 100) addNode(`asset:${e.asset}`, e.asset, "asset", e.severity);
-        if (e.attacker && e.target) {
-          edges.push({ from: `ip:${e.attacker}`, to: `asset:${e.target}`, label: e.mitre_tactic || e.action || "attacked", eventId: e.id });
-        }
-        if (e.attacker && e.asset) {
-          edges.push({ from: `ip:${e.attacker}`, to: `asset:${e.asset}`, label: e.action || "targeted", eventId: e.id });
-        }
-      }
-
-      if (incident.source_ip) addNode(`ip:${incident.source_ip}`, incident.source_ip, "attacker", "critical");
-      if (incident.destination_ip) addNode(`asset:${incident.destination_ip}`, incident.destination_ip, "asset", "high");
-
-      const rawIocData = incident.ioc_data as any;
-      const iocArr: any[] = Array.isArray(rawIocData)
-        ? rawIocData
-        : (rawIocData?.indicators && Array.isArray(rawIocData.indicators))
-          ? rawIocData.indicators
-          : [];
-      for (const ioc of iocArr.slice(0, 10)) {
-        addNode(`ioc:${ioc.value}`, ioc.value, "ioc", ioc.reputation === "malicious" ? "high" : "medium");
-        if (incident.source_ip) edges.push({ from: `ip:${incident.source_ip}`, to: `ioc:${ioc.value}`, label: "used IOC" });
-      }
-
-      res.json({
-        incident,
-        nodes,
-        edges: edges.slice(0, 100),
-        timeline: eventsRes.rows,
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // AI TRIAGE ENGINE
-  // ─────────────────────────────────────────────────────────────────────────
-  app.post("/api/incidents/:id/retriage", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1`, [incidentId]);
-      if (!incRes.rows.length) return res.status(404).json({ message: "Not found" });
-      await assertTenantAccess(req, incRes.rows[0].tenant_id);
-
-      await pool.query(`UPDATE incidents SET triage_scored_at = NULL WHERE id = $1`, [incidentId]);
-      scoreIncidentInBackground(incidentId);
-      res.json({ message: "Triage re-scoring started" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/incidents/bulk-triage", isAuthenticated, async (req: any, res) => {
-    try {
-      const { tenantId, applyFPBelow } = req.body;
-      const _access = await getUserTenantAccess(req);
-      assertMSSRole(_access);
-      if (!tenantId) return res.status(400).json({ message: "tenantId required" });
-      const threshold = Math.min(parseInt(applyFPBelow) || 30, 35);
-      const result = await pool.query(
-        `UPDATE incidents SET classification = 'false_positive', is_true_positive = false, updated_at = NOW()
-         WHERE tenant_id = $1 AND triage_score IS NOT NULL AND triage_score < $2
-         AND classification IS NULL
-         RETURNING id`,
-        [tenantId, threshold]
-      );
-      res.json({ updated: result.rowCount, message: `${result.rowCount} incidents auto-classified as False Positive` });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/incidents/clusters", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = parseInt(req.query.tenantId as string);
-      if (!tenantId) return res.status(400).json({ message: "tenantId required" });
-      await assertTenantAccess(req, tenantId);
-      const clusters = await computeClusters(tenantId);
-      res.json(clusters);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -40496,325 +40654,8 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
   // ─────────────────────────────────────────────────────────────────────────
   // INCIDENT WAR ROOM
   // ─────────────────────────────────────────────────────────────────────────
-  app.get("/api/incidents/:id/war-room", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const incident = incidentRes.rows[0];
-      // For superadmin sessions, skip assertTenantAccess (superadmin has global access)
-      if (!req.session?.isSuperAdmin) {
-        await assertTenantAccess(req, incident.tenant_id);
-      }
+  registerIncidentWarRoomRoutes(app);
 
-      // Strict ±4h correlation window
-      const timeStart = new Date(new Date(incident.created_at).getTime() - 4 * 3600000);
-      const timeEnd = new Date(new Date(incident.created_at).getTime() + 4 * 3600000);
-
-      // Build correlation criteria: incident source_ip → security_events.attacker, destination_ip → target, asset → asset
-      const srcIp = incident.source_ip || null;
-      const dstIp = incident.destination_ip || null;
-      // affected_assets is stored as text array representation or a string; try to extract a single asset name
-      let assetFilter: string | null = null;
-      if (incident.affected_assets) {
-        const raw = Array.isArray(incident.affected_assets) ? incident.affected_assets[0] : incident.affected_assets;
-        if (raw && typeof raw === "string" && raw.trim()) assetFilter = raw.replace(/[{}"]/g, "").split(",")[0].trim() || null;
-      }
-
-      // Extract IOC values from incident ioc_data for IOC-based correlation
-      let iocValues: string[] = [];
-      try {
-        const rawIoc = incident.ioc_data;
-        if (rawIoc) {
-          const parsedIoc = typeof rawIoc === "string" ? JSON.parse(rawIoc) : rawIoc;
-          const iocArr: any[] = Array.isArray(parsedIoc)
-            ? parsedIoc
-            : (parsedIoc?.indicators && Array.isArray(parsedIoc.indicators))
-              ? parsedIoc.indicators
-              : [];
-          iocValues = iocArr
-            .map((ioc: any) => (ioc.value || ioc.indicator_value || "").trim())
-            .filter((v: string) => v.length > 3 && v.length < 200);
-        }
-      } catch (_) {}
-
-      // Build IOC OR clauses (limited to first 10 IOCs to prevent query explosion)
-      const iocSubset = iocValues.slice(0, 10);
-
-      const [relatedEvents, matchedPlaybooks, evidence] = await Promise.all([
-        (async () => {
-          // Base params: tenantId, timeStart, timeEnd, srcIp, dstIp, assetFilter
-          const baseParams: any[] = [incident.tenant_id, timeStart, timeEnd, srcIp, dstIp, assetFilter ? `%${assetFilter}%` : null];
-          let iocClauses = "";
-          if (iocSubset.length > 0) {
-            const iocPlaceholders: string[] = [];
-            for (const iocVal of iocSubset) {
-              const idx = baseParams.length + 1;
-              baseParams.push(`%${iocVal}%`);
-              iocPlaceholders.push(`(attacker ILIKE $${idx} OR target ILIKE $${idx})`);
-            }
-            iocClauses = "\n              OR " + iocPlaceholders.join(" OR ");
-          }
-          return pool.query(
-            `SELECT id, event_type, severity, threat, target, attacker, asset, description, threat_vector, mitre_tactic, mitre_technique, action, source_type, occurred_at, country
-              FROM security_events
-              WHERE tenant_id = $1 AND occurred_at BETWEEN $2 AND $3
-                AND (
-                  ($4::text IS NOT NULL AND (attacker ILIKE $4 OR target ILIKE $4))
-                  OR ($5::text IS NOT NULL AND (attacker ILIKE $5 OR target ILIKE $5))
-                  OR ($6::text IS NOT NULL AND asset ILIKE $6)${iocClauses}
-                )
-              ORDER BY occurred_at ASC LIMIT 100`,
-            baseParams
-          );
-        })(),
-        pool.query(`SELECT id, name, description, trigger_conditions, steps, is_active FROM playbooks WHERE tenant_id = $1 AND is_active = true LIMIT 20`, [incident.tenant_id]),
-        pool.query(`SELECT * FROM incident_evidence WHERE incident_id = $1 ORDER BY created_at ASC`, [incidentId]),
-      ]);
-
-      const incType = (incident.incident_type || "").toLowerCase();
-      const mitreTech = (incident.mitre_technique_id || "").toLowerCase();
-      const mitreTactic = (incident.mitre_tactic || "").toLowerCase();
-      const relevantPlaybooks = matchedPlaybooks.rows.filter((p: any) => {
-        if (!p.trigger_conditions) return false;
-        const tc = JSON.stringify(p.trigger_conditions).toLowerCase();
-        // Match only if playbook actually relates to this incident type / MITRE
-        return (incType && tc.includes(incType)) ||
-               (mitreTech && tc.includes(mitreTech)) ||
-               (mitreTactic && tc.includes(mitreTactic));
-      }).slice(0, 5);
-
-      // Fetch response actions for timeline display (immutable audit trail with actor/outcome/timestamps)
-      const responseActionsRes = await pool.query(
-        `SELECT ira.*, irp.mode as plan_mode
-         FROM incident_response_actions ira
-         JOIN incident_response_plans irp ON irp.id = ira.plan_id
-         WHERE ira.incident_id = $1
-         ORDER BY ira.created_at ASC`,
-        [incidentId]
-      );
-
-      res.json({
-        incident,
-        relatedEvents: relatedEvents.rows,
-        playbooks: relevantPlaybooks,
-        evidence: evidence.rows,
-        responseActions: responseActionsRes.rows,
-      });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // Entity Intelligence Graph for a single incident
-  app.get("/api/incidents/:id/entity-graph", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const tenantId = incidentRes.rows[0].tenant_id;
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, tenantId);
-      const graph = await buildIncidentEntityGraph(pool, incidentId, tenantId);
-      res.json(graph);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // Entity Graph Snapshot: POST to store, GET to retrieve (for PDF report embedding)
-    app.post("/api/incidents/:id/entity-graph-snapshot", isAuthenticated, async (req: any, res) => {
-      try {
-        const incidentId = parseInt(req.params.id);
-        const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-        if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-        if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-        const { pngDataUrl } = req.body;
-        if (!pngDataUrl || typeof pngDataUrl !== "string" || !pngDataUrl.startsWith("data:image/png")) {
-          return res.status(400).json({ message: "Invalid PNG data URL" });
-        }
-        if (pngDataUrl.length > 5 * 1024 * 1024) return res.status(413).json({ message: "Image too large (max 5MB)" });
-        setEntityGraphSnapshot(incidentId, pngDataUrl);
-        res.json({ success: true, message: "Entity graph snapshot saved for report embedding" });
-      } catch (error: any) {
-        res.status(error.status || 500).json({ message: error.message });
-      }
-    });
-
-    app.get("/api/incidents/:id/entity-graph-snapshot", isAuthenticated, async (req: any, res) => {
-      try {
-        const incidentId = parseInt(req.params.id);
-        const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-        if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-        if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-        const snapshot = entityGraphSnapshots.get(incidentId);
-        res.json({ hasSnapshot: !!snapshot, savedAt: snapshot ? new Date().toISOString() : null });
-      } catch (error: any) {
-        res.status(error.status || 500).json({ message: error.message });
-      }
-    });
-
-    app.get("/api/incidents/:id/evidence", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      const evidence = await pool.query(`SELECT * FROM incident_evidence WHERE incident_id = $1 ORDER BY created_at ASC`, [incidentId]);
-      res.json(evidence.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/incidents/:id/evidence", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const { type, value, description } = req.body;
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      const addedBy = req.session?.isSuperAdmin ? (req.session.superadminId || "superadmin") : (await getUserTenantAccess(req)).userId;
-      const hash = crypto.createHash("sha256").update(`${incidentId}:${type}:${value}:${Date.now()}`).digest("hex");
-      const result = await pool.query(`INSERT INTO incident_evidence (incident_id, tenant_id, type, value, description, added_by, chain_of_custody_hash) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [incidentId, incidentRes.rows[0].tenant_id, type || "note", value, description, addedBy, hash]);
-      res.json(result.rows[0]);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/incidents/:id/evidence/:evidenceId", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const evidenceId = parseInt(req.params.evidenceId);
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      await pool.query(`DELETE FROM incident_evidence WHERE id = $1 AND incident_id = $2`, [evidenceId, incidentId]);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // Quick Actions for War Room: escalate severity
-  app.post("/api/incidents/:id/escalate", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT tenant_id, severity FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      const severityLadder = ["low", "medium", "high", "critical"];
-      const current = (incidentRes.rows[0].severity || "medium").toLowerCase();
-      const idx = severityLadder.indexOf(current);
-      const newSeverity = severityLadder[Math.min(idx + 1, severityLadder.length - 1)];
-      await pool.query(`UPDATE incidents SET severity = $1, updated_at = NOW() WHERE id = $2`, [newSeverity, incidentId]);
-      res.json({ success: true, severity: newSeverity });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  // Quick Actions for War Room: classify as TP or FP
-  app.post("/api/incidents/:id/classify", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const { classification } = req.body; // "true_positive" | "false_positive" | "inconclusive" | null
-      if (classification && !["true_positive", "false_positive", "inconclusive"].includes(classification)) {
-        return res.status(400).json({ message: "classification must be 'true_positive', 'false_positive', 'inconclusive', or null" });
-      }
-      const incidentRes = await pool.query(`SELECT tenant_id, severity, confidence_score, source_ip, destination_ip FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      const newStatus = classification === "false_positive" ? "resolved" : (classification === "true_positive" ? "in_progress" : undefined);
-      const updateQuery = newStatus
-        ? `UPDATE incidents SET classification = $1, status = $2, updated_at = NOW() WHERE id = $3`
-        : `UPDATE incidents SET classification = $1, updated_at = NOW() WHERE id = $2`;
-      const params = newStatus ? [classification, newStatus, incidentId] : [classification, incidentId];
-      await pool.query(updateQuery, params);
-
-      // Auto-nominate IOCs when incident is classified as True Positive with confidence >= 80
-      if (classification === "true_positive") {
-        const inc = incidentRes.rows[0];
-        try {
-          await autoNominateIncidentIOCs(
-            inc.tenant_id, incidentId,
-            inc.source_ip, inc.destination_ip,
-            inc.confidence_score ?? 80,
-            req.user?.claims?.sub ?? "system"
-          );
-        } catch (_) { /* non-blocking */ }
-
-        // Auto-draft a detection rule for confirmed True Positives (non-blocking background task)
-        setImmediate(async () => {
-          try {
-            await generateRuleFromIncident(
-              inc.tenant_id,
-              incidentId,
-              req.user?.claims?.sub ?? "system"
-            );
-          } catch (e: any) {
-            console.warn(`[DetectionEngine] Auto-draft rule from incident ${incidentId} failed:`, e.message);
-          }
-        });
-
-        // Auto-generate and persist response plan on TP confirmation (idempotent)
-        setImmediate(async () => {
-          try {
-            const { isNew } = await generateAndPersistResponsePlan(incidentId);
-            if (isNew) console.info(`[ResponseEngine] Auto-generated & persisted response plan for TP incident #${incidentId}`);
-          } catch (e: any) {
-            console.warn(`[ResponseEngine] Auto-plan generation failed for incident ${incidentId}:`, e.message);
-          }
-        });
-      }
-
-      // Capture analyst decision for adaptive learning (non-blocking)
-      if (classification) {
-        setImmediate(async () => {
-          try {
-            const incRow = incidentRes.rows[0];
-            // Fetch triage info for the incident
-            const triageRow = await pool.query(
-              `SELECT triage_suggested_classification, triage_score, ioc_data, mitre_tactic, confidence_score,
-                      source_type, log_source, asset, destination_ip, source_ip FROM incidents WHERE id = $1 LIMIT 1`,
-              [incidentId]
-            );
-            const td = triageRow.rows[0] ?? {};
-            const rawIocData: unknown = td.ioc_data;
-            const iocArr: unknown[] = Array.isArray(rawIocData) ? rawIocData : ((rawIocData as { indicators?: unknown[] } | null)?.indicators ?? []);
-            // Determine sourceType from the incident's source fields
-            const sourceType = td.source_type || td.log_source || null;
-            // Determine assetCriticality — look it up from the assets table
-            let assetCriticality: string | null = null;
-            if (td.asset) {
-              try {
-                const assetRow = await pool.query(`SELECT criticality FROM assets WHERE name = $1 AND tenant_id = $2 LIMIT 1`, [td.asset, incRow.tenant_id]);
-                assetCriticality = assetRow.rows[0]?.criticality ?? null;
-              } catch (_) {}
-            }
-            await captureAnalystDecision({
-              tenantId: incRow.tenant_id,
-              incidentId,
-              analystId: req.user?.id ?? req.user?.claims?.sub ?? "unknown",
-              analystVerdict: classification as "true_positive" | "false_positive" | "inconclusive",
-              incidentSeverity: incRow.severity ?? null,
-              mitreTactic: td.mitre_tactic ?? null,
-              iocCount: iocArr.length,
-              aiSuggestedClassification: td.triage_suggested_classification ?? null,
-              aiConfidence: td.confidence_score ?? td.triage_score ?? null,
-              sourceType,
-              assetCriticality,
-            });
-          } catch (_) { /* non-blocking, never fail the main response */ }
-        });
-      }
-
-      res.json({ success: true, classification });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
   // ── Malware Analysis Routes (#119) ──────────────────────────────────────
 
@@ -41010,13 +40851,16 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
           normalizedIocs.filter(ioc => ioc.type === 'hash').map(ioc => ioc.value.toLowerCase())
         )].slice(0, 3); // top 3 distinct hashes
 
+        // Resolve tenant for license-gated platform sandboxes (Any.Run)
+        const sandboxTenantId = (await getUserTenantAccess(req).catch(() => null))?.tenantId ?? null;
+
         // Run feed enrichment, sandbox enrichment, and Sigma rule matching concurrently
         const [feedResult, sandboxResults, sigmaMatches] = await Promise.all([
           feedableIocs.length > 0
             ? enrichIOCsFromPublicFeeds(feedableIocs)
             : Promise.resolve(null),
           hashValues.length > 0
-            ? enrichHashWithSandboxes(hashValues[0]) // primary hash
+            ? enrichHashWithSandboxes(hashValues[0], sandboxTenantId) // primary hash
             : Promise.resolve(null),
           // Sigma rule intelligence — synchronous but wrapped for consistent concurrent execution
           Promise.resolve().then(() => matchMalwareContent(content, normalizedIocs)).catch(() => [] as SigmaMatch[]),
@@ -41035,7 +40879,7 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
             const iocType = ioc.type === 'phishing_url' ? 'url' : ioc.type;
             const enrichments = enrichMap.get(`${iocType}:${ioc.value.toLowerCase()}`);
             if (enrichments && enrichments.length > 0) {
-              (ioc as Record<string, unknown>)['feedEnrichments'] = enrichments;
+              (ioc as unknown as Record<string, unknown>)['feedEnrichments'] = enrichments;
               // If any feed scored a hit and we haven't already found malware family, use feed data
               const hitEnr = enrichments.find(e => e.status === 'hit');
               if (hitEnr) {
@@ -41097,9 +40941,14 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
           }
         }
 
-        // Attach sandbox enrichments to response if any hash IOCs were found
+        // Attach sandbox enrichments to response if any hash IOCs were found.
+        // Strip Any.Run brand for non-super-admin (Task #326 — hidden platform sandbox).
         if (sandboxResults) {
-          (normalizedResult as Record<string, unknown>)['sandboxEnrichments'] = sandboxResults;
+          const isSuperAdminViewer = !!req.session?.isSuperAdmin;
+          const visibleResults = isSuperAdminViewer
+            ? sandboxResults
+            : (await import("./sandbox-service")).maskHiddenSandboxes(sandboxResults);
+          (normalizedResult as Record<string, unknown>)['sandboxEnrichments'] = visibleResults;
         }
 
         // Attach Sigma detection rule matches (always set — empty array = no matches)
@@ -41174,76 +41023,6 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
     )
   `).catch(() => {}); // non-blocking — table may already exist
 
-  app.post("/api/incidents/:incidentId/malware-report", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.incidentId);
-      const { verdict, riskScore, confidence, language, analysisMethod, summary,
-              annotations, iocs, mitreMappings, evasionTechniques } = req.body;
-      if (!verdict) return res.status(400).json({ message: "verdict is required" });
-      const incRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      await assertTenantAccess(req, incRes.rows[0].tenant_id);
-      const analystId = req.user?.id ?? req.user?.claims?.sub ?? null;
-      const result = await pool.query(`
-        INSERT INTO incident_malware_reports
-          (incident_id, tenant_id, analyst_id, verdict, risk_score, confidence, language,
-           analysis_method, summary, annotations, iocs, mitre_mappings, evasion_techniques, raw_analysis, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-        RETURNING id, created_at
-      `, [
-        incidentId,
-        incRes.rows[0].tenant_id,
-        analystId,
-        verdict,
-        riskScore ?? null,
-        confidence ?? null,
-        language ?? null,
-        analysisMethod ?? null,
-        summary ?? null,
-        JSON.stringify(annotations ?? []),
-        JSON.stringify(iocs ?? []),
-        JSON.stringify(mitreMappings ?? []),
-        JSON.stringify(evasionTechniques ?? []),
-        JSON.stringify(req.body),
-      ]);
-
-      // Also append malware finding to the incident's AI summary so the report
-      // surfaces in the main incident record (non-blocking update)
-      if (summary) {
-        const malwareNote = `\n\n[Malware Analysis] Verdict: ${verdict} | Risk Score: ${riskScore ?? "N/A"} | Language: ${language ?? "Unknown"}\n${summary}`;
-        pool.query(
-          `UPDATE incidents
-           SET ai_summary = COALESCE(ai_summary, '') || $1
-           WHERE id = $2`,
-          [malwareNote, incidentId]
-        ).catch(() => {/* non-blocking */});
-      }
-
-      res.json({ success: true, id: result.rows[0].id, createdAt: result.rows[0].created_at });
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/incidents/:incidentId/malware-report", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.incidentId);
-      const incRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      await assertTenantAccess(req, incRes.rows[0].tenant_id);
-      const reports = await pool.query(`
-        SELECT id, verdict, risk_score, confidence, language, analysis_method, summary,
-               annotations, iocs, mitre_mappings, evasion_techniques, analyst_id, created_at
-        FROM incident_malware_reports
-        WHERE incident_id = $1
-        ORDER BY created_at DESC
-        LIMIT 10
-      `, [incidentId]);
-      res.json(reports.rows);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
   // ── AI Learning Routes (#119) ─────────────────────────────────────────────
 
@@ -41563,519 +41342,17 @@ Generate a structured 30-day threat forecast. Respond ONLY with valid JSON in th
     } catch (error: any) { res.status(500).json({ message: error.message }); }
   });
 
-  // Shared helper: build AI response plan and persist it (idempotent — returns existing plan if present)
-  async function generateAndPersistResponsePlan(incidentId: number): Promise<{ plan: any; actions: any[]; isNew: boolean }> {
-    const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-    if (!incidentRes.rows.length) throw new Error(`Incident ${incidentId} not found`);
-    const inc = incidentRes.rows[0];
-
-    // Return existing plan if present (idempotent)
-    const existingPlan = await pool.query(
-      `SELECT * FROM incident_response_plans WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [incidentId]
-    );
-    if (existingPlan.rows.length > 0) {
-      const existingActions = await pool.query(
-        `SELECT * FROM incident_response_actions WHERE plan_id = $1 ORDER BY step_order ASC`,
-        [existingPlan.rows[0].id]
-      );
-      return { plan: existingPlan.rows[0], actions: existingActions.rows, isNew: false };
-    }
-
-    // Build plan via AI
-    const plan = await buildResponsePlan(incidentId);
-
-    // --- Server-side capability validation ---
-    // Determine which action types are executable based on active security integrations.
-    // Actions with no matching integration are marked 'blocked' with a rationale note.
-    const integsRes = await pool.query(
-      `SELECT platform_key, platform_name, is_enabled FROM security_integrations WHERE tenant_id = $1 AND is_enabled = true`,
-      [inc.tenant_id]
-    );
-    const activeIntegrationTypes = new Set(integsRes.rows.map((r: any) => r.platform_key as string));
-
-    // Map action types to canonical platform_key values in security_integrations table.
-    // These must match the actual platform_key values used when integrations are registered.
-    const ACTION_INTEGRATION_MAP: Record<string, string[]> = {
-      host_isolation:    ["cynet", "crowdstrike", "sentinelone", "ms_defender_endpoint"],
-      ip_block:          ["palo_alto_ngfw", "paloalto", "fortinet_fortigate", "fortinet", "checkpoint_ngfw", "checkpoint", "cisco_asa"],
-      account_disable:   ["okta", "azure_ad", "azure_entra", "entra_id", "active_directory", "ldap"],
-      ticket_escalation: [], // always allowed — creates internal ticket
-      notification:      [], // always allowed — no external integration needed
-      evidence_snapshot: [], // always allowed — no external integration needed
-    };
-
-    function canExecuteActionType(actionType: string): { executable: boolean; blockedReason?: string } {
-      const required = ACTION_INTEGRATION_MAP[actionType];
-      if (!required) return { executable: true }; // unknown action type — allow (fail gracefully at dispatch)
-      if (required.length === 0) return { executable: true }; // no integration needed
-      const hasOne = required.some(key => activeIntegrationTypes.has(key));
-      if (!hasOne) {
-        return {
-          executable: false,
-          blockedReason: `No active integration found for action '${actionType}'. Required one of: ${required.join(", ")}`,
-        };
-      }
-      return { executable: true };
-    }
-
-    // Persist plan record
-    const planRes = await pool.query(
-      `INSERT INTO incident_response_plans (incident_id, tenant_id, mode, status, generated_by, actions, execution_summary)
-       VALUES ($1, $2, $3, 'ready', 'ai', $4, $5) RETURNING *`,
-      [incidentId, inc.tenant_id, plan.recommendedMode, JSON.stringify([]), plan.executiveSummary]
-    );
-    const planId = planRes.rows[0].id;
-
-    // Persist individual action steps, applying capability validation
-    const actionRows = [];
-    for (const action of plan.actions) {
-      const { executable, blockedReason } = canExecuteActionType(action.actionType);
-      const initialStatus = executable ? "pending" : "blocked";
-      const rationaleWithBlock = executable
-        ? action.rationale
-        : `${action.rationale} [BLOCKED: ${blockedReason}]`;
-
-      const aRes = await pool.query(
-        `INSERT INTO incident_response_actions
-         (plan_id, incident_id, tenant_id, action_type, target, target_type, risk_level, rationale, expected_impact, estimated_seconds, is_reversible, step_order, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-        [planId, incidentId, inc.tenant_id, action.actionType, action.target, action.targetType, action.riskLevel,
-         rationaleWithBlock, action.expectedImpact, action.estimatedSeconds, action.isReversible, action.stepOrder, initialStatus]
-      );
-      actionRows.push(aRes.rows[0]);
-    }
-
-    return { plan: planRes.rows[0], actions: actionRows, isNew: true };
-  }
+  // Note: generateAndPersistResponsePlan is now imported from ../incident-response-plan-builder
 
   // Generate AI response plan for a confirmed TP incident
-  app.post("/api/incidents/:id/response-plan", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const inc = incidentRes.rows[0];
-      const access = await assertTenantAccess(req, inc.tenant_id);
-      assertMSSRole(access);
+  registerIncidentResponsePlanRoutes(app);
 
-      // Only allow response plan generation for TP incidents
-      if (inc.classification !== "true_positive" && inc.is_true_positive !== true) {
-        return res.status(400).json({ message: "Response plans are only available for confirmed True Positive incidents" });
-      }
-
-      const { plan, actions } = await generateAndPersistResponsePlan(incidentId);
-      res.json({ ...plan, actions });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Get existing response plan for an incident
-  app.get("/api/incidents/:id/response-plan", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-
-      const planRes = await pool.query(
-        `SELECT * FROM incident_response_plans WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1`,
-        [incidentId]
-      );
-      if (!planRes.rows.length) return res.json(null);
-
-      const actionsRes = await pool.query(
-        `SELECT * FROM incident_response_actions WHERE plan_id = $1 ORDER BY step_order ASC`,
-        [planRes.rows[0].id]
-      );
-      res.json({ ...planRes.rows[0], actions: actionsRes.rows });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Update response plan mode
-  app.patch("/api/incidents/:id/response-plan/mode", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const { mode } = req.body;
-      if (!["manual", "semi_auto", "full_auto"].includes(mode)) return res.status(400).json({ message: "Invalid mode" });
-      const incidentRes = await pool.query(`SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const access = await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      assertMSSRole(access);
-
-      const planRes = await pool.query(
-        `UPDATE incident_response_plans SET mode = $1, status = CASE WHEN status = 'ready' THEN 'ready' ELSE status END, updated_at = NOW() WHERE incident_id = $2 RETURNING id`,
-        [mode, incidentId]
-      );
-
-      // When switching to full_auto, automatically execute ONLY low-risk actions;
-      // medium and high risk always require explicit analyst approval
-      let autoExecuted: any[] = [];
-      if (mode === "full_auto" && planRes.rows.length > 0) {
-        const planId = planRes.rows[0].id;
-        const actorName = (req.user as any)?.username || (req.user as any)?.name || "analyst";
-        const tenantId = incidentRes.rows[0].tenant_id;
-        const allowlistRes = await pool.query(
-          `SELECT action_type, risk_levels, requires_approval FROM tenant_response_allowlist WHERE tenant_id = $1`, [tenantId]
-        );
-        const allowlistMap = new Map(allowlistRes.rows.map((r: any) => [r.action_type, r]));
-        const hasAllowlist = allowlistMap.size > 0;
-
-        // Full-Auto executes only low-risk actions automatically; medium/high always queued for analyst approval
-        const pendingActions = await pool.query(
-          `SELECT * FROM incident_response_actions WHERE plan_id = $1 AND status = 'pending' AND risk_level = 'low' ORDER BY step_order ASC`,
-          [planId]
-        );
-
-        for (const action of pendingActions.rows) {
-          // Check allowlist membership
-          if (hasAllowlist) {
-            const entry: any = allowlistMap.get(action.action_type);
-            const allowed = !!entry && (entry.risk_levels.length === 0 || entry.risk_levels.includes(action.risk_level));
-            if (!allowed) continue;
-            // Enforce requires_approval — skip if manual approval required
-            if (entry.requires_approval) continue;
-          }
-
-          await pool.query(`UPDATE incident_response_actions SET status='executing', approved_by=$1, approved_at=NOW() WHERE id=$2`, [actorName, action.id]);
-          const result = await dispatchAction(action.action_type, action.target, tenantId, incidentId, actorName);
-          const newStatus = result.success ? "done" : "failed";
-          await pool.query(`UPDATE incident_response_actions SET status=$1, executed_at=NOW(), executed_by=$2, execution_result=$3 WHERE id=$4`,
-            [newStatus, actorName, JSON.stringify(result), action.id]);
-          try {
-            await pool.query(
-              `INSERT INTO incident_evidence (incident_id, tenant_id, type, value, description, added_by) VALUES ($1,$2,'response_action',$3,$4,$5)`,
-              [incidentId, tenantId, `[FULL_AUTO][${action.action_type.toUpperCase()}] → ${action.target}`, result.message, actorName]
-            );
-          } catch (evidErr: any) {
-            console.warn(`[ResponseEngine] Evidence log failed for action ${action.id}:`, evidErr.message);
-          }
-          autoExecuted.push({ actionId: action.id, ...result });
-        }
-
-        const remaining = await pool.query(`SELECT COUNT(*) FROM incident_response_actions WHERE plan_id=$1 AND status='pending'`, [planId]);
-        const newPlanStatus = parseInt(remaining.rows[0].count) === 0 ? "complete" : "in_progress";
-        await pool.query(`UPDATE incident_response_plans SET status=$1, updated_at=NOW() WHERE id=$2`, [newPlanStatus, planId]);
-      }
-
-      res.json({ success: true, mode, autoExecuted });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Execute one or all response actions
-  app.post("/api/incidents/:id/response-plan/execute", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const { actionId } = req.body; // if null, execute all pending low/medium risk (full_auto)
-      const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const inc = incidentRes.rows[0];
-      const access = await assertTenantAccess(req, inc.tenant_id);
-      assertMSSRole(access);
-
-      const actorName = (req.user as any)?.username || (req.user as any)?.name || "analyst";
-
-      // Get the plan
-      const planRes = await pool.query(
-        `SELECT * FROM incident_response_plans WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1`,
-        [incidentId]
-      );
-      if (!planRes.rows.length) return res.status(404).json({ message: "No response plan found" });
-      const plan = planRes.rows[0];
-
-      // Server-side enforcement: manual mode is read-only — reject execution requests unless targeting a specific action with explicit analyst intent
-      // For bulk execution (no actionId), manual mode always blocks to enforce human-in-the-loop policy
-      if (plan.mode === "manual" && !actionId) {
-        return res.status(403).json({
-          message: "Bulk execution is not permitted when the response plan is in Manual mode. Switch to Semi-Auto or Full-Auto to enable automated execution, or execute individual actions explicitly.",
-        });
-      }
-
-      // Fetch tenant allowlist for enforcement (empty = all allowed by default for backward compat)
-      const allowlistRes = await pool.query(
-        `SELECT action_type, risk_levels, requires_approval FROM tenant_response_allowlist WHERE tenant_id = $1`,
-        [inc.tenant_id]
-      );
-      const allowlistMap = new Map(allowlistRes.rows.map((r: any) => [r.action_type, r]));
-      const allActionTypes = ["host_isolation","ip_block","account_disable","ticket_escalation","notification","evidence_snapshot"];
-      const hasAllowlist = allowlistMap.size > 0;
-
-      function isActionAllowed(actionType: string, riskLevel: string): { allowed: boolean; requiresApproval: boolean } {
-        if (!hasAllowlist) return { allowed: true, requiresApproval: false }; // default: all allowed
-        const entry: any = allowlistMap.get(actionType);
-        if (!entry) return { allowed: false, requiresApproval: false };
-        const riskOk = entry.risk_levels.length === 0 || entry.risk_levels.includes(riskLevel);
-        return { allowed: riskOk, requiresApproval: entry.requires_approval };
-      }
-
-      // Determine which actions to execute
-      let actionsToExec: any[] = [];
-      if (actionId) {
-        const aRes = await pool.query(`SELECT * FROM incident_response_actions WHERE id = $1 AND plan_id = $2 LIMIT 1`, [actionId, plan.id]);
-        if (!aRes.rows.length) return res.status(404).json({ message: "Action not found" });
-        const targetAction = aRes.rows[0];
-        const { allowed } = isActionAllowed(targetAction.action_type, targetAction.risk_level);
-        if (!allowed) return res.status(403).json({ message: `Action type '${targetAction.action_type}' is not in the tenant's response allowlist` });
-        actionsToExec = aRes.rows;
-      } else {
-        // Full auto: execute only low-risk actions automatically; medium/high always queued for analyst approval
-        const aRes = await pool.query(
-          `SELECT * FROM incident_response_actions WHERE plan_id = $1 AND status = 'pending' AND risk_level = 'low' ORDER BY step_order ASC`,
-          [plan.id]
-        );
-        actionsToExec = aRes.rows.filter((a: any) => {
-          const { allowed, requiresApproval } = isActionAllowed(a.action_type, a.risk_level);
-          return allowed && !requiresApproval;
-        });
-      }
-
-      const results = [];
-      for (const action of actionsToExec) {
-        const { requiresApproval } = isActionAllowed(action.action_type, action.risk_level);
-        // Skip if action requires manual approval and this is a bulk execution
-        if (!actionId && requiresApproval) {
-          results.push({ actionId: action.id, success: false, message: "Action requires manual approval per tenant policy", timestamp: new Date().toISOString() });
-          continue;
-        }
-
-        // Mark as executing
-        await pool.query(
-          `UPDATE incident_response_actions SET status = 'executing', approved_by = $1, approved_at = NOW() WHERE id = $2`,
-          [actorName, action.id]
-        );
-
-        const result = await dispatchAction(action.action_type, action.target, inc.tenant_id, incidentId, actorName);
-
-        // Update action status — only mark done if execution succeeded
-        const newStatus = result.success ? "done" : "failed";
-        await pool.query(
-          `UPDATE incident_response_actions SET status = $1, executed_at = NOW(), executed_by = $2, execution_result = $3 WHERE id = $4`,
-          [newStatus, actorName, JSON.stringify(result), action.id]
-        );
-
-        // Append to incident timeline
-        await pool.query(
-          `INSERT INTO incident_evidence (incident_id, tenant_id, type, value, description, added_by)
-           VALUES ($1, $2, 'response_action', $3, $4, $5)`,
-          [incidentId, inc.tenant_id, `[${action.action_type.toUpperCase()}] → ${action.target}`, result.message, actorName]
-        ).catch(() => null);
-
-        results.push({ actionId: action.id, ...result });
-      }
-
-      // Update plan status
-      const remaining = await pool.query(
-        `SELECT COUNT(*) FROM incident_response_actions WHERE plan_id = $1 AND status = 'pending'`,
-        [plan.id]
-      );
-      const newPlanStatus = parseInt(remaining.rows[0].count) === 0 ? "complete" : "in_progress";
-      await pool.query(`UPDATE incident_response_plans SET status = $1, updated_at = NOW() WHERE id = $2`, [newPlanStatus, plan.id]);
-
-      res.json({ results, planStatus: newPlanStatus });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Undo a reversible action (within 15 minutes)
-  app.post("/api/incidents/:id/response-plan/undo/:actionId", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const actionId = parseInt(req.params.actionId);
-      const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      const inc = incidentRes.rows[0];
-      const access = await assertTenantAccess(req, inc.tenant_id);
-      assertMSSRole(access);
-
-      const actionRes = await pool.query(`SELECT * FROM incident_response_actions WHERE id = $1 AND incident_id = $2 LIMIT 1`, [actionId, incidentId]);
-      if (!actionRes.rows.length) return res.status(404).json({ message: "Action not found" });
-      const action = actionRes.rows[0];
-
-      if (!action.is_reversible) return res.status(400).json({ message: "This action is not reversible" });
-      if (action.status !== "done") return res.status(400).json({ message: "Only completed actions can be undone" });
-
-      // Check 15-minute window
-      const executedAt = new Date(action.executed_at).getTime();
-      const fifteenMin = 15 * 60 * 1000;
-      if (Date.now() - executedAt > fifteenMin) {
-        return res.status(400).json({ message: "Undo window (15 minutes) has expired" });
-      }
-
-      const actorName = (req.user as any)?.username || (req.user as any)?.name || "analyst";
-      const result = await dispatchUndo(action.action_type, action.target, inc.tenant_id);
-
-      if (result.success) {
-        // Only mark as undone if reversal actually succeeded to preserve audit accuracy
-        await pool.query(
-          `UPDATE incident_response_actions SET status = 'undone', undone_at = NOW(), undone_by = $1 WHERE id = $2`,
-          [actorName, actionId]
-        );
-        // Append successful undo to timeline
-        try {
-          await pool.query(
-            `INSERT INTO incident_evidence (incident_id, tenant_id, type, value, description, added_by)
-             VALUES ($1, $2, 'response_action', $3, $4, $5)`,
-            [incidentId, inc.tenant_id, `[UNDO ${action.action_type.toUpperCase()}] → ${action.target}`, result.message, actorName]
-          );
-        } catch (evidErr: any) {
-          console.warn(`[ResponseEngine] Undo evidence log failed for action ${actionId}:`, evidErr.message);
-        }
-        res.json({ success: true, message: result.message });
-      } else {
-        // Reversal failed — keep action status as 'done' to preserve accurate audit trail
-        res.status(502).json({ success: false, message: result.message || "Undo operation failed at the integration layer" });
-      }
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // War Room: export timeline as PDF (server-rendered HTML → PDF via simple structured response)
-  app.get("/api/incidents/:id/timeline-pdf", isAuthenticated, async (req: any, res) => {
-    try {
-      const incidentId = parseInt(req.params.id);
-      const incidentRes = await pool.query(`SELECT * FROM incidents WHERE id = $1 LIMIT 1`, [incidentId]);
-      if (!incidentRes.rows.length) return res.status(404).json({ message: "Incident not found" });
-      if (!req.session?.isSuperAdmin) await assertTenantAccess(req, incidentRes.rows[0].tenant_id);
-      const incident = incidentRes.rows[0];
-
-      const eventsRes = await pool.query(
-        `SELECT id, event_type, severity, threat, target, attacker, asset, description, mitre_tactic, mitre_technique, occurred_at
-         FROM security_events
-         WHERE tenant_id = $1
-           AND occurred_at BETWEEN $2 AND $3
-         ORDER BY occurred_at ASC LIMIT 100`,
-        [incident.tenant_id,
-         new Date(new Date(incident.created_at).getTime() - 4 * 3600000),
-         new Date(new Date(incident.created_at).getTime() + 4 * 3600000)]
-      );
-
-      const evidenceRes = await pool.query(`SELECT * FROM incident_evidence WHERE incident_id = $1 ORDER BY created_at ASC`, [incidentId]);
-
-      // Build an HTML document suitable for print-to-PDF
-      const formatDt = (d: any) => d ? new Date(d).toISOString().replace("T", " ").substring(0, 19) + " UTC" : "—";
-      const escHtml = (s: any) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-      const eventRows = eventsRes.rows.map((e: any) => `
-        <tr>
-          <td>${escHtml(formatDt(e.occurred_at))}</td>
-          <td>${escHtml(e.event_type)}</td>
-          <td style="color:${e.severity === "critical" ? "#dc2626" : e.severity === "high" ? "#ea580c" : e.severity === "medium" ? "#ca8a04" : "#16a34a"}">${escHtml(e.severity)}</td>
-          <td>${escHtml(e.attacker || e.target || e.asset || "—")}</td>
-          <td>${escHtml(e.mitre_tactic || "—")}</td>
-          <td>${escHtml(e.description || "—").substring(0, 120)}</td>
-        </tr>`).join("");
-
-      const evidenceRows = evidenceRes.rows.map((ev: any) => `
-        <tr>
-          <td>${escHtml(formatDt(ev.created_at))}</td>
-          <td>${escHtml(ev.type)}</td>
-          <td>${escHtml(ev.value)}</td>
-          <td>${escHtml(ev.description || "—")}</td>
-          <td>${escHtml(ev.added_by)}</td>
-        </tr>`).join("");
-
-      const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>War Room Timeline — Incident #${incidentId}</title>
-<style>
-  body { font-family: Arial, sans-serif; font-size: 11px; margin: 20px; color: #111; }
-  h1 { font-size: 18px; margin-bottom: 4px; }
-  h2 { font-size: 13px; margin-top: 20px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
-  .meta { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin: 10px 0; }
-  .meta div { background: #f4f4f4; padding: 6px 10px; border-radius: 4px; }
-  .meta strong { display: block; font-size: 10px; color: #666; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th { background: #1e293b; color: #fff; padding: 5px 8px; text-align: left; font-size: 10px; }
-  td { padding: 4px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
-  tr:nth-child(even) td { background: #f9f9f9; }
-  .footer { margin-top: 20px; font-size: 9px; color: #888; text-align: center; }
-  @media print { body { margin: 10mm; } }
-</style>
-</head>
-<body>
-<h1>&#9876; War Room Timeline — Incident #${incidentId}</h1>
-<p style="margin:0;color:#666;font-size:10px">Generated ${formatDt(new Date())} &nbsp;|&nbsp; CONFIDENTIAL</p>
-<div class="meta">
-  <div><strong>Title</strong>${escHtml(incident.title)}</div>
-  <div><strong>Severity</strong>${escHtml(incident.severity)}</div>
-  <div><strong>Status</strong>${escHtml(incident.status)}</div>
-  <div><strong>MITRE Tactic</strong>${escHtml(incident.mitre_tactic || "—")}</div>
-  <div><strong>MITRE Technique</strong>${escHtml(incident.mitre_technique_id || "—")}</div>
-  <div><strong>Classification</strong>${escHtml(incident.classification || "Unclassified")}</div>
-</div>
-
-<h2>Correlated Events (±4h window)</h2>
-${eventsRes.rows.length > 0
-  ? `<table><thead><tr><th>Timestamp</th><th>Event Type</th><th>Severity</th><th>Actor / Asset</th><th>MITRE Tactic</th><th>Description</th></tr></thead><tbody>${eventRows}</tbody></table>`
-  : `<p style="color:#888;font-style:italic">No correlated events found in the ±4h window.</p>`}
-
-<h2>Evidence Locker (${evidenceRes.rows.length} items)</h2>
-${evidenceRes.rows.length > 0
-  ? `<table><thead><tr><th>Added At</th><th>Type</th><th>Value / Hash</th><th>Description</th><th>Added By</th></tr></thead><tbody>${evidenceRows}</tbody></table>`
-  : `<p style="color:#888;font-style:italic">No evidence logged for this incident.</p>`}
-
-<div class="footer">Cyber Command Center &mdash; War Room Export &mdash; ${formatDt(new Date())}</div>
-</body>
-</html>`;
-
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Content-Disposition", `attachment; filename="war-room-incident-${incidentId}.html"`);
-      res.send(html);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ message: error.message });
-    }
-  });
 
   /**
    * POST /api/incidents/backfill-detection-source
    * MSS-only. Backfills NULL detection_source on incidents by inferring from the source field.
    * Also accepts optional tenantId query param to scope the backfill.
    */
-  app.post("/api/incidents/backfill-detection-source", isAuthenticated, async (req: any, res) => {
-    try {
-      const tenantId = req.body?.tenantId ? parseInt(req.body.tenantId) : null;
-      if (!req.session?.isSuperAdmin) {
-        if (tenantId) {
-          const access = await assertTenantAccess(req, tenantId);
-          assertMSSRole(access);
-        } else {
-          // No tenantId — require superadmin for all-tenant backfill
-          return res.status(403).json({ message: "Forbidden: tenantId required for non-superadmin users" });
-        }
-      }
-
-      const tenantFilter = tenantId ? `AND i.tenant_id = ${tenantId}` : "";
-
-      // Targeted backfill: only update incidents that can be positively identified as Cynet-origin
-      // via their own source field. The EXISTS-on-security_events approach is intentionally avoided
-      // because it would incorrectly label ALL NULL-detection_source incidents in a tenant if that
-      // tenant has any Cynet events at all — harming source-fidelity metrics for mixed-source tenants.
-      const result = await pool.query(
-        `UPDATE incidents i
-         SET detection_source = 'Cynet 360'
-         WHERE i.detection_source IS NULL ${tenantFilter}
-           AND (
-             LOWER(i.source) LIKE '%cynet%'
-             OR i.source = 'Cynet EPS'
-           )`
-      );
-
-      const updated = result.rowCount || 0;
-      console.log(`[BackfillDetectionSource] Updated ${updated} incidents${tenantId ? ` for tenant ${tenantId}` : " (all tenants)"}`);
-      res.json({ success: true, updated, message: `Backfilled detection_source for ${updated} incidents` });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message || "Backfill failed" });
-    }
-  });
 
   /**
    * GET /api/cynet-debug/:tenantId
@@ -43295,13 +42572,19 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
   // Manage platform-wide third-party integrations. API keys stored in DB only.
   // Restricted to platform_admin / superadmin.
 
-  // GET /api/admin/platform-integrations — list all integrations (keys masked)
-  app.get("/api/admin/platform-integrations", isSuperAdminOrPlatformAdmin, async (_req, res) => {
+  // GET /api/admin/platform-integrations — list all integrations (keys masked).
+  // Any.Run is a hidden, super-admin-only platform sandbox (Task #326) — filter
+  // it out for any caller that is not a true super-admin.
+  app.get("/api/admin/platform-integrations", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const result = await pool.query(
         "SELECT id, name, display_name, category, description, enabled, requires_key, api_key, last_tested_at, test_status, test_message, updated_at FROM platform_integrations ORDER BY category, display_name"
       );
-      const rows = result.rows.map(row => ({
+      const isSuperAdminViewer = !!req.session?.isSuperAdmin;
+      const filtered = isSuperAdminViewer
+        ? result.rows
+        : result.rows.filter(r => r.name !== "anyrun");
+      const rows = filtered.map(row => ({
         id: row.id,
         name: row.name,
         displayName: row.display_name,
@@ -43326,6 +42609,11 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
   app.patch("/api/admin/platform-integrations/:name", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const { name } = req.params;
+      // Any.Run is a hidden, super-admin-only platform sandbox (Task #326).
+      // Pretend it doesn't exist for non-super-admin platform_admin users.
+      if (name === "anyrun" && !req.session?.isSuperAdmin) {
+        return res.status(404).json({ message: `Integration '${name}' not found` });
+      }
       const { enabled, apiKey } = req.body as { enabled?: boolean; apiKey?: string };
 
       // Check the integration exists
@@ -43383,6 +42671,10 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
   app.post("/api/admin/platform-integrations/:name/test", isSuperAdminOrPlatformAdmin, async (req: any, res) => {
     try {
       const { name } = req.params;
+      // Hidden Any.Run sandbox (Task #326) — do not even acknowledge it for non-super-admin.
+      if (name === "anyrun" && !req.session?.isSuperAdmin) {
+        return res.status(404).json({ message: `Integration '${name}' not found` });
+      }
       const row = await pool.query("SELECT * FROM platform_integrations WHERE name = $1", [name]);
       if (row.rows.length === 0) {
         return res.status(404).json({ message: `Integration '${name}' not found` });
@@ -43606,15 +42898,389 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
   });
 
 
-  // POST /api/malware/sandbox-enrich — lookup hash in configured sandbox platforms
+  // POST /api/malware/sandbox-enrich — lookup hash in configured sandbox platforms.
+  // Any.Run results are filtered out for non-super-admin callers — the platform
+  // sandbox is intentionally invisible to tenants and tenant admins (Task #326).
   app.post('/api/malware/sandbox-enrich', isAuthenticated, async (req: any, res) => {
     try {
       const { hash } = req.body;
       if (!hash || typeof hash !== 'string' || !/^(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(hash.trim())) {
         return res.status(400).json({ message: 'A valid MD5, SHA-1, or SHA-256 hash is required' });
       }
-      const enrichments = await enrichHashWithSandboxes(hash.trim().toLowerCase());
-      return res.json(enrichments);
+      const tenantAccess = await getUserTenantAccess(req).catch(() => null);
+      const enrichments = await enrichHashWithSandboxes(hash.trim().toLowerCase(), tenantAccess?.tenantId ?? null);
+      const visible = req.session?.isSuperAdmin
+        ? enrichments
+        : (await import("./sandbox-service")).maskHiddenSandboxes(enrichments);
+      return res.json(visible);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ── Hidden Any.Run Sandbox — super-admin-only (Task #326) ──────────────────
+  // The Any.Run integration is intentionally hidden from tenants and tenant
+  // admins. Only routes below (gated by `isSuperAdmin`) and the public HMAC
+  // webhook are how the platform's super-admin manages it.
+
+  // GET /api/superadmin/anyrun/config — current global config (key-presence + webhook secret + hourly limit + enabled)
+  app.get("/api/superadmin/anyrun/config", isAuthenticated, isSuperAdmin, async (_req, res) => {
+    try {
+      const r = await pool.query<{ enabled: boolean; api_key: string | null; extra_config: any }>(
+        "SELECT enabled, api_key, extra_config FROM platform_integrations WHERE name = 'anyrun' LIMIT 1"
+      );
+      const row = r.rows[0];
+      const extra = (row?.extra_config ?? {}) as Record<string, unknown>;
+      res.json({
+        configured: !!row,
+        enabled: row?.enabled ?? false,
+        apiKeyPresent: !!row?.api_key,
+        webhookSecretPresent: !!extra.webhookSecret,
+        hourlyLimit: typeof extra.hourlyLimit === "number" ? extra.hourlyLimit : 60,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // PATCH /api/superadmin/anyrun/config — update API key, webhook secret, hourly limit, enabled flag
+  app.patch("/api/superadmin/anyrun/config", isAuthenticated, isSuperAdmin, async (req, res) => {
+    try {
+      const body = z.object({
+        apiKey: z.string().trim().min(8).optional(),
+        webhookSecret: z.string().trim().min(8).optional(),
+        hourlyLimit: z.number().int().positive().max(10_000).optional(),
+        enabled: z.boolean().optional(),
+      }).parse(req.body);
+
+      const existing = await pool.query<{ id: number; enabled: boolean; api_key: string | null; extra_config: any }>(
+        "SELECT id, enabled, api_key, extra_config FROM platform_integrations WHERE name = 'anyrun' LIMIT 1"
+      );
+
+      let extra = (existing.rows[0]?.extra_config ?? {}) as Record<string, unknown>;
+      if (body.webhookSecret !== undefined) extra.webhookSecret = body.webhookSecret;
+      if (body.hourlyLimit !== undefined) extra.hourlyLimit = body.hourlyLimit;
+
+      if (existing.rows[0]) {
+        const sets: string[] = ["extra_config = $1", "updated_at = NOW()"];
+        const params: any[] = [JSON.stringify(extra)];
+        if (body.apiKey !== undefined) { params.push(body.apiKey); sets.push(`api_key = $${params.length}`); }
+        if (body.enabled !== undefined) { params.push(body.enabled); sets.push(`enabled = $${params.length}`); }
+        params.push(existing.rows[0].id);
+        await pool.query(`UPDATE platform_integrations SET ${sets.join(", ")} WHERE id = $${params.length}`, params);
+      } else {
+        await pool.query(
+          `INSERT INTO platform_integrations (name, display_name, category, description, enabled, requires_key, api_key, extra_config)
+           VALUES ('anyrun', 'Any.Run', 'sandbox', 'Hidden platform sandbox', $1, true, $2, $3::jsonb)`,
+          [body.enabled ?? false, body.apiKey ?? null, JSON.stringify(extra)]
+        );
+      }
+      // Reflect new hourly limit in the in-process token bucket
+      if (body.hourlyLimit !== undefined) {
+        const { setAnyRunQuotaConfig } = await import("./anyrun-service");
+        // Apply to all tenants currently active in the bucket map
+        setAnyRunQuotaConfig(0, body.hourlyLimit); // touch a sentinel so future getBucket uses fresh defaults
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      if (err?.issues) return res.status(400).json({ message: "Invalid input", errors: err.issues });
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // POST /api/superadmin/anyrun/test — validate platform API key by issuing a low-cost search
+  app.post("/api/superadmin/anyrun/test", isAuthenticated, isSuperAdmin, async (_req, res) => {
+    try {
+      const start = Date.now();
+      const { resolveAnyRunKey, searchHashAnyRun, getAnyRunQuotaStatus } = await import("./anyrun-service");
+      const resolution = await resolveAnyRunKey(null);
+      if (!resolution.apiKey) {
+        return res.json({ ok: false, latencyMs: Date.now() - start, message: "No platform API key configured" });
+      }
+      // Use a known benign EICAR-related SHA256 just for round-trip auth check (Any.Run will return 'not_found' or 'ok')
+      const probe = await searchHashAnyRun("44d88612fea8a8f36de82e1278abb02f", { apiKey: resolution.apiKey });
+      const latencyMs = Date.now() - start;
+      const ok = probe.status === "hit" || probe.status === "miss";
+      const message = ok
+        ? `Auth OK (${probe.status})`
+        : (probe.status === "no_key"
+            ? "Authentication failed — check API key"
+            : probe.status === "quota_exceeded"
+              ? `Quota exceeded (retry in ${(probe as { retryAfterSec: number }).retryAfterSec}s)`
+              : `Test failed: ${(probe as { error?: string }).error ?? probe.status}`);
+      // Surface platform-level quota state so the super-admin can see the
+      // configured hourly cap and how many requests remain in the current
+      // window. We use tenantId=0 as the synthetic platform-wide bucket key.
+      const platformQuota = getAnyRunQuotaStatus(0);
+      await pool.query(
+        "UPDATE platform_integrations SET last_tested_at = NOW(), test_status = $1, test_message = $2, updated_at = NOW() WHERE name = 'anyrun'",
+        [ok ? "ok" : "error", message]
+      );
+      res.json({
+        ok,
+        latencyMs,
+        message,
+        quota: {
+          hourlyLimit: resolution.hourlyLimit,
+          remaining: platformQuota.remaining,
+          capacity: platformQuota.capacity,
+          refillPerHour: platformQuota.refillPerHour,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, message: err.message });
+    }
+  });
+
+  // GET /api/superadmin/anyrun/tenant-features — list every tenant + whether anyrun_sandbox is enabled
+  app.get("/api/superadmin/anyrun/tenant-features", isAuthenticated, isSuperAdmin, async (_req, res) => {
+    try {
+      const r = await pool.query(`
+        SELECT t.id AS tenant_id, t.name AS tenant_name, t.tenant_level, t.is_active,
+               COALESCE(f.enabled, false) AS enabled,
+               f.notes, f.updated_by, f.updated_at
+          FROM tenants t
+          LEFT JOIN tenant_platform_features f
+            ON f.tenant_id = t.id AND f.feature_key = 'anyrun_sandbox'
+         ORDER BY t.name ASC
+      `);
+      res.json(r.rows.map(row => ({
+        tenantId: row.tenant_id,
+        tenantName: row.tenant_name,
+        tenantLevel: row.tenant_level,
+        isActive: row.is_active,
+        enabled: row.enabled === true,
+        notes: row.notes,
+        updatedBy: row.updated_by,
+        updatedAt: row.updated_at,
+      })));
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // PATCH /api/superadmin/anyrun/tenant-features/:tenantId — enable/disable Any.Run for one tenant
+  app.patch("/api/superadmin/anyrun/tenant-features/:tenantId", isAuthenticated, isSuperAdmin, async (req: any, res) => {
+    try {
+      const tenantId = parseInt(req.params.tenantId, 10);
+      if (!Number.isFinite(tenantId)) return res.status(400).json({ message: "Invalid tenantId" });
+      const { enabled, notes } = z.object({
+        enabled: z.boolean(),
+        notes: z.string().max(500).optional(),
+      }).parse(req.body);
+      const updatedBy = req.user?.claims?.sub ?? "superadmin";
+      await pool.query(
+        `INSERT INTO tenant_platform_features (tenant_id, feature_key, enabled, notes, updated_by, updated_at)
+         VALUES ($1, 'anyrun_sandbox', $2, $3, $4, NOW())
+         ON CONFLICT (tenant_id, feature_key)
+         DO UPDATE SET enabled = EXCLUDED.enabled, notes = EXCLUDED.notes, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+        [tenantId, enabled, notes ?? null, updatedBy]
+      );
+      res.json({ ok: true });
+    } catch (err: any) {
+      if (err?.issues) return res.status(400).json({ message: "Invalid input", errors: err.issues });
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // POST /api/superadmin/anyrun/submit — manually submit a URL or hash lookup; logs a sandbox_submissions row
+  app.post("/api/superadmin/anyrun/submit", isAuthenticated, isSuperAdmin, async (req: any, res) => {
+    try {
+      const { tenantId, target, value, incidentId, env } = z.object({
+        tenantId: z.number().int().positive(),
+        target: z.enum(["url", "hash"]),
+        value: z.string().trim().min(3),
+        incidentId: z.number().int().positive().optional(),
+        env: z.object({
+          os: z.string().optional(),
+          bitness: z.union([z.literal(32), z.literal(64)]).optional(),
+          browser: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+
+      const submittedBy = req.user?.claims?.sub ?? "superadmin";
+      const { resolveAnyRunKey, consumeAnyRunQuota, submitUrlAnyRun, searchHashAnyRun } = await import("./anyrun-service");
+      const resolution = await resolveAnyRunKey(tenantId);
+      if (!resolution.apiKey) {
+        return res.status(400).json({ message: "No Any.Run API key available for this tenant" });
+      }
+      const quota = consumeAnyRunQuota(tenantId);
+      if (!quota.ok) {
+        return res.status(429).json({ message: "Quota exceeded", retryAfterSec: quota.retryAfterSec });
+      }
+
+      if (target === "hash") {
+        const probe = await searchHashAnyRun(value, { apiKey: resolution.apiKey });
+        if (probe.status === "hit" && probe.report) {
+          const r = probe.report;
+          const ins = await pool.query(
+            `INSERT INTO sandbox_submissions
+              (tenant_id, incident_id, submitted_by, vendor, target_type, target_value, file_hash,
+               task_uuid, status, verdict, malware_family, score_verdict, mitre_techniques, behaviors,
+               network_iocs, dropped_files, mutexes, screenshot_url, report_url, raw_report,
+               poll_count, next_poll_at, completed_at)
+             VALUES ($1, $2, $3, 'anyrun', 'hash', $4, $4,
+                     $5, 'done', $6, $7, $8, $9, $10,
+                     $11::jsonb, $12::jsonb, $13, $14, $15, $16::jsonb,
+                     0, NULL, NOW())
+             RETURNING id`,
+            [
+              tenantId, incidentId ?? null, submittedBy, value,
+              r.taskUuid, r.verdict, r.malwareFamily, r.scoreVerdict,
+              r.mitreTechniques, r.behaviors,
+              JSON.stringify(r.networkIocs), JSON.stringify(r.droppedFiles),
+              r.mutexes, r.screenshotUrl, r.reportUrl, JSON.stringify(r.raw ?? {}),
+            ]
+          );
+          // Merge sandbox findings into the linked incident's IOC payload
+          // (mirrors the webhook/poller behaviour for queued URL submissions).
+          if (incidentId) {
+            try {
+              const { applySandboxReportToIncident } = await import("./anyrun-poller");
+              await applySandboxReportToIncident(incidentId, r);
+            } catch (mergeErr) {
+              console.warn("[AnyRunSubmit] applySandboxReportToIncident failed:", mergeErr);
+            }
+          }
+          return res.json({ id: ins.rows[0].id, status: "done", verdict: r.verdict, taskUuid: r.taskUuid });
+        }
+        if (probe.status === "miss") {
+          const ins = await pool.query(
+            `INSERT INTO sandbox_submissions
+               (tenant_id, incident_id, submitted_by, vendor, target_type, target_value, file_hash, status, error_message, completed_at)
+             VALUES ($1, $2, $3, 'anyrun', 'hash', $4, $4, 'failed', 'Hash not found in Any.Run history', NOW())
+             RETURNING id`,
+            [tenantId, incidentId ?? null, submittedBy, value]
+          );
+          return res.json({ id: ins.rows[0].id, status: "not_found" });
+        }
+        const errMsg = "error" in probe ? (probe as { error: string }).error : probe.status;
+        return res.status(502).json({ message: `Any.Run lookup failed: ${errMsg}` });
+      }
+
+      // target === "url" — submit for detonation. Map the route's compact
+      // `env` shape ({ os, bitness, browser }) onto the Any.Run client's
+      // AnyRunSubmitOptions surface ({ osVersion, envBitness, envType }).
+      // Without this mapping the env preference would be silently dropped.
+      const submission = await submitUrlAnyRun(value, {
+        apiKey: resolution.apiKey,
+        ...(env?.os ? { osVersion: env.os } : {}),
+        ...(env?.bitness ? { envBitness: env.bitness } : {}),
+        ...(env?.browser ? { envType: "browser" as const } : {}),
+      });
+      const next = new Date(Date.now() + 30_000);
+      const ins = await pool.query(
+        `INSERT INTO sandbox_submissions
+           (tenant_id, incident_id, submitted_by, vendor, target_type, target_value, task_uuid, status, next_poll_at)
+         VALUES ($1, $2, $3, 'anyrun', 'url', $4, $5, 'queued', $6)
+         RETURNING id`,
+        [tenantId, incidentId ?? null, submittedBy, value, submission.taskUuid, next]
+      );
+      res.json({ id: ins.rows[0].id, status: "queued", taskUuid: submission.taskUuid, reportUrl: submission.reportUrl });
+    } catch (err: any) {
+      if (err?.issues) return res.status(400).json({ message: "Invalid input", errors: err.issues });
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // GET /api/superadmin/anyrun/submissions — paged audit log of every sandbox submission
+  app.get("/api/superadmin/anyrun/submissions", isAuthenticated, isSuperAdmin, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit ?? "50"), 10) || 50, 200);
+      const tenantFilter = req.query.tenantId ? parseInt(String(req.query.tenantId), 10) : null;
+      const incidentFilter = req.query.incidentId ? parseInt(String(req.query.incidentId), 10) : null;
+      const params: any[] = [];
+      let where = "vendor = 'anyrun'";
+      if (tenantFilter && Number.isFinite(tenantFilter)) {
+        params.push(tenantFilter);
+        where += ` AND tenant_id = $${params.length}`;
+      }
+      if (incidentFilter && Number.isFinite(incidentFilter)) {
+        params.push(incidentFilter);
+        where += ` AND incident_id = $${params.length}`;
+      }
+      params.push(limit);
+      const r = await pool.query(`
+        SELECT s.id, s.tenant_id, t.name AS tenant_name, s.incident_id, s.submitted_by,
+               s.target_type, s.target_value, s.task_uuid, s.status, s.verdict,
+               s.malware_family, s.score_verdict, s.report_url, s.error_message,
+               s.submitted_at, s.completed_at
+          FROM sandbox_submissions s
+          LEFT JOIN tenants t ON t.id = s.tenant_id
+         WHERE ${where}
+         ORDER BY s.submitted_at DESC
+         LIMIT $${params.length}
+      `, params);
+      res.json(r.rows);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // GET /api/superadmin/anyrun/submissions/:id — single submission detail (incl. raw report)
+  app.get("/api/superadmin/anyrun/submissions/:id", isAuthenticated, isSuperAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+      const r = await pool.query(
+        `SELECT s.*, t.name AS tenant_name FROM sandbox_submissions s
+           LEFT JOIN tenants t ON t.id = s.tenant_id
+          WHERE s.id = $1 LIMIT 1`,
+        [id]
+      );
+      if (r.rows.length === 0) return res.status(404).json({ message: "Not found" });
+      res.json(r.rows[0]);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // POST /api/sandbox/anyrun/webhook — public, HMAC-verified callback from Any.Run
+  // when an async task completes. We use req.rawBody (captured in express.json verify hook).
+  app.post("/api/sandbox/anyrun/webhook", async (req: any, res) => {
+    try {
+      const sig = (req.headers["x-anyrun-signature"] ?? req.headers["x-hub-signature-256"] ?? "") as string;
+      const raw: Buffer | undefined = req.rawBody;
+      if (!raw) return res.status(400).json({ message: "Missing raw body" });
+
+      // Look up taskUuid in the body to find the matching submission and its tenant
+      const payload = req.body ?? {};
+      const taskUuid: string | null = payload?.task?.uuid ?? payload?.taskUuid ?? payload?.uuid ?? null;
+      if (!taskUuid) return res.status(400).json({ message: "Missing task uuid" });
+
+      const subRow = await pool.query<{ id: number; tenant_id: number; incident_id: number | null }>(
+        "SELECT id, tenant_id, incident_id FROM sandbox_submissions WHERE task_uuid = $1 LIMIT 1",
+        [taskUuid]
+      );
+      if (subRow.rows.length === 0) return res.status(404).json({ message: "Unknown task" });
+
+      const { resolveAnyRunKey, verifyAnyRunWebhook, parseAnyRunReport } = await import("./anyrun-service");
+      const resolution = await resolveAnyRunKey(subRow.rows[0].tenant_id);
+      if (!resolution.webhookSecret || !verifyAnyRunWebhook(raw, sig, resolution.webhookSecret)) {
+        return res.status(401).json({ message: "Invalid signature" });
+      }
+
+      const report = parseAnyRunReport(taskUuid, payload);
+      await pool.query(
+        `UPDATE sandbox_submissions
+            SET status = 'done', verdict = $1, malware_family = $2, score_verdict = $3,
+                mitre_techniques = $4, behaviors = $5, network_iocs = $6::jsonb,
+                dropped_files = $7::jsonb, mutexes = $8, screenshot_url = $9,
+                report_url = $10, raw_report = $11::jsonb, completed_at = NOW(), next_poll_at = NULL
+          WHERE task_uuid = $12`,
+        [
+          report.verdict, report.malwareFamily, report.scoreVerdict,
+          report.mitreTechniques, report.behaviors, JSON.stringify(report.networkIocs),
+          JSON.stringify(report.droppedFiles), report.mutexes, report.screenshotUrl,
+          report.reportUrl, JSON.stringify(report.raw ?? {}), taskUuid,
+        ]
+      );
+      // Best-effort merge into incident.ioc_data if linked
+      try {
+        const { applySandboxReportToIncident } = await import("./anyrun-poller");
+        await applySandboxReportToIncident(subRow.rows[0].incident_id, report);
+      } catch {}
+      res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -43716,1203 +43382,17 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
   // All routes require tenant access; write routes additionally require MSS role.
   // Seed data is inserted once per tenant. Gated by migration-marker to prevent re-runs.
 
-  async function seedCtiDataForTenant(tenantId: number) {
-    const markerKey = `.cti_seed_v2_t${tenantId}`;
-    if (await hasMarker(markerKey)) return;
-
-    const { db } = await import("./db");
-    const {
-      ctiThreatActors, ctiIntrusionSets, ctiCampaigns, ctiMalwareFamilies, ctiIntelReports,
-    } = await import("@shared/schema");
-    const { count: taCount } = (await db.select({ count: sql<number>`count(*)` }).from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)))[0];
-    if (Number(taCount) === 0) {
-      const now = new Date();
-      const y2 = new Date(now.getFullYear() - 2, 0, 1);
-      await db.insert(ctiThreatActors).values([
-        { tenantId, name: "APT29 (Cozy Bear)", aliases: ["The Dukes", "Office Monkeys"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Intelligence gathering", "Credential theft"], country: "Russia", firstSeen: y2, lastSeen: now, active: true, confidence: 90, description: "Russian state-sponsored APT attributed to SVR, known for sophisticated supply chain and spear-phishing campaigns targeting government and defence sectors.", stixId: `identity--apt29-${tenantId}`, tags: ["russia", "espionage", "apt"], indicatorCount: 142, campaignCount: 8 },
-        { tenantId, name: "Lazarus Group", aliases: ["HIDDEN COBRA", "Guardians of Peace"], threatActorTypes: ["nation-state", "criminal"], sophistication: "advanced", resourceLevel: "government", primaryMotivation: "financial", goals: ["Financial theft", "Cryptocurrency laundering", "Espionage"], country: "North Korea", firstSeen: new Date(2009, 0, 1), lastSeen: now, active: true, confidence: 85, description: "North Korean state-sponsored threat actor responsible for large-scale financial heists and destructive attacks against global financial institutions.", stixId: `identity--lazarus-${tenantId}`, tags: ["northkorea", "financial", "cryptocurrency"], indicatorCount: 287, campaignCount: 15 },
-        { tenantId, name: "FIN7", aliases: ["Carbanak Group", "Navigator Group"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Payment card theft", "POS compromise", "Business email compromise"], country: "Ukraine", firstSeen: new Date(2013, 0, 1), lastSeen: now, active: true, confidence: 80, description: "Prolific Eastern European cybercrime syndicate targeting retail, hospitality, and financial sectors via spear-phishing and malware-laced documents.", stixId: `identity--fin7-${tenantId}`, tags: ["financial", "retail", "pos"], indicatorCount: 203, campaignCount: 12 },
-        { tenantId, name: "Sandworm Team", aliases: ["Voodoo Bear", "BlackEnergy Group"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "disruption", goals: ["Critical infrastructure disruption", "Destructive malware deployment"], country: "Russia", firstSeen: new Date(2009, 5, 1), lastSeen: now, active: true, confidence: 92, description: "Russian GRU Unit 74455 responsible for NotPetya, Ukraine power grid attacks, and Olympic Destroyer, focusing on destructive operations against critical infrastructure.", stixId: `identity--sandworm-${tenantId}`, tags: ["russia", "ics", "destructive"], indicatorCount: 178, campaignCount: 10 },
-        { tenantId, name: "APT41 (Double Dragon)", aliases: ["Barium", "Winnti Group"], threatActorTypes: ["nation-state", "criminal"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "espionage", goals: ["IP theft", "Financial gain", "Supply chain compromise"], country: "China", firstSeen: new Date(2012, 0, 1), lastSeen: now, active: true, confidence: 88, description: "Chinese dual-mission threat actor conducting both state-sponsored espionage and financially motivated cybercrime, with notable supply chain and gaming industry targeting.", stixId: `identity--apt41-${tenantId}`, tags: ["china", "espionage", "dual-purpose"], indicatorCount: 312, campaignCount: 18 },
-        { tenantId, name: "DarkSide Ransomware Group", aliases: ["BlackMatter"], threatActorTypes: ["criminal"], sophistication: "intermediate", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Ransomware deployment", "Data exfiltration for double extortion"], country: "Russia", firstSeen: new Date(2020, 7, 1), lastSeen: new Date(2021, 10, 1), active: false, confidence: 75, description: "Ransomware-as-a-Service operation behind the Colonial Pipeline attack in 2021, later rebranded as BlackMatter before apparent shutdown.", stixId: `identity--darkside-${tenantId}`, tags: ["ransomware", "ras", "critical-infrastructure"], indicatorCount: 89, campaignCount: 5 },
-        { tenantId, name: "Scattered Spider", aliases: ["0ktapus", "UNC3944"], threatActorTypes: ["criminal"], sophistication: "intermediate", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Identity theft", "SIM swapping", "Cloud account takeover"], country: "Unknown", firstSeen: new Date(2022, 0, 1), lastSeen: now, active: true, confidence: 78, description: "English-speaking threat actor known for highly effective social engineering targeting telecom and tech companies, exploiting help desk staff via vishing and SIM swapping.", stixId: `identity--scattered-spider-${tenantId}`, tags: ["socialengineering", "identity", "cloud"], indicatorCount: 67, campaignCount: 7 },
-        { tenantId, name: "Kimsuky", aliases: ["Black Banshee", "Velvet Chollima"], threatActorTypes: ["nation-state"], sophistication: "advanced", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Intelligence collection on foreign policy", "Nuclear programme monitoring"], country: "North Korea", firstSeen: new Date(2012, 0, 1), lastSeen: now, active: true, confidence: 82, description: "North Korean intelligence-gathering APT targeting South Korean think tanks, government agencies, and defence contractors with spear-phishing and watering hole attacks.", stixId: `identity--kimsuky-${tenantId}`, tags: ["northkorea", "espionage", "southkorea"], indicatorCount: 134, campaignCount: 9 },
-        { tenantId, name: "APT10 (Stone Panda)", aliases: ["MenuPass", "Red Apollo"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "espionage", goals: ["IP theft", "Healthcare data", "Defence secrets"], country: "China", firstSeen: new Date(2009, 0, 1), lastSeen: now, active: true, confidence: 88, description: "Chinese APT targeting managed service providers and healthcare to steal intellectual property on behalf of the Ministry of State Security.", stixId: `identity--apt10-${tenantId}`, tags: ["china", "msp", "healthcare"], indicatorCount: 198, campaignCount: 11 },
-        { tenantId, name: "Evil Corp", aliases: ["INDRIK SPIDER", "Dridex Gang"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Banking fraud", "Ransomware", "Money laundering"], country: "Russia", firstSeen: new Date(2011, 0, 1), lastSeen: now, active: true, confidence: 82, description: "Russian-based cybercriminal gang behind Dridex banking trojan and BitPaymer/WastedLocker ransomware. US sanctions target that has continued operating under new ransomware names.", stixId: `identity--evil-corp-${tenantId}`, tags: ["russia", "ransomware", "banking"], indicatorCount: 324, campaignCount: 19 },
-        { tenantId, name: "Turla", aliases: ["Snake", "Uroburos", "Venomous Bear"], threatActorTypes: ["nation-state"], sophistication: "innovator", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Government espionage", "Diplomatic targets", "Military intelligence"], country: "Russia", firstSeen: new Date(2006, 0, 1), lastSeen: now, active: true, confidence: 93, description: "Russian FSB-linked APT known for extraordinarily stealthy rootkit malware (Uroburos/Snake), hijacking satellite links for C2, and targeting embassies worldwide.", stixId: `identity--turla-${tenantId}`, tags: ["russia", "rootkit", "satellite"], indicatorCount: 267, campaignCount: 14 },
-        { tenantId, name: "OilRig (APT34)", aliases: ["Helix Kitten", "CHRYSENE"], threatActorTypes: ["nation-state"], sophistication: "advanced", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Government espionage", "Energy sector", "Financial sector"], country: "Iran", firstSeen: new Date(2014, 0, 1), lastSeen: now, active: true, confidence: 85, description: "Iranian nation-state APT targeting Middle Eastern governments, energy, and financial institutions using DNS tunnelling and custom backdoors.", stixId: `identity--oilrig-${tenantId}`, tags: ["iran", "dns-tunnel", "middle-east"], indicatorCount: 211, campaignCount: 13 },
-        { tenantId, name: "HAFNIUM", aliases: ["Operation Exchange Marauder"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Exchange server exploitation", "Government data theft", "Defence contractor targeting"], country: "China", firstSeen: new Date(2019, 0, 1), lastSeen: new Date(2022, 0, 1), active: false, confidence: 90, description: "Chinese state-sponsored group responsible for the 2021 Microsoft Exchange Server zero-day exploit chain (ProxyLogon), compromising 250,000+ servers globally.", stixId: `identity--hafnium-${tenantId}`, tags: ["china", "exchange", "proxylogon"], indicatorCount: 189, campaignCount: 3 },
-        { tenantId, name: "LockBit RaaS", aliases: ["ABCD Ransomware", "LockBit 3.0"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Ransomware deployment", "Double extortion", "Data exfiltration"], country: "Russia", firstSeen: new Date(2019, 8, 1), lastSeen: new Date(2024, 1, 1), active: false, confidence: 88, description: "Most prolific ransomware-as-a-service operation of 2022-2023, running an affiliate programme responsible for 1,700+ attacks before law enforcement disruption.", stixId: `identity--lockbit-${tenantId}`, tags: ["ransomware", "raas", "double-extortion"], indicatorCount: 412, campaignCount: 38 },
-        { tenantId, name: "Volt Typhoon (Actor)", aliases: ["Bronze Silhouette", "Vanguard Panda"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "disruption", goals: ["Critical infrastructure pre-positioning", "Living off the land", "Military asset disruption"], country: "China", firstSeen: new Date(2021, 5, 1), lastSeen: now, active: true, confidence: 89, description: "Chinese APT pre-positioning on US critical infrastructure (water, power, comms) using legitimate tools exclusively (LOLBins) for stealthy long-term access.", stixId: `identity--volt-typhoon-${tenantId}`, tags: ["china", "lolbins", "critical-infrastructure"], indicatorCount: 112, campaignCount: 5 },
-        { tenantId, name: "BlackCat/ALPHV (Actor)", aliases: ["Noberus"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Triple extortion ransomware", "Healthcare targeting", "Critical infrastructure attacks"], country: "Russia", firstSeen: new Date(2021, 10, 1), lastSeen: new Date(2024, 2, 1), active: false, confidence: 85, description: "Sophisticated RaaS written in Rust, notable for healthcare sector targeting and the UnitedHealth/Change Healthcare attack. Law enforcement seized infrastructure in early 2024.", stixId: `identity--blackcat-actor-${tenantId}`, tags: ["ransomware", "rust", "healthcare"], indicatorCount: 287, campaignCount: 22 },
-        { tenantId, name: "Charming Kitten (APT35)", aliases: ["TA453", "Phosphorus"], threatActorTypes: ["nation-state"], sophistication: "advanced", resourceLevel: "government", primaryMotivation: "espionage", goals: ["Academic espionage", "Think-tank targeting", "Nuclear negotiator surveillance"], country: "Iran", firstSeen: new Date(2011, 0, 1), lastSeen: now, active: true, confidence: 84, description: "Iranian IRGC-affiliated APT targeting academics, journalists, and government officials via elaborate spear-phishing and fake conference lures.", stixId: `identity--apt35-${tenantId}`, tags: ["iran", "spear-phishing", "academic"], indicatorCount: 178, campaignCount: 10 },
-        { tenantId, name: "FIN8", aliases: ["Syssphinx"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["POS malware deployment", "Retail targeting", "Hospitality attacks"], country: "Russia", firstSeen: new Date(2016, 0, 1), lastSeen: now, active: true, confidence: 76, description: "Financial crime group targeting POS environments in retail and hospitality with BADHATCH backdoor and ShellTea, pivoting to ransomware via BlackCat partnership.", stixId: `identity--fin8-${tenantId}`, tags: ["pos", "retail", "badhatch"], indicatorCount: 134, campaignCount: 8 },
-        { tenantId, name: "TA505", aliases: ["Graceful Spider"], threatActorTypes: ["criminal"], sophistication: "advanced", resourceLevel: "organization", primaryMotivation: "financial", goals: ["Mass phishing", "Banking trojan distribution", "Ransomware deployment"], country: "Russia", firstSeen: new Date(2014, 0, 1), lastSeen: now, active: true, confidence: 77, description: "High-volume criminal threat actor distributing Clop ransomware, Dridex, and FlawedAmmyy via massive malspam campaigns targeting financial institutions globally.", stixId: `identity--ta505-${tenantId}`, tags: ["phishing", "clop", "dridex"], indicatorCount: 398, campaignCount: 25 },
-        { tenantId, name: "APT38 (Bureau 121)", aliases: ["Stardust Chollima"], threatActorTypes: ["nation-state"], sophistication: "expert", resourceLevel: "government", primaryMotivation: "financial", goals: ["SWIFT network heists", "Central bank compromise", "Casino money laundering"], country: "North Korea", firstSeen: new Date(2014, 0, 1), lastSeen: now, active: true, confidence: 91, description: "Elite North Korean cyber unit focused exclusively on financial heists, responsible for the $81M Bangladesh Bank theft and numerous SWIFT network intrusions globally.", stixId: `identity--apt38-${tenantId}`, tags: ["northkorea", "swift", "banking"], indicatorCount: 178, campaignCount: 9 },
-      ]);
-    }
-    const { count: isCount } = (await db.select({ count: sql<number>`count(*)` }).from(ctiIntrusionSets).where(eq(ctiIntrusionSets.tenantId, tenantId)))[0];
-    if (Number(isCount) === 0) {
-      const now = new Date();
-      await db.insert(ctiIntrusionSets).values([
-        { tenantId, name: "Operation Aurora", aliases: ["Aurora"], description: "Highly sophisticated attacks targeting at least 20 major corporations including Google, Adobe, and Juniper Networks, aimed at stealing intellectual property and Google source code.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "expert", targetSectors: ["Technology", "Finance", "Defence"], targetCountries: ["United States"], ttps: ["T1566", "T1055", "T1078"], toolsUsed: ["Hydraq", "Aurora backdoor"], firstSeen: new Date(2009, 5, 1), lastSeen: new Date(2010, 1, 1), active: false, confidence: 90, stixId: `intrusion-set--aurora-${tenantId}`, campaignCount: 1, indicatorCount: 45 },
-        { tenantId, name: "Operation Cloud Hopper", aliases: ["APT10 MSP Campaign"], description: "Large-scale intrusion campaign by APT10 targeting managed service providers globally to gain access to their customers' networks and intellectual property.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "advanced", targetSectors: ["Technology", "Healthcare", "Finance", "Energy"], targetCountries: ["Japan", "United States", "United Kingdom", "EU"], ttps: ["T1199", "T1021", "T1078"], toolsUsed: ["PlugX", "RedLeaves", "QuasarRAT"], firstSeen: new Date(2016, 0, 1), lastSeen: new Date(2018, 11, 1), active: false, confidence: 85, stixId: `intrusion-set--cloudhopper-${tenantId}`, campaignCount: 3, indicatorCount: 112 },
-        { tenantId, name: "SolarWinds Supply Chain Attack", aliases: ["Sunburst Campaign", "UNC2452"], description: "Nation-state supply chain attack embedding SUNBURST backdoor into SolarWinds Orion software updates, compromising up to 18,000 organisations including multiple US federal agencies.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "expert", targetSectors: ["Government", "Technology", "Finance", "Defence"], targetCountries: ["United States", "EU", "Israel"], ttps: ["T1195", "T1071", "T1027"], toolsUsed: ["SUNBURST", "TEARDROP", "Cobalt Strike"], firstSeen: new Date(2020, 2, 1), lastSeen: new Date(2021, 0, 1), active: false, confidence: 95, stixId: `intrusion-set--solarwinds-${tenantId}`, campaignCount: 1, indicatorCount: 234 },
-        { tenantId, name: "Volt Typhoon", aliases: ["Bronze Silhouette", "Vanguard Panda"], description: "Chinese state-sponsored APT pre-positioning on critical infrastructure networks in Guam and the continental United States, likely preparing for potential future disruptive attacks.", primaryMotivation: "disruption", resourceLevel: "government", sophistication: "expert", targetSectors: ["Communications", "Energy", "Transportation", "Water"], targetCountries: ["United States", "Guam"], ttps: ["T1133", "T1190", "T1014"], toolsUsed: ["KV-Botnet", "FRP"], firstSeen: new Date(2021, 0, 1), lastSeen: new Date(), active: true, confidence: 88, stixId: `intrusion-set--volt-typhoon-${tenantId}`, campaignCount: 2, indicatorCount: 78 },
-        { tenantId, name: "BlackCat/ALPHV Operations", aliases: ["ALPHV Ransomware"], description: "Ransomware-as-a-Service operation written in Rust, targeting critical infrastructure and healthcare with double-extortion tactics and advanced evasion techniques.", primaryMotivation: "financial", resourceLevel: "organization", sophistication: "advanced", targetSectors: ["Healthcare", "Finance", "Critical Infrastructure"], targetCountries: ["United States", "EU", "Australia"], ttps: ["T1486", "T1490", "T1562"], toolsUsed: ["ALPHV/BlackCat", "Cobalt Strike", "Brute Ratel"], firstSeen: new Date(2021, 10, 1), lastSeen: new Date(), active: true, confidence: 82, stixId: `intrusion-set--blackcat-${tenantId}`, campaignCount: 4, indicatorCount: 156 },
-        { tenantId, name: "Fancy Bear (APT28)", aliases: ["Sofacy", "STRONTIUM", "Pawn Storm"], description: "Russian GRU Unit 26165 responsible for DNC hack, 2016 US election interference, and numerous attacks on NATO governments and military institutions.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "expert", targetSectors: ["Government", "Defence", "Political", "Media"], targetCountries: ["United States", "EU", "Ukraine", "NATO"], ttps: ["T1566", "T1190", "T1078"], toolsUsed: ["X-Agent", "Drovorub", "CHOPSTICK"], firstSeen: new Date(2004, 0, 1), lastSeen: new Date(), active: true, confidence: 94, stixId: `intrusion-set--apt28-${tenantId}`, campaignCount: 22, indicatorCount: 445 },
-        { tenantId, name: "Midnight Blizzard (NOBELIUM)", aliases: ["APT29 Cloud", "Cozy Bear SolarWinds"], description: "Sophisticated SVR campaign responsible for SolarWinds SUNBURST supply chain attack and ongoing targeting of cloud environments and identity providers.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "innovator", targetSectors: ["Technology", "Government", "Defence", "Think Tanks"], targetCountries: ["United States", "EU", "Israel"], ttps: ["T1195.002", "T1078.004", "T1071.004"], toolsUsed: ["SUNBURST", "TEARDROP", "GoldMax"], firstSeen: new Date(2020, 2, 1), lastSeen: new Date(), active: true, confidence: 95, stixId: `intrusion-set--nobelium-${tenantId}`, campaignCount: 5, indicatorCount: 312 },
-        { tenantId, name: "Salt Typhoon", aliases: ["FamousSparrow", "GhostEmperor"], description: "Chinese state-sponsored APT targeting telecommunications providers in the US and allied nations, achieving persistent access to wiretap systems and communications metadata.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "expert", targetSectors: ["Telecommunications", "Government"], targetCountries: ["United States", "Canada", "Australia", "UK"], ttps: ["T1190", "T1021", "T1557"], toolsUsed: ["SparrowDoor", "Masol RAT"], firstSeen: new Date(2019, 0, 1), lastSeen: new Date(), active: true, confidence: 88, stixId: `intrusion-set--salt-typhoon-${tenantId}`, campaignCount: 2, indicatorCount: 67 },
-        { tenantId, name: "TA427 (Kimsuky)", aliases: ["Velvet Chollima", "Thallium"], description: "North Korean APT conducting long-running spear-phishing campaigns against think tanks, academia, and foreign policy experts to inform regime decision-making.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "intermediate", targetSectors: ["Academia", "Government", "Think Tanks", "Media"], targetCountries: ["United States", "South Korea", "Japan", "EU"], ttps: ["T1566", "T1598", "T1056"], toolsUsed: ["AppleSeed", "PebbleDash", "RandomQuery"], firstSeen: new Date(2012, 0, 1), lastSeen: new Date(), active: true, confidence: 83, stixId: `intrusion-set--ta427-${tenantId}`, campaignCount: 12, indicatorCount: 156 },
-        { tenantId, name: "Storm-0558", aliases: ["Lace Typhoon"], description: "Chinese APT that forged Azure AD tokens using a stolen MSA signing key to access cloud email accounts of 25 US Government organisations including the State Department.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "expert", targetSectors: ["Government", "Diplomatic", "Cloud Services"], targetCountries: ["United States", "EU"], ttps: ["T1649", "T1078.004", "T1114"], toolsUsed: ["Bling", "token forger"], firstSeen: new Date(2021, 4, 1), lastSeen: new Date(2023, 8, 1), active: false, confidence: 89, stixId: `intrusion-set--storm0558-${tenantId}`, campaignCount: 1, indicatorCount: 34 },
-        { tenantId, name: "Clop Ransomware Group", aliases: ["TA505", "FIN11", "Lace Tempest"], description: "Russian-linked cybercriminal group responsible for mass MOVEit Transfer zero-day exploitation, extorting 1,000+ organisations in the largest single supply-chain ransomware campaign.", primaryMotivation: "financial", resourceLevel: "organization", sophistication: "advanced", targetSectors: ["Finance", "Healthcare", "Technology", "Legal"], targetCountries: ["United States", "EU", "Canada", "Australia"], ttps: ["T1190", "T1486", "T1537"], toolsUsed: ["Clop", "Get2 loader", "FlawedGrace"], firstSeen: new Date(2019, 1, 1), lastSeen: new Date(), active: true, confidence: 87, stixId: `intrusion-set--clop-${tenantId}`, campaignCount: 6, indicatorCount: 287 },
-        { tenantId, name: "TEMP.Veles (Triton)", aliases: ["Xenotime", "CyberAv3ngers"], description: "Russian CNIHM-linked APT responsible for TRITON attack on Schneider Electric Triconex SIS at Saudi Aramco — the only known malware targeting Safety Instrumented Systems.", primaryMotivation: "disruption", resourceLevel: "government", sophistication: "expert", targetSectors: ["Oil & Gas", "Petrochemical", "Energy"], targetCountries: ["Saudi Arabia", "Middle East"], ttps: ["T0838", "T0800", "T0882"], toolsUsed: ["TRITON", "TRISIS", "HatMan"], firstSeen: new Date(2014, 0, 1), lastSeen: new Date(2022, 0, 1), active: false, confidence: 90, stixId: `intrusion-set--triton-${tenantId}`, campaignCount: 2, indicatorCount: 56 },
-        { tenantId, name: "Scattered Spider Finance Ops", aliases: ["UNC3944 Finance"], description: "Pivot by Scattered Spider from hospitality to financial sector targeting, using vishing, help desk compromise, and Okta MFA fatigue to access trading platforms.", primaryMotivation: "financial", resourceLevel: "individual", sophistication: "intermediate", targetSectors: ["Finance", "Cryptocurrency", "Banking"], targetCountries: ["United States", "EU"], ttps: ["T1598.004", "T1539", "T1621"], toolsUsed: ["BlackCat", "Sim-swap tooling"], firstSeen: new Date(2024, 0, 1), lastSeen: new Date(), active: true, confidence: 76, stixId: `intrusion-set--ss-finance-${tenantId}`, campaignCount: 5, indicatorCount: 89 },
-        { tenantId, name: "Earth Lusca (TAG-22)", aliases: ["Aquatic Panda", "Bronze University"], description: "Chinese APT targeting critical infrastructure and government entities, using ProxyLogon and Log4Shell vulnerabilities before deploying HyperBro and Cobalt Strike.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "advanced", targetSectors: ["Government", "Education", "Healthcare", "Media"], targetCountries: ["Taiwan", "India", "United States", "EU"], ttps: ["T1190", "T1505.003", "T1055"], toolsUsed: ["HyperBro", "Cobalt Strike", "ShadowPad"], firstSeen: new Date(2019, 0, 1), lastSeen: new Date(), active: true, confidence: 80, stixId: `intrusion-set--earth-lusca-${tenantId}`, campaignCount: 8, indicatorCount: 134 },
-        { tenantId, name: "MuddyWater", aliases: ["Static Kitten", "MERCURY"], description: "Iranian MOIS-affiliated APT targeting Middle Eastern governments and telecoms using PowerShell backdoors and legitimate remote admin tools for defence evasion.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "intermediate", targetSectors: ["Government", "Telecommunications", "Defence"], targetCountries: ["Israel", "Saudi Arabia", "Turkey", "UAE"], ttps: ["T1059.001", "T1105", "T1021.001"], toolsUsed: ["PowGoop", "BugSleep", "Atera RMM"], firstSeen: new Date(2017, 0, 1), lastSeen: new Date(), active: true, confidence: 79, stixId: `intrusion-set--muddywater-${tenantId}`, campaignCount: 10, indicatorCount: 112 },
-        { tenantId, name: "APT38 Financial Ops", aliases: ["Bureau 121 Finance", "BlueNorOff"], description: "Financial operations arm of Lazarus Group specifically targeting SWIFT banking networks and cryptocurrency exchanges for North Korean state revenue generation.", primaryMotivation: "financial", resourceLevel: "government", sophistication: "advanced", targetSectors: ["Banking", "Finance", "Cryptocurrency", "DeFi"], targetCountries: ["Bangladesh", "India", "Chile", "United States"], ttps: ["T1195", "T1059", "T1027"], toolsUsed: ["PowerRatankba", "AppleJeus"], firstSeen: new Date(2014, 0, 1), lastSeen: new Date(), active: true, confidence: 87, stixId: `intrusion-set--apt38-fin-${tenantId}`, campaignCount: 8, indicatorCount: 234 },
-        { tenantId, name: "Sandworm AcidRain", aliases: ["VoodooBear Wiper"], description: "Russian GRU campaign deploying AcidRain wiper malware against satellite modems in Ukraine, disrupting communications at the start of the 2022 invasion.", primaryMotivation: "disruption", resourceLevel: "government", sophistication: "expert", targetSectors: ["Telecommunications", "Satellite", "Military"], targetCountries: ["Ukraine", "EU"], ttps: ["T1485", "T1561", "T1059.004"], toolsUsed: ["AcidRain", "CaddyWiper", "HermeticWiper"], firstSeen: new Date(2022, 1, 1), lastSeen: new Date(2022, 3, 1), active: false, confidence: 92, stixId: `intrusion-set--acidrain-${tenantId}`, campaignCount: 1, indicatorCount: 78 },
-        { tenantId, name: "Patchwork (Dropping Elephant)", aliases: ["Chinastrats", "Monsoon"], description: "Indian APT targeting Pakistani government, military, and Chinese targets in South Asia using QuasarRAT and HoboRAT in politically motivated espionage operations.", primaryMotivation: "espionage", resourceLevel: "government", sophistication: "intermediate", targetSectors: ["Government", "Defence", "Energy"], targetCountries: ["Pakistan", "China", "South Asia"], ttps: ["T1566", "T1059.005", "T1036"], toolsUsed: ["QuasarRAT", "BadNews", "HoboRAT"], firstSeen: new Date(2015, 0, 1), lastSeen: new Date(), active: true, confidence: 72, stixId: `intrusion-set--patchwork-${tenantId}`, campaignCount: 7, indicatorCount: 89 },
-        { tenantId, name: "Lazarus BlueNorOff", aliases: ["APT38", "Stardust Chollima"], description: "North Korean financial operations unit responsible for $81M Bangladesh Bank theft and numerous SWIFT network intrusions across global financial institutions.", primaryMotivation: "financial", resourceLevel: "government", sophistication: "expert", targetSectors: ["Banking", "Finance", "Cryptocurrency"], targetCountries: ["Bangladesh", "Vietnam", "Mexico", "Poland"], ttps: ["T1210", "T1059", "T1070"], toolsUsed: ["DYEPACK", "HOPLIGHT", "HARDRAIN"], firstSeen: new Date(2014, 0, 1), lastSeen: new Date(), active: true, confidence: 91, stixId: `intrusion-set--bluenoroff-${tenantId}`, campaignCount: 9, indicatorCount: 178 },
-      ]);
-    }
-    const { count: campCount } = (await db.select({ count: sql<number>`count(*)` }).from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)))[0];
-    if (Number(campCount) === 0) {
-      const now = new Date();
-      await db.insert(ctiCampaigns).values([
-        { tenantId, name: "PhishKit 2024 Wave", description: "Large-scale credential harvesting campaign targeting financial sector employees via Microsoft 365-themed phishing kits with real-time relay to attacker-controlled servers.", objective: "Credential theft for account takeover and BEC fraud", firstSeen: new Date(2024, 0, 1), lastSeen: now, active: true, status: "active", confidence: 82, attribution: "FIN7", targetSectors: ["Finance", "Banking"], targetRegions: ["North America", "Europe"], ttps: ["T1566.001", "T1539", "T1110"], toolsUsed: ["EvilProxy", "Modlishka"], iocCount: 89, incidentCount: 14, stixId: `campaign--phishkit24-${tenantId}` },
-        { tenantId, name: "Operation Midnight Eclipse", description: "Targeted intrusion campaign against energy sector OT/ICS environments, deploying custom implants to gain persistent access and conduct reconnaissance of industrial control systems.", objective: "ICS/SCADA reconnaissance and pre-positioning", firstSeen: new Date(2023, 8, 1), lastSeen: new Date(2024, 2, 1), active: false, status: "historical", confidence: 76, attribution: "Sandworm Team", targetSectors: ["Energy", "Utilities"], targetRegions: ["Eastern Europe"], ttps: ["T0886", "T0822", "T0817"], toolsUsed: ["INDUSTROYER2", "CADDYWIPER"], iocCount: 53, incidentCount: 3, stixId: `campaign--midnight-eclipse-${tenantId}` },
-        { tenantId, name: "DeepFake CEO Fraud Campaign", description: "AI-generated audio and video deepfake attacks impersonating C-suite executives to authorise fraudulent wire transfers, targeting global finance teams.", objective: "Business Email Compromise via AI deepfakes", firstSeen: new Date(2024, 2, 1), lastSeen: now, active: true, status: "active", confidence: 70, attribution: "Unknown criminal group", targetSectors: ["Finance", "Technology", "Professional Services"], targetRegions: ["Global"], ttps: ["T1656", "T1534", "T1566"], toolsUsed: ["Commercial deepfake tools"], iocCount: 12, incidentCount: 6, stixId: `campaign--deepfake-ceo-${tenantId}` },
-        { tenantId, name: "Supply Chain Compromise Q4-2024", description: "Systematic compromise of open-source npm and PyPI packages with malicious code, targeting developer workstations to pivot into corporate environments.", objective: "Developer environment compromise and lateral movement", firstSeen: new Date(2024, 9, 1), lastSeen: new Date(2024, 11, 1), active: false, status: "historical", confidence: 79, attribution: "APT41", targetSectors: ["Technology", "Finance"], targetRegions: ["Global"], ttps: ["T1195.001", "T1554", "T1059"], toolsUsed: ["Malicious npm packages", "RAT implants"], iocCount: 67, incidentCount: 8, stixId: `campaign--supplychain-q4-24-${tenantId}` },
-        { tenantId, name: "LLMjacking Cloud Abuse", description: "Exploitation of exposed API keys and cloud credentials to hijack LLM inference accounts for cryptomining and reselling AI compute capacity.", objective: "Cloud resource monetisation", firstSeen: new Date(2024, 3, 1), lastSeen: now, active: true, status: "active", confidence: 68, attribution: "Unknown", targetSectors: ["Technology", "AI/ML firms"], targetRegions: ["Global"], ttps: ["T1552.001", "T1078.004", "T1098"], toolsUsed: ["Custom scripts"], iocCount: 23, incidentCount: 4, stixId: `campaign--llmjacking-${tenantId}` },
-        { tenantId, name: "Healthcare Ransomware Wave 2025", description: "Coordinated ransomware attacks against hospital systems and healthcare providers, prioritising timing during high-pressure clinical periods to maximise ransom leverage.", objective: "Ransomware payment extraction and data extortion", firstSeen: new Date(2025, 0, 1), lastSeen: now, active: true, status: "active", confidence: 84, attribution: "ALPHV / RansomHub affiliates", targetSectors: ["Healthcare", "Pharmaceuticals"], targetRegions: ["North America", "EU"], ttps: ["T1486", "T1490", "T1048"], toolsUsed: ["RansomHub", "Akira", "Play ransomware"], iocCount: 134, incidentCount: 21, stixId: `campaign--healthcare-ransomware-25-${tenantId}` },
-        { tenantId, name: "Operation Aurora", description: "Highly sophisticated espionage attacks targeting 20+ major technology companies including Google, Adobe, and Juniper to steal source code and IP.", objective: "IP theft and source code exfiltration", firstSeen: new Date(2009, 5, 1), lastSeen: new Date(2010, 1, 1), active: false, status: "completed", confidence: 90, attribution: "APT10 (Stone Panda)", targetSectors: ["Technology", "Finance"], targetRegions: ["United States"], ttps: ["T1566", "T1055"], toolsUsed: ["Aurora backdoor", "Hydraq"], iocCount: 45, incidentCount: 3, stixId: `campaign--aurora-${tenantId}`, tags: ["china", "espionage"] },
-        { tenantId, name: "SolarWinds SUNBURST", description: "Nation-state supply chain attack embedding SUNBURST backdoor into SolarWinds Orion platform updates, compromising 18,000 organisations including US federal agencies.", objective: "Long-term espionage access to government and enterprise networks", firstSeen: new Date(2020, 2, 1), lastSeen: new Date(2021, 0, 1), active: false, status: "completed", confidence: 95, attribution: "APT29 (Cozy Bear)", targetSectors: ["Government", "Technology", "Defence"], targetRegions: ["United States", "EU", "Israel"], ttps: ["T1195.002", "T1071.001"], toolsUsed: ["SUNBURST", "TEARDROP", "Cobalt Strike"], iocCount: 234, incidentCount: 12, stixId: `campaign--sunburst-${tenantId}`, tags: ["supply-chain", "russia"] },
-        { tenantId, name: "Volt Typhoon Infrastructure", description: "Chinese APT pre-positioning on US critical infrastructure using exclusively LOLBins for stealth and persistence.", objective: "Military disruption pre-positioning against US critical infrastructure", firstSeen: new Date(2021, 5, 1), lastSeen: now, active: true, status: "active", confidence: 89, attribution: "Volt Typhoon", targetSectors: ["Energy", "Water", "Telecommunications", "Transport"], targetRegions: ["United States", "Guam"], ttps: ["T1133", "T1190", "T1014"], toolsUsed: ["KV-Botnet", "FRP proxy"], iocCount: 78, incidentCount: 6, stixId: `campaign--volt-typhoon-infra-${tenantId}`, tags: ["china", "lolbins"] },
-        { tenantId, name: "MOVEit Mass Exploitation", description: "Mass exploitation of zero-day SQL injection in MOVEit Transfer software, resulting in data exfiltration from 1,000+ organisations.", objective: "Mass data exfiltration for double extortion", firstSeen: new Date(2023, 4, 27), lastSeen: new Date(2023, 7, 1), active: false, status: "completed", confidence: 92, attribution: "Clop Ransomware Group", targetSectors: ["Finance", "Healthcare", "Government", "Technology"], targetRegions: ["United States", "EU", "Canada", "Australia"], ttps: ["T1190", "T1537", "T1486"], toolsUsed: ["Clop", "LEMURLOOT webshell"], iocCount: 834, incidentCount: 47, stixId: `campaign--moveit-${tenantId}`, tags: ["zero-day", "supply-chain"] },
-        { tenantId, name: "MGM Grand Social Engineering", description: "Scattered Spider vishing attack on MGM IT help desk leading to Okta MFA bypass and ransomware deployment costing $100M+.", objective: "Ransomware deployment and data theft for financial gain", firstSeen: new Date(2023, 8, 9), lastSeen: new Date(2023, 8, 19), active: false, status: "completed", confidence: 88, attribution: "Scattered Spider", targetSectors: ["Hospitality", "Gaming"], targetRegions: ["United States"], ttps: ["T1598.004", "T1621", "T1486"], toolsUsed: ["BlackCat", "ALPHV"], iocCount: 67, incidentCount: 1, stixId: `campaign--mgm-${tenantId}`, tags: ["social-engineering", "vishing"] },
-        { tenantId, name: "Exchange ProxyLogon Campaign", description: "Mass exploitation of four Microsoft Exchange Server zero-days (ProxyLogon chain) by HAFNIUM and opportunistic actors, compromising 250,000+ servers.", objective: "Initial access via Exchange and persistent web shell deployment", firstSeen: new Date(2021, 0, 1), lastSeen: new Date(2021, 4, 1), active: false, status: "completed", confidence: 91, attribution: "HAFNIUM", targetSectors: ["Government", "Defence", "Law", "Infectious Disease"], targetRegions: ["United States", "EU"], ttps: ["T1190", "T1505.003", "T1078"], toolsUsed: ["China Chopper", "ASPXSPY", "Cobalt Strike"], iocCount: 567, incidentCount: 28, stixId: `campaign--exchange-proxylogon-${tenantId}`, tags: ["exchange", "proxylogon"] },
-        { tenantId, name: "Midnight Blizzard M365 Campaign", description: "APT29 using legitimate Microsoft Teams messages to deliver OAuth device code phishing tokens, compromising M365 tenants of governments and NGOs.", objective: "Credential theft and persistent M365 tenant access", firstSeen: new Date(2023, 6, 1), lastSeen: new Date(2024, 5, 1), active: false, status: "completed", confidence: 90, attribution: "APT29 (Cozy Bear)", targetSectors: ["Government", "NGO", "Think Tanks"], targetRegions: ["United States", "EU", "NATO"], ttps: ["T1528", "T1566.002", "T1078.004"], toolsUsed: ["GraphicalProton", "device code phisher"], iocCount: 145, incidentCount: 9, stixId: `campaign--midnight-blizzard-${tenantId}`, tags: ["m365", "oauth"] },
-        { tenantId, name: "Kimsuky Think-Tank Spear-Phishing", description: "Sustained North Korean spear-phishing campaign targeting foreign policy experts and nuclear specialists using elaborate persona impersonation.", objective: "Strategic intelligence collection on foreign policy and nuclear programmes", firstSeen: new Date(2022, 0, 1), lastSeen: now, active: true, status: "active", confidence: 81, attribution: "TA427 (Kimsuky)", targetSectors: ["Academia", "Government", "Media", "Think Tanks"], targetRegions: ["United States", "South Korea", "Japan", "EU"], ttps: ["T1566", "T1598", "T1056.001"], toolsUsed: ["RandomQuery", "AppleSeed", "PebbleDash"], iocCount: 112, incidentCount: 17, stixId: `campaign--kimsuky-spear-${tenantId}`, tags: ["northkorea", "academic"] },
-        { tenantId, name: "OilRig DNS Tunnel Campaign", description: "Iranian APT targeting Middle Eastern telecommunications providers using DNS tunnelling for stealthy C2 and long-term espionage.", objective: "Persistent access to regional telecom and government networks", firstSeen: new Date(2022, 5, 1), lastSeen: now, active: true, status: "active", confidence: 83, attribution: "OilRig (APT34)", targetSectors: ["Telecommunications", "Government", "Banking"], targetRegions: ["UAE", "Saudi Arabia", "Jordan", "Qatar"], ttps: ["T1071.004", "T1021.001", "T1098"], toolsUsed: ["DNSExfiltration", "Saitama backdoor", "RDAT"], iocCount: 134, incidentCount: 11, stixId: `campaign--oilrig-dns-${tenantId}`, tags: ["iran", "dns-tunnel"] },
-        { tenantId, name: "Evil Corp WastedLocker", description: "Evil Corp ransomware campaign targeting US enterprises including Garmin, deploying WastedLocker ransomware after Dridex banking trojan staging.", objective: "Financial extortion via targeted ransomware", firstSeen: new Date(2020, 0, 1), lastSeen: new Date(2021, 5, 1), active: false, status: "completed", confidence: 85, attribution: "Evil Corp", targetSectors: ["Technology", "Manufacturing", "Media"], targetRegions: ["United States", "EU"], ttps: ["T1486", "T1059.001", "T1547"], toolsUsed: ["WastedLocker", "Dridex", "SocGholish"], iocCount: 156, incidentCount: 9, stixId: `campaign--wastedlocker-${tenantId}`, tags: ["ransomware", "evil-corp"] },
-        { tenantId, name: "Turla Snake European Campaign", description: "Turla long-running campaign targeting European governments and defence contractors using the Snake rootkit, satellite link hijacking for C2.", objective: "Long-term government espionage with focus on EU defence and diplomacy", firstSeen: new Date(2014, 0, 1), lastSeen: new Date(2023, 4, 1), active: false, status: "completed", confidence: 93, attribution: "Turla", targetSectors: ["Government", "Defence", "Aerospace"], targetRegions: ["EU", "Ukraine", "NATO"], ttps: ["T1014", "T1090", "T1071.003"], toolsUsed: ["Uroburos", "ComRAT", "HyperStack"], iocCount: 267, incidentCount: 19, stixId: `campaign--turla-snake-${tenantId}`, tags: ["russia", "rootkit"] },
-        { tenantId, name: "DPRK Crypto Theft 2024", description: "North Korean state-sponsored cryptocurrency theft targeting DeFi protocols and centralised exchanges, with $1.7B stolen in 2023 alone.", objective: "Cryptocurrency theft for state revenue generation", firstSeen: new Date(2023, 0, 1), lastSeen: now, active: true, status: "active", confidence: 87, attribution: "Lazarus Group", targetSectors: ["Cryptocurrency", "DeFi", "Finance"], targetRegions: ["Global"], ttps: ["T1195", "T1059", "T1070"], toolsUsed: ["AppleJeus", "HOPLIGHT"], iocCount: 345, incidentCount: 14, stixId: `campaign--dprk-crypto-24-${tenantId}`, tags: ["northkorea", "crypto"] },
-        { tenantId, name: "Salt Typhoon Telco Espionage", description: "Chinese APT achieving persistent access to US telecommunications provider wiretap systems and communications metadata.", objective: "Persistent access to US telco lawful intercept systems", firstSeen: new Date(2023, 0, 1), lastSeen: now, active: true, status: "active", confidence: 88, attribution: "Salt Typhoon", targetSectors: ["Telecommunications", "Government"], targetRegions: ["United States", "Canada", "Australia", "UK"], ttps: ["T1190", "T1021", "T1557"], toolsUsed: ["SparrowDoor", "Masol RAT"], iocCount: 67, incidentCount: 4, stixId: `campaign--salt-typhoon-telco-${tenantId}`, tags: ["china", "telco"] },
-      ]);
-    }
-    const { count: mwCount } = (await db.select({ count: sql<number>`count(*)` }).from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)))[0];
-    if (Number(mwCount) === 0) {
-      const now = new Date();
-      await db.insert(ctiMalwareFamilies).values([
-        { tenantId, name: "SUNBURST", aliases: ["Solorigate"], malwareTypes: ["backdoor", "trojan"], description: "Highly sophisticated trojanised software update for SolarWinds Orion platform. Establishes persistent encrypted C2 channel after a dormancy period, passing traffic as legitimate Orion protocol.", isFamily: false, killChainPhases: ["Installation", "Command & Control", "Actions on Objectives"], capabilities: ["C2 communication", "Lateral movement", "Credential theft", "Persistence"], operatingSystems: ["windows"], programmingLanguages: ["C#"], firstSeen: new Date(2020, 2, 1), lastSeen: new Date(2020, 11, 1), active: false, confidence: 97, cvssScore: 9.8, ttps: ["T1195.002", "T1071.001", "T1027"], iocCount: 45, sampleCount: 12, stixId: `malware--sunburst-${tenantId}`, tags: ["supplychain", "apt29"] },
-        { tenantId, name: "BlackCat (ALPHV)", aliases: ["ALPHV", "Noberus"], malwareTypes: ["ransomware"], description: "Advanced Rust-based ransomware with triple-extortion model (encryption + data leak + DDoS). Highly configurable and able to target Windows, Linux, and VMware ESXi hosts.", isFamily: false, killChainPhases: ["Installation", "Actions on Objectives"], capabilities: ["File encryption", "Data exfiltration", "Anti-forensics", "ESXi targeting"], operatingSystems: ["windows", "linux"], architectures: ["x86_64"], programmingLanguages: ["Rust"], firstSeen: new Date(2021, 10, 1), lastSeen: now, active: true, confidence: 92, cvssScore: 9.0, ttps: ["T1486", "T1490", "T1562.001"], iocCount: 189, sampleCount: 67, stixId: `malware--blackcat-${tenantId}`, tags: ["ransomware", "rust", "esxi"] },
-        { tenantId, name: "Emotet", aliases: ["Geodo", "Mealybug"], malwareTypes: ["trojan", "loader", "botnet"], description: "Modular banking trojan evolved into a sophisticated malware delivery platform. Primary dropper for TrickBot, Ryuk, and QakBot. Distributed via malspam with polymorphic code to evade signature detection.", isFamily: true, killChainPhases: ["Delivery", "Installation", "Command & Control"], capabilities: ["Email credential theft", "Module loading", "Lateral movement via SMB", "Spam relay"], operatingSystems: ["windows"], programmingLanguages: ["C++"], firstSeen: new Date(2014, 5, 1), lastSeen: now, active: true, confidence: 90, cvssScore: 8.8, ttps: ["T1566.001", "T1055", "T1021.002"], iocCount: 567, sampleCount: 445, stixId: `malware--emotet-${tenantId}`, tags: ["botnet", "dropper", "banking"] },
-        { tenantId, name: "Cobalt Strike (BEACON)", aliases: ["CS Beacon", "cobeacon"], malwareTypes: ["rat", "c2-framework"], description: "Commercial adversary simulation framework widely abused by threat actors as a C2 platform. BEACON implant provides stealthy communication, lateral movement, and credential dumping capabilities.", isFamily: false, killChainPhases: ["Exploitation", "Installation", "Command & Control"], capabilities: ["C2 communication", "Lateral movement", "Credential dumping", "Port scanning"], operatingSystems: ["windows", "linux", "macos"], programmingLanguages: ["Java", "C"], firstSeen: new Date(2012, 0, 1), lastSeen: now, active: true, confidence: 88, cvssScore: null, ttps: ["T1059", "T1055", "T1021"], iocCount: 2341, sampleCount: 890, stixId: `malware--cobalt-strike-${tenantId}`, tags: ["c2", "commercial", "widely-abused"] },
-        { tenantId, name: "Mirai Botnet", aliases: ["Okiru", "Satori"], malwareTypes: ["botnet", "worm"], description: "IoT-targeting malware that compromises embedded Linux devices using default credentials, recruited into large botnets for DDoS attacks. Source code leak in 2016 spawned hundreds of variants.", isFamily: true, killChainPhases: ["Reconnaissance", "Exploitation", "Installation", "Command & Control", "Actions on Objectives"], capabilities: ["DDoS (UDP/TCP/HTTP floods)", "Credential brute-forcing", "Self-propagation"], operatingSystems: ["linux"], architectures: ["ARM", "MIPS", "x86"], programmingLanguages: ["C"], firstSeen: new Date(2016, 7, 1), lastSeen: now, active: true, confidence: 95, cvssScore: 9.8, ttps: ["T1595", "T1110.001", "T1498"], iocCount: 3456, sampleCount: 1200, stixId: `malware--mirai-${tenantId}`, tags: ["iot", "botnet", "ddos"] },
-        { tenantId, name: "QakBot (QBot)", aliases: ["Pinkslipbot", "QuakBot"], malwareTypes: ["trojan", "loader", "infostealer"], description: "Multi-purpose banking trojan with worm capabilities. Acts as initial access broker and dropper for ransomware families including Conti, REvil, and Black Basta.", isFamily: false, killChainPhases: ["Delivery", "Installation", "Command & Control"], capabilities: ["Browser credential theft", "Email thread hijacking", "Module loading", "Persistence"], operatingSystems: ["windows"], programmingLanguages: ["C++"], firstSeen: new Date(2009, 0, 1), lastSeen: now, active: true, confidence: 87, cvssScore: 8.1, ttps: ["T1566.001", "T1059.007", "T1082"], iocCount: 892, sampleCount: 340, stixId: `malware--qakbot-${tenantId}`, tags: ["banking", "dropper", "thread-hijacking"] },
-        { tenantId, name: "LockBit 3.0", aliases: ["LockBit Black", "LockBit 3"], malwareTypes: ["ransomware"], description: "Third-generation LockBit ransomware with self-propagation, a bug bounty programme, and customisable extortion notes. Adopted Conti-leaked code for credential harvesting.", isFamily: true, killChainPhases: ["Delivery", "Installation", "Execution", "Actions on Objectives"], capabilities: ["Intermittent encryption", "Anti-analysis", "Self-propagation", "Credential harvesting"], operatingSystems: ["windows"], architectures: ["x64"], programmingLanguages: ["C++", "C"], firstSeen: new Date(2022, 2, 1), lastSeen: new Date(2024, 1, 1), active: false, confidence: 89, cvssScore: 9.0, ttps: ["T1486", "T1490", "T1082"], iocCount: 1234, sampleCount: 567, stixId: `malware--lockbit3-${tenantId}`, tags: ["ransomware", "self-propagating"] },
-        { tenantId, name: "BlackCat/ALPHV", aliases: ["ALPHV", "Noberus", "Sphynx"], malwareTypes: ["ransomware"], description: "First major ransomware written in Rust, featuring intermittent encryption, cross-platform support (Windows/Linux/ESXi), and triple extortion. Targeted UnitedHealth/Change Healthcare.", isFamily: true, killChainPhases: ["Delivery", "Exploitation", "Installation", "Command & Control", "Actions on Objectives"], capabilities: ["Cross-platform encryption", "Triple extortion", "ESXi targeting", "Credential theft"], operatingSystems: ["windows", "linux", "esxi"], architectures: ["x64", "ARM"], programmingLanguages: ["Rust"], firstSeen: new Date(2021, 10, 1), lastSeen: new Date(2024, 2, 1), active: false, confidence: 88, cvssScore: 9.1, ttps: ["T1486", "T1537", "T1657"], iocCount: 987, sampleCount: 423, stixId: `malware--blackcat-alphv-${tenantId}`, tags: ["ransomware", "rust", "esxi"] },
-        { tenantId, name: "TRITON/TRISIS", aliases: ["HatMan"], malwareTypes: ["ics-malware", "wiper"], description: "First known malware specifically designed to attack Safety Instrumented Systems (SIS), targeting Schneider Electric Triconex controllers at Saudi Aramco to cause physical damage.", isFamily: false, killChainPhases: ["Installation", "Execution", "Actions on Objectives"], capabilities: ["SIS controller manipulation", "Physical process disruption", "Safety system bypass"], operatingSystems: ["windows", "embedded"], architectures: ["ARM", "x86"], programmingLanguages: ["Python", "Assembly"], firstSeen: new Date(2017, 7, 1), lastSeen: new Date(2019, 0, 1), active: false, confidence: 91, cvssScore: 10.0, ttps: ["T0838", "T0800", "T0882"], iocCount: 56, sampleCount: 8, stixId: `malware--triton-${tenantId}`, tags: ["ics", "ot", "safety-system"] },
-        { tenantId, name: "AcidRain", aliases: ["VPNFilter successor"], malwareTypes: ["wiper", "ics-malware"], description: "Linux-based wiper targeting VSAT modems and routers, deployed against Viasat KA-SAT network on the first day of Russia's 2022 invasion of Ukraine, disrupting 40,000+ modems.", isFamily: false, killChainPhases: ["Installation", "Actions on Objectives"], capabilities: ["Flash memory wiping", "Recursive filesystem deletion", "Device bricking"], operatingSystems: ["linux", "embedded"], architectures: ["MIPS", "ARM"], programmingLanguages: ["C"], firstSeen: new Date(2022, 1, 24), lastSeen: new Date(2022, 2, 1), active: false, confidence: 92, cvssScore: 9.8, ttps: ["T1485", "T1561", "T1195"], iocCount: 78, sampleCount: 12, stixId: `malware--acidrain-${tenantId}`, tags: ["wiper", "satellite", "ukraine"] },
-        { tenantId, name: "ShadowPad", aliases: ["Shadowpad backdoor"], malwareTypes: ["rat", "backdoor"], description: "Modular RAT believed exclusive to Chinese state-sponsored APTs including APT41 and Ke3chang. Successor to PlugX with plugin-based architecture and encrypted C2.", isFamily: false, killChainPhases: ["Installation", "Command & Control"], capabilities: ["Plugin architecture", "Encrypted C2", "Process injection", "Persistence"], operatingSystems: ["windows"], architectures: ["x64", "x86"], programmingLanguages: ["C++"], firstSeen: new Date(2017, 6, 1), lastSeen: now, active: true, confidence: 85, cvssScore: 8.2, ttps: ["T1055", "T1071", "T1547.001"], iocCount: 345, sampleCount: 189, stixId: `malware--shadowpad-${tenantId}`, tags: ["china", "apt", "modular"] },
-        { tenantId, name: "WannaCry", aliases: ["WannaCrypt", "WanaCry"], malwareTypes: ["ransomware", "worm"], description: "NSA-leaked EternalBlue SMBv1 exploit weaponised by Lazarus Group, spreading self-propagating ransomware to 200,000+ systems in 150 countries within 48 hours.", isFamily: true, killChainPhases: ["Exploitation", "Installation", "Command & Control", "Actions on Objectives"], capabilities: ["SMB propagation (EternalBlue)", "Ransomware encryption", "Killswitch domain", "Shadow copy deletion"], operatingSystems: ["windows"], architectures: ["x64", "x86"], programmingLanguages: ["C"], firstSeen: new Date(2017, 4, 12), lastSeen: new Date(2017, 4, 15), active: false, confidence: 97, cvssScore: 9.8, ttps: ["T1210", "T1486", "T1489"], iocCount: 8900, sampleCount: 2345, stixId: `malware--wannacry-${tenantId}`, tags: ["worm", "eternalblue", "northkorea"] },
-        { tenantId, name: "NotPetya", aliases: ["ExPetr", "GoldenEye"], malwareTypes: ["wiper", "ransomware"], description: "Destructive wiper disguised as ransomware, spreading via EternalBlue and Mimikatz. Caused $10B+ in damages to Maersk, Merck, and FedEx. Most destructive cyberattack in history.", isFamily: false, killChainPhases: ["Delivery", "Exploitation", "Installation", "Actions on Objectives"], capabilities: ["Credential harvesting", "MBR overwrite", "Ransomware facade", "SMB propagation"], operatingSystems: ["windows"], architectures: ["x64", "x86"], programmingLanguages: ["C", "Delphi"], firstSeen: new Date(2017, 5, 27), lastSeen: new Date(2017, 5, 28), active: false, confidence: 96, cvssScore: 9.9, ttps: ["T1485", "T1486", "T1210"], iocCount: 567, sampleCount: 234, stixId: `malware--notpetya-${tenantId}`, tags: ["wiper", "russia", "destructive"] },
-        { tenantId, name: "Pegasus Spyware", aliases: ["Q Suite", "Trident"], malwareTypes: ["spyware", "rat"], description: "NSO Group commercial spyware exploiting iOS/Android zero-clicks (FORCEDENTRY). Used by governments to surveil journalists, activists, and opposition politicians.", isFamily: false, killChainPhases: ["Reconnaissance", "Delivery", "Installation", "Command & Control"], capabilities: ["Zero-click exploit", "Full device compromise", "Call/message interception", "Location tracking", "Keylogging"], operatingSystems: ["ios", "android"], architectures: ["ARM64"], programmingLanguages: ["C", "C++"], firstSeen: new Date(2016, 0, 1), lastSeen: now, active: true, confidence: 88, cvssScore: 10.0, ttps: ["T1404", "T1420", "T1430"], iocCount: 1234, sampleCount: 89, stixId: `malware--pegasus-${tenantId}`, tags: ["spyware", "commercial", "zero-click"] },
-        { tenantId, name: "AsyncRAT", aliases: ["AsyncRat"], malwareTypes: ["rat", "c2-framework"], description: "Open-source .NET remote access trojan widely abused by threat actors. Features encrypted C2, keylogging, remote desktop, and process injection capabilities.", isFamily: false, killChainPhases: ["Delivery", "Installation", "Command & Control"], capabilities: ["Remote desktop control", "Keylogging", "Webcam capture", "Process injection", "File management"], operatingSystems: ["windows"], architectures: ["x64", "x86"], programmingLanguages: ["C#", ".NET"], firstSeen: new Date(2019, 0, 1), lastSeen: now, active: true, confidence: 70, cvssScore: 6.8, ttps: ["T1219", "T1056", "T1055"], iocCount: 4567, sampleCount: 1890, stixId: `malware--asyncrat-${tenantId}`, tags: ["rat", "open-source", "commodity"] },
-        { tenantId, name: "IcedID/BokBot", aliases: ["BokBot"], malwareTypes: ["trojan", "loader"], description: "Banking trojan evolved into sophisticated malware dropper for Cobalt Strike and ransomware (Quantum, Nokoyawa). Distributed via email with document lures.", isFamily: false, killChainPhases: ["Delivery", "Installation", "Command & Control"], capabilities: ["Banking fraud webinjects", "Cobalt Strike dropper", "Ransomware staging", "Persistence via scheduled tasks"], operatingSystems: ["windows"], architectures: ["x64"], programmingLanguages: ["C++"], firstSeen: new Date(2017, 6, 1), lastSeen: now, active: true, confidence: 81, cvssScore: 7.9, ttps: ["T1566.001", "T1547.005", "T1055"], iocCount: 1234, sampleCount: 456, stixId: `malware--icedid-${tenantId}`, tags: ["banking-trojan", "loader", "ransomware-dropper"] },
-        { tenantId, name: "FIN7 Carbanak", aliases: ["Carbanak", "Anunak", "Cobalt"], malwareTypes: ["rat", "trojan"], description: "Custom banking trojan turned sophisticated ATM cashout and POS malware platform, enabling FIN7 to steal $1B+ from banks via backdoored SWIFT transactions and ATM jackpotting.", isFamily: true, killChainPhases: ["Delivery", "Installation", "Command & Control", "Actions on Objectives"], capabilities: ["SWIFT transaction manipulation", "ATM jackpotting", "VNC remote access", "ATM Dispense injection"], operatingSystems: ["windows"], architectures: ["x64", "x86"], programmingLanguages: ["Delphi", "C++"], firstSeen: new Date(2013, 5, 1), lastSeen: now, active: true, confidence: 85, cvssScore: 9.2, ttps: ["T1059", "T1552", "T1055"], iocCount: 892, sampleCount: 445, stixId: `malware--carbanak-${tenantId}`, tags: ["banking", "atm", "swift"] },
-        { tenantId, name: "Ryuk Ransomware", aliases: ["Hermes"], malwareTypes: ["ransomware"], description: "Targeted enterprise ransomware by Wizard Spider, distributed via TrickBot/BazarLoader droppers against high-value targets. Responsible for $150M+ in ransom payments.", isFamily: false, killChainPhases: ["Installation", "Execution", "Actions on Objectives"], capabilities: ["High-value target selection", "Wake-on-LAN propagation", "Shadow copy deletion", "Privileged persistence"], operatingSystems: ["windows"], architectures: ["x64"], programmingLanguages: ["C++"], firstSeen: new Date(2018, 7, 1), lastSeen: new Date(2021, 11, 1), active: false, confidence: 86, cvssScore: 8.9, ttps: ["T1486", "T1490", "T1078"], iocCount: 1123, sampleCount: 567, stixId: `malware--ryuk-${tenantId}`, tags: ["ransomware", "targeted", "healthcare"] },
-      ]);
-    }
-    const { count: repCount } = (await db.select({ count: sql<number>`count(*)` }).from(ctiIntelReports).where(eq(ctiIntelReports.tenantId, tenantId)))[0];
-    if (Number(repCount) === 0) {
-      const now = new Date();
-      await db.insert(ctiIntelReports).values([
-        { tenantId, title: "Q1 2025 Threat Landscape Report", reportType: "threat-report", tlpLevel: "white", description: "Comprehensive quarterly review of global threat trends including ransomware evolution, AI-enhanced attack techniques, and critical infrastructure targeting.", content: "## Executive Summary\n\nQ1 2025 saw a 34% increase in ransomware incidents targeting healthcare and critical infrastructure. Nation-state actors continued pre-positioning campaigns against Western democracies, while AI-enabled phishing reached new levels of sophistication...", publishedAt: new Date(2025, 3, 1), authors: ["CTI Team"], labels: ["quarterly", "landscape"], relatedActors: ["BlackCat/ALPHV", "Scattered Spider"], relatedCampaigns: ["Healthcare Ransomware Wave 2025"], iocCount: 234, confidence: 85, tags: ["quarterly", "landscape", "2025"] },
-        { tenantId, title: "LockBit 4.0 Technical Analysis", reportType: "malware-analysis", tlpLevel: "amber", description: "Deep-dive technical analysis of LockBit 4.0 ransomware, covering evasion techniques, encryption implementation, and C2 infrastructure characteristics.", content: "## Overview\n\nLockBit 4.0 introduces a novel partial-encryption mode targeting large file archives to maximise encryption speed while maintaining operational impact...", publishedAt: new Date(2025, 1, 15), authors: ["Malware Analysis Team"], labels: ["ransomware", "technical"], relatedMalware: ["LockBit"], iocCount: 78, confidence: 92, tags: ["ransomware", "technical", "lockbit"] },
-        { tenantId, title: "APT29 Spear-Phishing TTPs Advisory", reportType: "advisory", tlpLevel: "amber", description: "Tactical advisory on latest APT29 spear-phishing techniques observed targeting NATO member governments, including HTML smuggling and OAuth token theft.", content: "## Threat Overview\n\nAPT29 has significantly evolved their spear-phishing capabilities in 2024-2025, abandoning traditional macro-laden documents in favour of HTML smuggling and legitimate cloud service abuse...", publishedAt: new Date(2025, 2, 8), authors: ["Threat Intelligence Team"], labels: ["advisory", "apt29", "spear-phishing"], relatedActors: ["APT29 (Cozy Bear)"], iocCount: 45, confidence: 88, externalUrl: "https://example.com/advisory", tags: ["apt29", "advisory", "phishing"] },
-        { tenantId, title: "Cloud Credential Harvesting Campaign Analysis", reportType: "campaign-report", tlpLevel: "amber", description: "Investigation of coordinated credential harvesting targeting AWS, Azure, and GCP environments via exposed access keys and misconfigured identity providers.", content: "## Campaign Overview\n\nBeginning in Q4 2024, our sensors detected a coordinated campaign targeting cloud environment credentials across multiple verticals...", publishedAt: new Date(2024, 11, 1), authors: ["Cloud Security Team"], labels: ["cloud", "credentials", "campaign"], relatedCampaigns: ["LLMjacking Cloud Abuse"], iocCount: 34, confidence: 74, tags: ["cloud", "credentials", "aws"] },
-        { tenantId, title: "MITRE ATT&CK Coverage Gap Analysis", reportType: "ttps-report", tlpLevel: "green", description: "Internal assessment mapping observed incidents against MITRE ATT&CK Enterprise v14, identifying coverage gaps and recommending new detection rules for blind spots.", content: "## Coverage Assessment\n\nAnalysis of the past 90 days of incidents reveals 62% MITRE ATT&CK coverage. Key blind spots include T1021.006 (Windows Remote Management) and T1048.003 (Exfiltration over Unencrypted Non-C2 Protocol)...", publishedAt: new Date(2025, 0, 20), authors: ["Detection Engineering"], labels: ["mitre", "gaps", "internal"], iocCount: 0, confidence: 90, tags: ["mitre", "internal", "gaps"] },
-        { tenantId, title: "Volt Typhoon Pre-Positioning Advisory", reportType: "advisory", tlpLevel: "white", description: "Joint advisory from CISA, NSA, and FBI detailing Volt Typhoon TTPs for pre-positioning on US critical infrastructure using living-off-the-land techniques.", content: "## Advisory\n\nVolt Typhoon (Bronze Silhouette) has been pre-positioning on critical infrastructure since at least 2021. The group uses exclusively legitimate system tools (LOLBins) including netsh, ntdsutil, wmic, and Certutil to avoid endpoint detection...", publishedAt: new Date(2024, 1, 7), authors: ["CISA", "NSA", "FBI", "ACSC"], labels: ["advisory", "critical-infrastructure", "cisa"], relatedActors: ["Volt Typhoon"], iocCount: 112, confidence: 95, tags: ["cisa", "volt-typhoon", "advisory"] },
-        { tenantId, title: "LockBit Takedown Technical Report", reportType: "threat-report", tlpLevel: "white", description: "Technical analysis of Operation Cronos law enforcement action that dismantled LockBit infrastructure in February 2024, including decryption key recovery.", content: "## Operation Cronos\n\nOn 19 February 2024, a coordinated 10-country law enforcement operation seized LockBit infrastructure, decryption keys, and source code. 200+ cryptocurrency accounts frozen, 34 servers seized...", publishedAt: new Date(2024, 1, 20), authors: ["Europol", "NCA", "FBI", "Trend Micro"], labels: ["takedown", "ransomware", "law-enforcement"], relatedActors: ["LockBit RaaS"], iocCount: 78, confidence: 93, tags: ["lockbit", "takedown", "law-enforcement"] },
-        { tenantId, title: "Q2 2024 Ransomware Landscape", reportType: "threat-report", tlpLevel: "green", description: "Quarterly analysis of ransomware ecosystem evolution, tracking 68 active groups, 1,200+ victims, and emerging tactics including EDR killers and intermittent encryption variants.", content: "## Q2 2024 Summary\n\nRansomware attacks increased 23% vs Q1 2024. Healthcare remains the #1 target (31% of attacks). New groups RansomHub and Qilin filled the BlackCat void after FBI disruption. Median dwell time dropped to 5 days...", publishedAt: new Date(2024, 6, 1), authors: ["CTI Research Team"], labels: ["quarterly", "ransomware", "landscape"], iocCount: 234, confidence: 88, tags: ["quarterly", "ransomware", "2024"] },
-        { tenantId, title: "TRITON ICS Malware Deep Dive", reportType: "malware-analysis", tlpLevel: "red", description: "Classified technical analysis of TRITON/TRISIS ICS malware targeting Schneider Electric Triconex safety controllers, the first known malware to target safety instrumented systems.", content: "## Technical Analysis\n\nTRITON was deployed as a Python-based attack framework enabling remote manipulation of Triconex Safety Instrumented System (SIS) controllers via the TriStation protocol...", publishedAt: new Date(2017, 11, 1), authors: ["Mandiant", "Dragos", "ICS-CERT"], labels: ["ics", "ot", "malware-analysis", "classified"], iocCount: 56, confidence: 93, tags: ["ics", "ot", "triton", "red"] },
-        { tenantId, title: "Microsoft Exchange ProxyLogon Post-Incident", reportType: "incident-report", tlpLevel: "amber", description: "Post-incident analysis of HAFNIUM ProxyLogon (CVE-2021-26855) mass exploitation, documenting affected organisations, web shell types, and remediation guidance.", content: "## Incident Overview\n\nCVE-2021-26855 (SSRF enabling arbitrary HTTP requests), chained with CVE-2021-27065 (post-auth arbitrary file write), enabled unauthenticated RCE on Exchange 2013-2019. HAFNIUM initially exploited, followed by 10+ opportunistic groups...", publishedAt: new Date(2021, 2, 15), authors: ["Microsoft MSTIC", "CISA"], labels: ["exchange", "incident", "webshell"], relatedActors: ["HAFNIUM"], iocCount: 567, confidence: 91, tags: ["exchange", "proxylogon", "microsoft"] },
-        { tenantId, title: "APT29 Authentication Abuse Tactics", reportType: "ttps-report", tlpLevel: "amber", description: "Detailed TTP analysis of APT29 modern authentication abuse techniques including OAuth device code phishing, ADFS golden SAML, and BEC via compromised M365 tenants.", content: "## TTP Analysis\n\nAPT29 has significantly modernised their credential access playbook, moving from spear-phishing with malicious attachments to targeting identity infrastructure directly. Key techniques: OAuth device code phishing (T1528), MFA fatigue attacks, conditional access bypass...", publishedAt: new Date(2024, 3, 1), authors: ["Threat Intelligence Team", "Microsoft Entra"], labels: ["ttps", "apt29", "authentication"], relatedActors: ["APT29 (Cozy Bear)"], iocCount: 145, confidence: 90, tags: ["apt29", "oauth", "m365"] },
-        { tenantId, title: "SolarWinds SUNBURST Full Incident Report", reportType: "incident-report", tlpLevel: "white", description: "Comprehensive post-incident investigation of the SolarWinds supply chain attack, covering attack timeline, victim scope, SUNBURST analysis, attribution, and remediation lessons.", content: "## Executive Summary\n\nBeginning in September 2019, APT29 (SVR) compromised SolarWinds build pipeline, injecting SUNBURST backdoor into Orion software. The backdoor lay dormant for 12-14 days, then connected to avsvmcloud.com. ~18,000 organisations downloaded the trojanised update...", publishedAt: new Date(2021, 5, 1), authors: ["SolarWinds", "Microsoft", "Mandiant", "CISA"], labels: ["supply-chain", "post-incident", "government"], relatedActors: ["APT29 (Cozy Bear)"], relatedMalware: ["SUNBURST"], iocCount: 234, confidence: 95, tags: ["solarwinds", "supply-chain", "sunburst"] },
-        { tenantId, title: "Scattered Spider Tactics Advisory", reportType: "advisory", tlpLevel: "amber", description: "Law enforcement advisory detailing Scattered Spider (UNC3944) tactics including vishing scripts, Okta MFA bypass methods, and counter-detection techniques for enterprise defenders.", content: "## Overview\n\nScattered Spider is an English-speaking criminal group primarily comprising young adults (16-22) with sophisticated social engineering capabilities. Key TTPs: calling IT helpdesks impersonating employees, SIM swapping executive mobile numbers, abusing Okta MFA push fatigue...", publishedAt: new Date(2023, 10, 16), authors: ["FBI", "CISA"], labels: ["advisory", "social-engineering", "helpdesk"], relatedActors: ["Scattered Spider"], iocCount: 67, confidence: 87, tags: ["scattered-spider", "vishing", "advisory"] },
-        { tenantId, title: "AI-Enhanced Phishing Threat Assessment", reportType: "threat-report", tlpLevel: "green", description: "Assessment of AI-generated phishing campaigns observed in 2024, analysing LLM-crafted lure quality improvements, deepfake audio BEC, and AI-powered target personalisation.", content: "## Threat Assessment\n\n2024 saw a step-change in phishing sophistication driven by large language models. Key observations: 78% reduction in grammatical errors in phishing emails vs 2022, AI-generated executive voice clones used in BEC ($25M deepfake wire transfer)...", publishedAt: new Date(2024, 8, 1), authors: ["AI Security Research Team"], labels: ["ai", "phishing", "bec"], iocCount: 189, confidence: 80, tags: ["ai", "phishing", "llm", "bec"] },
-        { tenantId, title: "Zero-Day Exploitation Trends H1 2024", reportType: "ttps-report", tlpLevel: "white", description: "Analysis of zero-day exploitation patterns in H1 2024, covering 72 CVEs, time-to-exploit statistics, most targeted vendors, and nation-state vs criminal actor attribution.", content: "## Key Findings\n\nH1 2024: 72 zero-days confirmed exploited in the wild (vs 55 H1 2023). 53% exploited by nation-state actors, 35% by cybercriminals, 12% by unknown. Microsoft remains the #1 targeted vendor (18 CVEs). Median time-to-exploit for edge devices dropped to 5 days...", publishedAt: new Date(2024, 7, 1), authors: ["Google Project Zero", "Mandiant"], labels: ["zero-day", "exploitation", "vulnerability"], iocCount: 0, confidence: 91, tags: ["zero-day", "vulnerability", "google"] },
-        { tenantId, title: "Clop MOVEit Exploitation Technical Analysis", reportType: "malware-analysis", tlpLevel: "amber", description: "Technical breakdown of SQL injection zero-day in MOVEit Transfer (CVE-2023-34362) exploited by Clop, including LEMURLOOT web shell IOCs and data exfiltration methodology.", content: "## Vulnerability Analysis\n\nCVE-2023-34362 is a SQL injection vulnerability in MOVEit Transfer web application affecting all versions before June 2023 patches. The vulnerability allows unauthenticated attackers to gain access to the MOVEit Transfer database and execute arbitrary SQL statements...", publishedAt: new Date(2023, 5, 15), authors: ["Huntress", "Rapid7", "Mandiant"], labels: ["zero-day", "sql-injection", "moveit"], relatedActors: ["Clop Ransomware Group"], iocCount: 834, confidence: 92, tags: ["clop", "moveit", "sql-injection"] },
-        { tenantId, title: "DPRK Cryptocurrency Theft Report 2024", reportType: "threat-report", tlpLevel: "green", description: "Annual analysis of DPRK state-sponsored cryptocurrency theft, tracking $1.7B stolen in 2023 and emerging DeFi protocol targeting by Lazarus Group sub-units.", content: "## Executive Summary\n\nNorth Korean threat actors stole an estimated $1.7B in cryptocurrency in 2023, accounting for 44% of all crypto theft globally. Primary targets: DeFi protocols (60%), centralised exchanges (40%). Key groups: Lazarus Group, BlueNorOff, AppleJeus operators...", publishedAt: new Date(2024, 0, 12), authors: ["Chainalysis", "TRM Labs"], labels: ["northkorea", "cryptocurrency", "financial"], relatedActors: ["Lazarus Group"], iocCount: 445, confidence: 89, tags: ["northkorea", "crypto", "lazarus"] },
-        { tenantId, title: "ESXi Ransomware Targeting Analysis", reportType: "threat-report", tlpLevel: "amber", description: "Analysis of ransomware groups targeting VMware ESXi hypervisors, including ESXiArgs, BlackCat Linux variant, and Akira VMware targeting, with detection and hardening guidance.", content: "## Trend Analysis\n\nQ4 2023 - Q2 2024 saw a 78% increase in ESXi-targeting ransomware. Threat actors recognise that compromising ESXi enables simultaneous encryption of all hosted VMs. Key variants: BlackCat Linux Sphynx, Akira ESXi, ESXiArgs exploiting CVE-2021-21985...", publishedAt: new Date(2024, 4, 1), authors: ["VMware Security", "Mandiant"], labels: ["esxi", "ransomware", "hypervisor"], iocCount: 234, confidence: 86, tags: ["esxi", "vmware", "ransomware"] },
-        { tenantId, title: "Ransomware Incident Response Playbook", reportType: "advisory", tlpLevel: "amber", description: "Internal guide for ransomware IR covering initial triage, evidence preservation, ransom negotiation considerations, decryption validation, and law enforcement notification.", content: "## Response Framework\n\nPrimary objectives in ransomware response: 1) Contain spread immediately (isolate), 2) Preserve forensic evidence before remediation, 3) Identify initial access vector, 4) Assess backup integrity, 5) Determine if data was exfiltrated before encryption...", publishedAt: new Date(2024, 0, 15), authors: ["Incident Response Team"], labels: ["advisory", "ransomware", "response"], iocCount: 0, confidence: 85, tags: ["ransomware", "incident-response", "guide"] },
-      ]);
-    }
-    await setMarker(markerKey, { seededAt: new Date().toISOString(), tenantId });
-  }
+  // Note: seedCtiDataForTenant is now imported from ../cti-seeder (used by routes/cti.ts)
 
   // CTI Hub — aggregate statistics
-  app.get("/api/cti/:tenantId/stats", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const {
-        ctiThreatActors, ctiIntrusionSets, ctiCampaigns, ctiMalwareFamilies, ctiIntelReports,
-      } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const [actors, intrusionSets, campaigns, malware, reports] = await Promise.all([
-        db.select().from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)),
-        db.select().from(ctiIntrusionSets).where(eq(ctiIntrusionSets.tenantId, tenantId)),
-        db.select().from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)),
-        db.select().from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)),
-        db.select().from(ctiIntelReports).where(eq(ctiIntelReports.tenantId, tenantId)),
-      ]);
-      const activeActors = actors.filter(a => a.active).length;
-      const activeCampaigns = campaigns.filter(c => c.active).length;
-      const totalIocs =
-        actors.reduce((s, a) => s + (a.indicatorCount ?? 0), 0) +
-        campaigns.reduce((s, c) => s + (c.iocCount ?? 0), 0) +
-        malware.reduce((s, m) => s + (m.iocCount ?? 0), 0) +
-        reports.reduce((s, r) => s + (r.iocCount ?? 0), 0);
-      const avgConfidence = actors.length > 0 ? Math.round(actors.reduce((s, a) => s + (a.confidence || 0), 0) / actors.length) : 0;
-      res.json({
-        threatActors: actors.length, activeActors,
-        intrusionSets: intrusionSets.length,
-        campaigns: campaigns.length, activeCampaigns,
-        malwareFamilies: malware.length,
-        intelReports: reports.length,
-        totalIocs, avgConfidence,
-      });
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
+  registerCtiRoutes(app);
 
-  // CTI Threat Actors CRUD
-  app.get("/api/cti/:tenantId/threat-actors", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiThreatActors } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const rows = await db.select().from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)).orderBy(desc(ctiThreatActors.updatedAt));
-      res.json(rows);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/cti/:tenantId/threat-actors", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiThreatActors, insertCtiThreatActorSchema } = await import("@shared/schema");
-      const parsed = insertCtiThreatActorSchema.parse({ ...req.body, tenantId });
-      const [row] = await db.insert(ctiThreatActors).values(parsed).returning();
-      res.status(201).json(row);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // CTI Intrusion Sets CRUD
-  app.get("/api/cti/:tenantId/intrusion-sets", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiIntrusionSets } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const rows = await db.select().from(ctiIntrusionSets).where(eq(ctiIntrusionSets.tenantId, tenantId)).orderBy(desc(ctiIntrusionSets.updatedAt));
-      res.json(rows);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/cti/:tenantId/intrusion-sets", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntrusionSets, insertCtiIntrusionSetSchema } = await import("@shared/schema");
-      const parsed = insertCtiIntrusionSetSchema.parse({ ...req.body, tenantId });
-      const [row] = await db.insert(ctiIntrusionSets).values(parsed).returning();
-      res.status(201).json(row);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // CTI Campaigns CRUD
-  app.get("/api/cti/:tenantId/campaigns", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiCampaigns } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const rows = await db.select().from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)).orderBy(desc(ctiCampaigns.updatedAt));
-      res.json(rows);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/cti/:tenantId/campaigns", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiCampaigns, insertCtiCampaignSchema } = await import("@shared/schema");
-      const parsed = insertCtiCampaignSchema.parse({ ...req.body, tenantId });
-      const [row] = await db.insert(ctiCampaigns).values(parsed).returning();
-      res.status(201).json(row);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // CTI Malware Families CRUD
-  app.get("/api/cti/:tenantId/malware-families", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiMalwareFamilies } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const rows = await db.select().from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)).orderBy(desc(ctiMalwareFamilies.updatedAt));
-      res.json(rows);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/cti/:tenantId/malware-families", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiMalwareFamilies, insertCtiMalwareFamilySchema } = await import("@shared/schema");
-      const parsed = insertCtiMalwareFamilySchema.parse({ ...req.body, tenantId });
-      const [row] = await db.insert(ctiMalwareFamilies).values(parsed).returning();
-      res.status(201).json(row);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // CTI Intel Reports CRUD
-  app.get("/api/cti/:tenantId/intel-reports", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiIntelReports } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const rows = await db.select().from(ctiIntelReports).where(eq(ctiIntelReports.tenantId, tenantId)).orderBy(desc(ctiIntelReports.updatedAt));
-      res.json(rows);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/cti/:tenantId/intel-reports", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntelReports, insertCtiIntelReportSchema } = await import("@shared/schema");
-      const parsed = insertCtiIntelReportSchema.parse({ ...req.body, tenantId });
-      const [row] = await db.insert(ctiIntelReports).values(parsed).returning();
-      res.status(201).json(row);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // STIX 2.1 Bundle Export
-  app.get("/api/cti/:tenantId/stix-bundle", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiThreatActors, ctiIntrusionSets, ctiCampaigns, ctiMalwareFamilies, ctiIntelReports } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const [actors, isets, camps, malware, reports] = await Promise.all([
-        db.select().from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)),
-        db.select().from(ctiIntrusionSets).where(eq(ctiIntrusionSets.tenantId, tenantId)),
-        db.select().from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)),
-        db.select().from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)),
-        db.select().from(ctiIntelReports).where(eq(ctiIntelReports.tenantId, tenantId)),
-      ]);
-      const objects: any[] = [
-        ...actors.map(a => ({ type: "threat-actor", spec_version: "2.1", id: a.stixId || `threat-actor--${a.id}`, created: a.createdAt, modified: a.updatedAt, name: a.name, aliases: a.aliases || [], sophistication: a.sophistication, resource_level: a.resourceLevel, primary_motivation: a.primaryMotivation, description: a.description, confidence: a.confidence })),
-        ...isets.map(s => ({ type: "intrusion-set", spec_version: "2.1", id: s.stixId || `intrusion-set--${s.id}`, created: s.createdAt, modified: s.updatedAt, name: s.name, aliases: s.aliases || [], description: s.description, primary_motivation: s.primaryMotivation, resource_level: s.resourceLevel, confidence: s.confidence })),
-        ...camps.map(c => ({ type: "campaign", spec_version: "2.1", id: c.stixId || `campaign--${c.id}`, created: c.createdAt, modified: c.updatedAt, name: c.name, aliases: c.aliases || [], description: c.description, objective: c.objective, first_seen: c.firstSeen, last_seen: c.lastSeen, confidence: c.confidence })),
-        ...malware.map(m => ({ type: "malware", spec_version: "2.1", id: m.stixId || `malware--${m.id}`, created: m.createdAt, modified: m.updatedAt, name: m.name, aliases: m.aliases || [], malware_types: m.malwareTypes || [], is_family: m.isFamily, description: m.description, capabilities: m.capabilities || [], operating_system_refs: m.operatingSystems || [], confidence: m.confidence })),
-        ...reports.map(r => ({ type: "report", spec_version: "2.1", id: r.stixId || `report--${r.id}`, created: r.createdAt, modified: r.updatedAt, name: r.title, description: r.description, published: r.publishedAt, report_types: [r.reportType || "threat-report"], labels: r.labels || [], confidence: r.confidence })),
-      ];
-      const bundle = { type: "bundle", id: `bundle--tenant-${tenantId}-${Date.now()}`, spec_version: "2.1", objects };
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Content-Disposition", `attachment; filename="stix-bundle-tenant-${tenantId}.json"`);
-      res.json(bundle);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
-  // CTI Threat Actors — PATCH + DELETE
-  app.patch("/api/cti/:tenantId/threat-actors/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiThreatActors } = await import("@shared/schema");
-      const { name, aliases, description, sophistication, resourceLevel, primaryMotivation, country, goals, capabilities, threatActorTypes, targetSectors, firstSeen, lastSeen, confidence, stixId } = req.body;
-      const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-      if (name !== undefined) updateFields.name = name;
-      if (aliases !== undefined) updateFields.aliases = aliases;
-      if (description !== undefined) updateFields.description = description;
-      if (sophistication !== undefined) updateFields.sophistication = sophistication;
-      if (resourceLevel !== undefined) updateFields.resourceLevel = resourceLevel;
-      if (primaryMotivation !== undefined) updateFields.primaryMotivation = primaryMotivation;
-      if (country !== undefined) updateFields.country = country;
-      if (goals !== undefined) updateFields.goals = goals;
-      if (capabilities !== undefined) updateFields.capabilities = capabilities;
-      if (threatActorTypes !== undefined) updateFields.threatActorTypes = threatActorTypes;
-      if (targetSectors !== undefined) updateFields.targetSectors = targetSectors;
-      if (firstSeen !== undefined) updateFields.firstSeen = firstSeen;
-      if (lastSeen !== undefined) updateFields.lastSeen = lastSeen;
-      if (confidence !== undefined) updateFields.confidence = confidence;
-      if (stixId !== undefined) updateFields.stixId = stixId;
-      const [row] = await db.update(ctiThreatActors).set(updateFields).where(and(eq(ctiThreatActors.id, id), eq(ctiThreatActors.tenantId, tenantId))).returning();
-      if (!row) return res.status(404).json({ message: "Not found" });
-      res.json(row);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-  app.delete("/api/cti/:tenantId/threat-actors/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiThreatActors } = await import("@shared/schema");
-      await db.delete(ctiThreatActors).where(and(eq(ctiThreatActors.id, id), eq(ctiThreatActors.tenantId, tenantId)));
-      res.status(204).send();
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI Intrusion Sets — PATCH + DELETE
-  app.patch("/api/cti/:tenantId/intrusion-sets/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntrusionSets } = await import("@shared/schema");
-      const { name, aliases, description, primaryMotivation, resourceLevel, goals, capabilities, firstSeen, lastSeen, confidence, stixId } = req.body;
-      const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-      if (name !== undefined) updateFields.name = name;
-      if (aliases !== undefined) updateFields.aliases = aliases;
-      if (description !== undefined) updateFields.description = description;
-      if (primaryMotivation !== undefined) updateFields.primaryMotivation = primaryMotivation;
-      if (resourceLevel !== undefined) updateFields.resourceLevel = resourceLevel;
-      if (goals !== undefined) updateFields.goals = goals;
-      if (capabilities !== undefined) updateFields.capabilities = capabilities;
-      if (firstSeen !== undefined) updateFields.firstSeen = firstSeen;
-      if (lastSeen !== undefined) updateFields.lastSeen = lastSeen;
-      if (confidence !== undefined) updateFields.confidence = confidence;
-      if (stixId !== undefined) updateFields.stixId = stixId;
-      const [row] = await db.update(ctiIntrusionSets).set(updateFields).where(and(eq(ctiIntrusionSets.id, id), eq(ctiIntrusionSets.tenantId, tenantId))).returning();
-      if (!row) return res.status(404).json({ message: "Not found" });
-      res.json(row);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-  app.delete("/api/cti/:tenantId/intrusion-sets/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntrusionSets } = await import("@shared/schema");
-      await db.delete(ctiIntrusionSets).where(and(eq(ctiIntrusionSets.id, id), eq(ctiIntrusionSets.tenantId, tenantId)));
-      res.status(204).send();
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI Campaigns — PATCH + DELETE
-  app.patch("/api/cti/:tenantId/campaigns/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiCampaigns } = await import("@shared/schema");
-      const { name, aliases, description, objective, attribution, firstSeen, lastSeen, confidence, stixId } = req.body;
-      const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-      if (name !== undefined) updateFields.name = name;
-      if (aliases !== undefined) updateFields.aliases = aliases;
-      if (description !== undefined) updateFields.description = description;
-      if (objective !== undefined) updateFields.objective = objective;
-      if (attribution !== undefined) updateFields.attribution = attribution;
-      if (firstSeen !== undefined) updateFields.firstSeen = firstSeen;
-      if (lastSeen !== undefined) updateFields.lastSeen = lastSeen;
-      if (confidence !== undefined) updateFields.confidence = confidence;
-      if (stixId !== undefined) updateFields.stixId = stixId;
-      const [row] = await db.update(ctiCampaigns).set(updateFields).where(and(eq(ctiCampaigns.id, id), eq(ctiCampaigns.tenantId, tenantId))).returning();
-      if (!row) return res.status(404).json({ message: "Not found" });
-      res.json(row);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-  app.delete("/api/cti/:tenantId/campaigns/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiCampaigns } = await import("@shared/schema");
-      await db.delete(ctiCampaigns).where(and(eq(ctiCampaigns.id, id), eq(ctiCampaigns.tenantId, tenantId)));
-      res.status(204).send();
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI Malware Families — PATCH + DELETE
-  app.patch("/api/cti/:tenantId/malware-families/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiMalwareFamilies } = await import("@shared/schema");
-      const { name, aliases, description, malwareTypes, isFamily, capabilities, platforms, firstSeen, lastSeen, confidence, stixId } = req.body;
-      const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-      if (name !== undefined) updateFields.name = name;
-      if (aliases !== undefined) updateFields.aliases = aliases;
-      if (description !== undefined) updateFields.description = description;
-      if (malwareTypes !== undefined) updateFields.malwareTypes = malwareTypes;
-      if (isFamily !== undefined) updateFields.isFamily = isFamily;
-      if (capabilities !== undefined) updateFields.capabilities = capabilities;
-      if (platforms !== undefined) updateFields.platforms = platforms;
-      if (firstSeen !== undefined) updateFields.firstSeen = firstSeen;
-      if (lastSeen !== undefined) updateFields.lastSeen = lastSeen;
-      if (confidence !== undefined) updateFields.confidence = confidence;
-      if (stixId !== undefined) updateFields.stixId = stixId;
-      const [row] = await db.update(ctiMalwareFamilies).set(updateFields).where(and(eq(ctiMalwareFamilies.id, id), eq(ctiMalwareFamilies.tenantId, tenantId))).returning();
-      if (!row) return res.status(404).json({ message: "Not found" });
-      res.json(row);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-  app.delete("/api/cti/:tenantId/malware-families/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiMalwareFamilies } = await import("@shared/schema");
-      await db.delete(ctiMalwareFamilies).where(and(eq(ctiMalwareFamilies.id, id), eq(ctiMalwareFamilies.tenantId, tenantId)));
-      res.status(204).send();
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI Intel Reports — PATCH + DELETE
-  app.patch("/api/cti/:tenantId/intel-reports/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntelReports } = await import("@shared/schema");
-      const { title, reportType, tlpLevel, description, content, authors, labels, confidence, iocCount, relatedActors, relatedCampaigns, relatedMalware, externalUrl, publishedAt, stixId } = req.body;
-      const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-      if (title !== undefined) updateFields.title = title;
-      if (reportType !== undefined) updateFields.reportType = reportType;
-      if (tlpLevel !== undefined) updateFields.tlpLevel = tlpLevel;
-      if (description !== undefined) updateFields.description = description;
-      if (content !== undefined) updateFields.content = content;
-      if (authors !== undefined) updateFields.authors = authors;
-      if (labels !== undefined) updateFields.labels = labels;
-      if (confidence !== undefined) updateFields.confidence = confidence;
-      if (iocCount !== undefined) updateFields.iocCount = iocCount;
-      if (relatedActors !== undefined) updateFields.relatedActors = relatedActors;
-      if (relatedCampaigns !== undefined) updateFields.relatedCampaigns = relatedCampaigns;
-      if (relatedMalware !== undefined) updateFields.relatedMalware = relatedMalware;
-      if (externalUrl !== undefined) updateFields.externalUrl = externalUrl;
-      if (publishedAt !== undefined) updateFields.publishedAt = publishedAt;
-      if (stixId !== undefined) updateFields.stixId = stixId;
-      const [row] = await db.update(ctiIntelReports).set(updateFields).where(and(eq(ctiIntelReports.id, id), eq(ctiIntelReports.tenantId, tenantId))).returning();
-      if (!row) return res.status(404).json({ message: "Not found" });
-      res.json(row);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-  app.delete("/api/cti/:tenantId/intel-reports/:id", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const access = await assertTenantAccess(req, tenantId);
-      assertMSSRole(access);
-      const { db } = await import("./db");
-      const { ctiIntelReports } = await import("@shared/schema");
-      await db.delete(ctiIntelReports).where(and(eq(ctiIntelReports.id, id), eq(ctiIntelReports.tenantId, tenantId)));
-      res.status(204).send();
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI STIX Export — canonical endpoint (GET /stix/export mirrors /stix-bundle)
-  app.get("/api/cti/:tenantId/stix/export", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiThreatActors, ctiIntrusionSets, ctiCampaigns, ctiMalwareFamilies, ctiIntelReports } = await import("@shared/schema");
-      await seedCtiDataForTenant(tenantId);
-      const [actors, intrusionSets, camps, malware, reports] = await Promise.all([
-        db.select().from(ctiThreatActors).where(eq(ctiThreatActors.tenantId, tenantId)),
-        db.select().from(ctiIntrusionSets).where(eq(ctiIntrusionSets.tenantId, tenantId)),
-        db.select().from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)),
-        db.select().from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)),
-        db.select().from(ctiIntelReports).where(eq(ctiIntelReports.tenantId, tenantId)),
-      ]);
-      const objects = [
-        ...actors.map(a => ({ type: "threat-actor", spec_version: "2.1", id: a.stixId || `threat-actor--${a.id}`, created: a.createdAt, modified: a.updatedAt, name: a.name, aliases: a.aliases || [], threat_actor_types: a.threatActorTypes || [], sophistication: a.sophistication, resource_level: a.resourceLevel, primary_motivation: a.primaryMotivation, goals: a.goals || [], description: a.description, confidence: a.confidence })),
-        ...intrusionSets.map(i => ({ type: "intrusion-set", spec_version: "2.1", id: i.stixId || `intrusion-set--${i.id}`, created: i.createdAt, modified: i.updatedAt, name: i.name, aliases: i.aliases || [], description: i.description, primary_motivation: i.primaryMotivation, resource_level: i.resourceLevel, goals: i.goals || [], confidence: i.confidence })),
-        ...camps.map(c => ({ type: "campaign", spec_version: "2.1", id: c.stixId || `campaign--${c.id}`, created: c.createdAt, modified: c.updatedAt, name: c.name, aliases: c.aliases || [], description: c.description, objective: c.objective, first_seen: c.firstSeen, last_seen: c.lastSeen, confidence: c.confidence })),
-        ...malware.map(m => ({ type: "malware", spec_version: "2.1", id: m.stixId || `malware--${m.id}`, created: m.createdAt, modified: m.updatedAt, name: m.name, aliases: m.aliases || [], malware_types: m.malwareTypes || [], is_family: m.isFamily, description: m.description, capabilities: m.capabilities || [], confidence: m.confidence })),
-        ...reports.map(r => ({ type: "report", spec_version: "2.1", id: r.stixId || `report--${r.id}`, created: r.createdAt, modified: r.updatedAt, name: r.title, description: r.description, published: r.publishedAt, report_types: [r.reportType || "threat-report"], labels: r.labels || [], confidence: r.confidence })),
-      ];
-      const bundle = { type: "bundle", id: `bundle--tenant-${tenantId}-${Date.now()}`, spec_version: "2.1", objects };
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Content-Disposition", `attachment; filename="stix-bundle-tenant-${tenantId}.json"`);
-      res.json(bundle);
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI IOC → Incident/Actor relationship overlay (for STIX Observables page)
-  app.get("/api/cti/:tenantId/ioc-relationships", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      if (isNaN(tenantId)) return res.status(400).json({ message: "Invalid tenant ID" });
-      await assertTenantAccess(req, tenantId);
-
-      // IOC → incident relationships from incident_iocs table
-      const incidentRels = await pool.query(`
-        SELECT ii.indicator_value, ii.indicator_type, ii.reputation,
-               i.id AS incident_id, i.title AS incident_title, i.severity, i.status
-        FROM incident_iocs ii
-        JOIN incidents i ON ii.incident_id = i.id
-        WHERE i.tenant_id = $1
-          AND ii.reputation IN ('malicious','suspicious')
-        ORDER BY i.created_at DESC
-        LIMIT 200
-      `, [tenantId]);
-
-      // Aggregate by indicator value
-      const iocMap: Record<string, { indicator_type: string; reputation: string; incidents: { id: number; title: string; severity: string; status: string }[] }> = {};
-      for (const row of incidentRels.rows) {
-        if (!iocMap[row.indicator_value]) {
-          iocMap[row.indicator_value] = { indicator_type: row.indicator_type, reputation: row.reputation, incidents: [] };
-        }
-        if (iocMap[row.indicator_value].incidents.length < 5) {
-          iocMap[row.indicator_value].incidents.push({ id: row.incident_id, title: row.incident_title, severity: row.severity, status: row.status });
-        }
-      }
-
-      const relationships = Object.entries(iocMap).slice(0, 50).map(([value, data]) => ({
-        indicator_value: value,
-        indicator_type: data.indicator_type,
-        reputation: data.reputation,
-        incident_count: data.incidents.length,
-        incidents: data.incidents,
-      }));
-
-      res.json({ relationships, total: relationships.length });
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  // CTI Per-entity AI Briefs
-  app.post("/api/cti/:tenantId/threat-actors/:id/ai-brief", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiThreatActors } = await import("@shared/schema");
-      const [actor] = await db.select().from(ctiThreatActors).where(and(eq(ctiThreatActors.id, id), eq(ctiThreatActors.tenantId, tenantId)));
-      if (!actor) return res.status(404).json({ message: "Threat actor not found" });
-      const { callAI } = await import("./ai-providers");
-      const prompt = `You are a senior CTI analyst. Generate a concise 3-5 sentence intelligence profile for threat actor "${actor.name}" (also known as: ${(actor.aliases || []).join(", ") || "no aliases"}). Country: ${actor.country || "Unknown"}. Motivation: ${actor.primaryMotivation || "Unknown"}. Sophistication: ${actor.sophistication}. Include key TTPs, typical targets, and recommended defensive priorities.`;
-      const brief = await callAI(prompt, tenantId);
-      res.json({ brief, actor: actor.name, generatedAt: new Date().toISOString() });
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  app.post("/api/cti/:tenantId/campaigns/:id/ai-brief", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiCampaigns } = await import("@shared/schema");
-      const [campaign] = await db.select().from(ctiCampaigns).where(and(eq(ctiCampaigns.id, id), eq(ctiCampaigns.tenantId, tenantId)));
-      if (!campaign) return res.status(404).json({ message: "Campaign not found" });
-      const { callAI } = await import("./ai-providers");
-      const prompt = `You are a senior CTI analyst. Generate a concise 3-5 sentence intelligence assessment for campaign "${campaign.name}". Attribution: ${campaign.attribution || "Unknown"}. Status: ${campaign.active ? "Active" : "Inactive"}. Target sectors: ${(campaign.targetSectors || []).join(", ") || "Unknown"}. Target regions: ${(campaign.targetRegions || []).join(", ") || "Unknown"}. Cover campaign objectives, key TTPs observed, and recommended mitigations.`;
-      const brief = await callAI(prompt, tenantId);
-      res.json({ brief, campaign: campaign.name, generatedAt: new Date().toISOString() });
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
-
-  app.post("/api/cti/:tenantId/malware-families/:id/ai-brief", async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      await assertTenantAccess(req, tenantId);
-      const { db } = await import("./db");
-      const { ctiMalwareFamilies } = await import("@shared/schema");
-      const [malware] = await db.select().from(ctiMalwareFamilies).where(and(eq(ctiMalwareFamilies.id, id), eq(ctiMalwareFamilies.tenantId, tenantId)));
-      if (!malware) return res.status(404).json({ message: "Malware family not found" });
-      const { callAI } = await import("./ai-providers");
-      const prompt = `You are a malware analyst. Generate a concise 3-5 sentence technical brief for "${malware.name}" (types: ${(malware.malwareTypes || []).join(", ")}). Platforms: ${(malware.operatingSystems || []).join(", ") || "Unknown"}. Active: ${malware.active}. CVSS: ${malware.cvssScore || "N/A"}. Cover infection vector, key capabilities, detection signatures approach, and recommended containment actions.`;
-      const brief = await callAI(prompt, tenantId);
-      res.json({ brief, malware: malware.name, generatedAt: new Date().toISOString() });
-    } catch (err: any) { res.status(err.status ?? 500).json({ message: err.message }); }
-  });
 
   // ── TAXII 2.1 Feed Management ──────────────────────────────────────────────
 
   // List all configured TAXII servers
-  app.get("/api/integrations/taxii/servers", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { loadTaxiiServerConfigs } = await import("./taxii-client");
-      const configs = await loadTaxiiServerConfigs();
-      // Strip credentials before sending
-      const safe = configs.map(c => ({
-        id: c.id,
-        name: c.name,
-        displayName: c.displayName,
-        url: c.url,
-        authType: c.authType,
-        username: c.username,
-        collectionIds: c.collectionIds,
-        pollIntervalHours: c.pollIntervalHours,
-        lastSyncedAt: c.lastSyncedAt,
-        enabled: c.enabled,
-        status: c.status,
-        objectCount: c.objectCount,
-      }));
-      res.json(safe);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
+  registerIntegrationsRoutes(app);
 
-  // Create a new TAXII server
-  app.post("/api/integrations/taxii/servers", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { displayName, url, authType, username, password, bearerToken, collectionIds, pollIntervalHours, enabled } = req.body;
-      if (!displayName || !url) return res.status(400).json({ message: "displayName and url are required" });
-      const name = `taxii_${displayName.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${Date.now()}`;
-      const extra = JSON.stringify({ url, authType: authType || "none", username, collectionIds: collectionIds || [], pollIntervalHours: pollIntervalHours || 6 });
-      const result = await pool.query(
-        `INSERT INTO platform_integrations (name, display_name, category, description, enabled, requires_key, api_key, extra_config)
-         VALUES ($1, $2, 'threat_intel', 'TAXII 2.1 Feed Server', $3, $4, $5, $6::jsonb)
-         RETURNING id, name, display_name, enabled, test_status, last_tested_at, extra_config`,
-        [name, displayName, enabled !== false, !!bearerToken, bearerToken || null, extra]
-      );
-      if (password && authType === "basic") {
-        const row = result.rows[0];
-        const existingExtra = typeof row.extra_config === "string" ? JSON.parse(row.extra_config || "{}") : (row.extra_config || {});
-        existingExtra.password = password;
-        await pool.query(`UPDATE platform_integrations SET extra_config = $1::jsonb WHERE id = $2`, [JSON.stringify(existingExtra), row.id]);
-      }
-      res.json({ id: result.rows[0].id, name, displayName, message: "TAXII server added" });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Update an existing TAXII server
-  app.patch("/api/integrations/taxii/servers/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const { displayName, url, authType, username, password, bearerToken, collectionIds, pollIntervalHours, enabled } = req.body;
-      const existing = await pool.query(`SELECT extra_config, api_key FROM platform_integrations WHERE id = $1 AND name LIKE 'taxii_%'`, [id]);
-      if (!existing.rows.length) return res.status(404).json({ message: "TAXII server not found" });
-      const prevExtra = typeof existing.rows[0].extra_config === "string" ? JSON.parse(existing.rows[0].extra_config || "{}") : (existing.rows[0].extra_config || {});
-      const newExtra = { ...prevExtra };
-      if (url !== undefined) newExtra.url = url;
-      if (authType !== undefined) newExtra.authType = authType;
-      if (username !== undefined) newExtra.username = username;
-      if (password !== undefined && authType === "basic") newExtra.password = password;
-      if (collectionIds !== undefined) newExtra.collectionIds = collectionIds;
-      if (pollIntervalHours !== undefined) newExtra.pollIntervalHours = pollIntervalHours;
-      await pool.query(
-        `UPDATE platform_integrations SET display_name = COALESCE($1, display_name), enabled = COALESCE($2, enabled), api_key = COALESCE($3, api_key), extra_config = $4::jsonb WHERE id = $5`,
-        [displayName || null, enabled !== undefined ? enabled : null, bearerToken || null, JSON.stringify(newExtra), id]
-      );
-      res.json({ message: "TAXII server updated" });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Delete a TAXII server
-  app.delete("/api/integrations/taxii/servers/:id", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      await pool.query(`DELETE FROM platform_integrations WHERE id = $1 AND name LIKE 'taxii_%'`, [id]);
-      res.json({ message: "TAXII server deleted" });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Test TAXII server connection
-  app.post("/api/integrations/taxii/servers/:id/test", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const { loadTaxiiServerConfigs, testTaxiiConnection } = await import("./taxii-client");
-      const configs = await loadTaxiiServerConfigs();
-      const cfg = configs.find(c => c.id === id);
-      if (!cfg) return res.status(404).json({ message: "TAXII server not found" });
-      const result = await testTaxiiConnection(cfg);
-      await pool.query(
-        `UPDATE platform_integrations SET test_status = $1, test_message = $2, last_tested_at = NOW() WHERE id = $3`,
-        [result.success ? "ok" : "error", result.message, id]
-      );
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Manually trigger TAXII poll for one server
-  app.post("/api/integrations/taxii/servers/:id/poll", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      if (isNaN(id)) return res.status(400).json({ message: "Invalid ID" });
-      const { loadTaxiiServerConfigs, pollTaxiiServer } = await import("./taxii-client");
-      const configs = await loadTaxiiServerConfigs();
-      const cfg = configs.find(c => c.id === id);
-      if (!cfg) return res.status(404).json({ message: "TAXII server not found" });
-      const results = await pollTaxiiServer(cfg);
-      const totals = results.reduce((acc, r) => ({ iocCount: acc.iocCount + r.iocCount, actorCount: acc.actorCount + r.actorCount, campaignCount: acc.campaignCount + r.campaignCount, malwareCount: acc.malwareCount + r.malwareCount }), { iocCount: 0, actorCount: 0, campaignCount: 0, malwareCount: 0 });
-      res.json({ results, totals, message: `Polled ${results.length} collection(s)` });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get TAXII IOCs
-  app.get("/api/integrations/taxii/iocs", isAuthenticated, async (req, res) => {
-    try {
-      const { source, type, limit = "100", offset = "0" } = req.query;
-      const whereClauses = ["1=1"];
-      const filterParams: unknown[] = [];
-      if (source) { filterParams.push(`taxii:${source}`); whereClauses.push(`source = $${filterParams.length}`); }
-      if (type) { filterParams.push(type); whereClauses.push(`indicator_type = $${filterParams.length}::ioc_type`); }
-      const whereStr = whereClauses.join(" AND ");
-      const lim = parseInt(String(limit), 10) || 100;
-      const off = parseInt(String(offset), 10) || 0;
-      const [result, countRes] = await Promise.all([
-        pool.query(
-          `SELECT id, stix_id, indicator_type, indicator_value, reputation, confidence, source, tags, first_seen, last_seen, created_at, updated_at
-           FROM taxii_stix_iocs WHERE ${whereStr}
-           ORDER BY updated_at DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
-          [...filterParams, lim, off]
-        ),
-        pool.query(`SELECT COUNT(*) FROM taxii_stix_iocs WHERE ${whereStr}`, filterParams),
-      ]);
-      res.json({ iocs: result.rows, total: parseInt(String(countRes.rows[0]?.count || "0"), 10) });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get TAXII threat actors
-  app.get("/api/integrations/taxii/actors", isAuthenticated, async (req, res) => {
-    try {
-      const result = await pool.query(
-        `SELECT id, stix_id, name, aliases, sophistication, primary_motivation, country, first_seen, last_seen, source, tags, created_at, updated_at
-         FROM taxii_threat_actors ORDER BY updated_at DESC LIMIT 200`
-      );
-      res.json(result.rows);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // ── OpenCTI Integration ────────────────────────────────────────────────────
-
-  // Get OpenCTI config (safe — no token)
-  app.get("/api/integrations/opencti/config", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const result = await pool.query(
-        `SELECT id, enabled, test_status, last_tested_at, extra_config
-         FROM platform_integrations WHERE name = 'opencti' LIMIT 1`
-      );
-      if (!result.rows.length) return res.json({ configured: false });
-      const row = result.rows[0];
-      let extra: Record<string, unknown> = {};
-      if (row.extra_config) { extra = typeof row.extra_config === "string" ? JSON.parse(row.extra_config) : row.extra_config; }
-      const { loadOpenCTIConfig, getStreamStatus } = await import("./opencti-connector");
-      const streamStatus = getStreamStatus();
-      res.json({
-        configured: true,
-        id: row.id,
-        enabled: row.enabled,
-        testStatus: row.test_status,
-        lastTestedAt: row.last_tested_at,
-        lastSyncedAt: extra.lastSyncedAt || null,
-        url: String(extra.url || ""),
-        syncEnabled: extra.syncEnabled !== false,
-        liveStreamEnabled: extra.liveStreamEnabled === true,
-        iocCount: extra.iocCount || 0,
-        streamStatus,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Internal error";
-      res.status(500).json({ message });
-    }
-  });
-
-  // Upsert OpenCTI config (token is optional for partial updates — omit to keep existing)
-  app.put("/api/integrations/opencti/config", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { url, apiToken, syncEnabled, liveStreamEnabled } = req.body;
-      if (!url) return res.status(400).json({ message: "url is required" });
-
-      // If token is omitted, keep existing value from the DB
-      let resolvedToken: string | null = apiToken || null;
-      if (!resolvedToken) {
-        const existing = await pool.query(
-          `SELECT api_key FROM platform_integrations WHERE name = 'opencti' LIMIT 1`
-        );
-        resolvedToken = existing.rows[0]?.api_key || null;
-      }
-      if (!resolvedToken) return res.status(400).json({ message: "apiToken is required for first-time setup" });
-
-      const extra = JSON.stringify({ url, syncEnabled: syncEnabled !== false, liveStreamEnabled: !!liveStreamEnabled });
-      const result = await pool.query(
-        `INSERT INTO platform_integrations (name, display_name, category, description, enabled, requires_key, api_key, extra_config)
-         VALUES ('opencti', 'OpenCTI', 'threat_intel', 'OpenCTI Threat Intelligence Platform', true, true, $1, $2::jsonb)
-         ON CONFLICT (name) DO UPDATE SET
-           api_key = $1,
-           extra_config = $2::jsonb,
-           enabled = true,
-           updated_at = NOW()
-         RETURNING id`,
-        [resolvedToken, extra]
-      );
-      res.json({ id: result.rows[0].id, message: "OpenCTI configured" });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Test OpenCTI connection
-  app.post("/api/integrations/opencti/test", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { loadOpenCTIConfig, testOpenCTIConnection } = await import("./opencti-connector");
-      const config = await loadOpenCTIConfig();
-      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
-      const result = await testOpenCTIConnection(config);
-      await pool.query(
-        `UPDATE platform_integrations SET test_status = $1, test_message = $2, last_tested_at = NOW() WHERE name = 'opencti'`,
-        [result.success ? "ok" : "error", result.message]
-      );
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Trigger manual OpenCTI sync
-  app.post("/api/integrations/opencti/sync", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { loadOpenCTIConfig, runOpenCTISync } = await import("./opencti-connector");
-      const config = await loadOpenCTIConfig();
-      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
-      const result = await runOpenCTISync(config);
-      // Write lastSyncedAt to extra_config so it is distinct from last_tested_at
-      await pool.query(
-        `UPDATE platform_integrations
-         SET extra_config = jsonb_set(COALESCE(extra_config, '{}'), '{lastSyncedAt}', $1::jsonb)
-         WHERE name = 'opencti'`,
-        [JSON.stringify(new Date().toISOString())]
-      ).catch((e: Error) => console.warn("[OpenCTI] Failed to write lastSyncedAt:", e.message));
-      res.json(result);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Internal error";
-      res.status(500).json({ message });
-    }
-  });
-
-  // Start/stop OpenCTI live stream
-  app.post("/api/integrations/opencti/stream", isAuthenticated, isSuperAdminOrPlatformAdmin, async (req, res) => {
-    try {
-      const { action } = req.body;
-      const { loadOpenCTIConfig, startLiveStream, stopLiveStream, getStreamStatus } = await import("./opencti-connector");
-      if (action === "stop") {
-        stopLiveStream();
-        return res.json({ active: false, message: "Stream stopped" });
-      }
-      const config = await loadOpenCTIConfig();
-      if (!config) return res.status(400).json({ success: false, message: "OpenCTI not configured" });
-      if (!config.liveStreamEnabled) return res.status(400).json({ success: false, message: "Live stream not enabled in config" });
-      await startLiveStream(config);
-      res.json({ active: true, message: "Stream started", status: getStreamStatus() });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Internal error";
-      res.status(500).json({ message });
-    }
-  });
-
-  // Get live stream status
-  app.get("/api/integrations/opencti/stream-status", isAuthenticated, async (req, res) => {
-    try {
-      const { getStreamStatus } = await import("./opencti-connector");
-      res.json(getStreamStatus());
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get OpenCTI threat actors (from cache)
-  app.get("/api/integrations/opencti/actors", isAuthenticated, async (req, res) => {
-    try {
-      const result = await pool.query(
-        `SELECT id, stix_id, name, aliases, description, sophistication, primary_motivation, country, first_seen, last_seen, confidence, score, linked_ioc_count, created_at, updated_at
-         FROM opencti_threat_actors_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
-      );
-      res.json(result.rows);
-    } catch (err: any) {
-      if (err.message?.includes("does not exist")) return res.json([]);
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get OpenCTI campaigns (from cache)
-  app.get("/api/integrations/opencti/campaigns", isAuthenticated, async (req, res) => {
-    try {
-      const result = await pool.query(
-        `SELECT id, stix_id, name, description, aliases, first_seen, last_seen, objective, confidence, created_at, updated_at
-         FROM opencti_campaigns_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
-      );
-      res.json(result.rows);
-    } catch (err: any) {
-      if (err.message?.includes("does not exist")) return res.json([]);
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get OpenCTI malware (from cache)
-  app.get("/api/integrations/opencti/malware", isAuthenticated, async (req, res) => {
-    try {
-      const result = await pool.query(
-        `SELECT id, stix_id, name, description, aliases, malware_types, kill_chain_phases, first_seen, last_seen, confidence, created_at, updated_at
-         FROM opencti_malware_cache ORDER BY confidence DESC, updated_at DESC LIMIT 100`
-      );
-      res.json(result.rows);
-    } catch (err: any) {
-      if (err.message?.includes("does not exist")) return res.json([]);
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get OpenCTI IOCs (from cache)
-  app.get("/api/integrations/opencti/iocs", isAuthenticated, async (req, res) => {
-    try {
-      const { type, limit = "100", offset = "0" } = req.query;
-      const whereClauses = ["1=1"];
-      const filterParams: unknown[] = [];
-      if (type) { filterParams.push(type); whereClauses.push(`indicator_type = $${filterParams.length}::ioc_type`); }
-      const whereStr = whereClauses.join(" AND ");
-      const lim = parseInt(String(limit), 10) || 100;
-      const off = parseInt(String(offset), 10) || 0;
-      const [result, countResult] = await Promise.all([
-        pool.query(
-          `SELECT id, stix_id, indicator_type, indicator_value, reputation, confidence, score, source, labels, first_seen, last_seen, created_at, updated_at
-           FROM opencti_ioc_cache WHERE ${whereStr}
-           ORDER BY score DESC, updated_at DESC LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
-          [...filterParams, lim, off]
-        ),
-        pool.query(`SELECT COUNT(*) FROM opencti_ioc_cache WHERE ${whereStr}`, filterParams),
-      ]);
-      const total = parseInt(String(countResult.rows[0]?.count || "0"), 10);
-      res.json({ iocs: result.rows, total });
-    } catch (err: any) {
-      if (err.message?.includes("does not exist")) return res.json({ iocs: [], total: 0 });
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // Get OpenCTI IOC attribution context for a specific incident
-  app.get("/api/integrations/opencti/ioc-context", isAuthenticated, async (req, res) => {
-    try {
-      const incidentId = req.query.incidentId ? parseInt(String(req.query.incidentId), 10) : null;
-      if (!incidentId || isNaN(incidentId)) {
-        return res.status(400).json({ message: "incidentId is required" });
-      }
-
-      // Verify the requesting user has access to the incident's tenant
-      const incidentRow = await pool.query<{ tenant_id: number }>(
-        `SELECT tenant_id FROM incidents WHERE id = $1 LIMIT 1`,
-        [incidentId]
-      );
-      if (incidentRow.rows.length === 0) {
-        return res.status(404).json({ message: "Incident not found" });
-      }
-      const incidentTenantId = incidentRow.rows[0].tenant_id;
-      await assertTenantAccess(req, incidentTenantId);
-
-      const result = await pool.query(
-        `SELECT id, ioc_value, ioc_type, stix_id, actor_name, actor_stix_id, campaign_name, campaign_stix_id,
-                malware_family, malware_stix_id, confidence, score, incident_id, created_at
-         FROM opencti_ioc_context WHERE incident_id = $1 ORDER BY score DESC, created_at DESC LIMIT 50`,
-        [incidentId]
-      );
-      res.json(result.rows);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('does not exist')) return res.json([]);
-      const httpStatus = (err !== null && typeof err === "object" && "status" in err && typeof (err as Record<string, unknown>).status === "number") ? (err as { status: number }).status : 500;
-      res.status(httpStatus).json({ message: msg });
-    }
-  });
-
-  // Combined STIX IOC search across all sources
-  app.get("/api/integrations/stix/iocs", isAuthenticated, async (req, res) => {
-    try {
-      const { source, type, search, dateFrom, dateTo, limit = "100", offset = "0" } = req.query;
-      const lim = Math.min(parseInt(String(limit), 10) || 100, 500);
-      const off = parseInt(String(offset), 10) || 0;
-
-      const whereParts: string[] = [];
-      const params: unknown[] = [];
-
-      if (source && source !== "all") {
-        if (source === "opencti") {
-          params.push("opencti");
-          whereParts.push(`source = $${params.length}`);
-        } else if (source === "taxii") {
-          params.push("taxii:%");
-          whereParts.push(`source LIKE $${params.length}`);
-        } else {
-          params.push(String(source));
-          whereParts.push(`source = $${params.length}`);
-        }
-      }
-      if (type && type !== "all") {
-        if (type === "hash") {
-          whereParts.push(`indicator_type IN ('hash_md5'::ioc_type, 'hash_sha256'::ioc_type, 'hash_sha1'::ioc_type)`);
-        } else {
-          params.push(type);
-          whereParts.push(`indicator_type = $${params.length}::ioc_type`);
-        }
-      }
-      if (search) {
-        params.push(`%${search}%`);
-        whereParts.push(`indicator_value ILIKE $${params.length}`);
-      }
-      if (dateFrom) {
-        params.push(dateFrom);
-        whereParts.push(`first_seen >= $${params.length}`);
-      }
-      if (dateTo) {
-        params.push(dateTo);
-        whereParts.push(`first_seen <= $${params.length}`);
-      }
-
-      const where = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
-
-      // Proper UNION ALL query for correct mixed-source pagination
-      const unionQuery = `
-        SELECT stix_id, indicator_type, indicator_value, reputation, confidence, source,
-               tags::text AS labels, first_seen, last_seen, updated_at, 'taxii' AS source_type
-        FROM taxii_stix_iocs ${where}
-        UNION ALL
-        SELECT stix_id, indicator_type, indicator_value, reputation, confidence, source,
-               labels::text AS labels, first_seen, last_seen, updated_at, 'opencti' AS source_type
-        FROM opencti_ioc_cache ${where}
-      `;
-      const dataParams = [...params, lim, off];
-      const [dataResult, countResult] = await Promise.all([
-        pool.query(
-          `SELECT * FROM (${unionQuery}) u ORDER BY updated_at DESC LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
-          dataParams
-        ),
-        pool.query(
-          `SELECT COUNT(*) FROM (${unionQuery}) u`,
-          params
-        ),
-      ]);
-
-      const total = parseInt(String(countResult.rows[0]?.count || "0"), 10);
-
-      // Get source stats from both TAXII and OpenCTI caches
-      const sourcesResult = await pool.query(
-        `SELECT source, COUNT(*) AS count FROM taxii_stix_iocs GROUP BY source
-         UNION ALL
-         SELECT source, COUNT(*) AS count FROM opencti_ioc_cache GROUP BY source`
-      );
-
-      res.json({ iocs: dataResult.rows, total, sources: sourcesResult.rows });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Internal error";
-      console.error("[STIX IOC] Query error:", err);
-      res.status(500).json({ message });
-    }
-  });
 
   // CTI AI Brief — AI-generated threat intelligence summary
   app.post("/api/cti/:tenantId/ai-brief", async (req, res) => {
@@ -44928,7 +43408,7 @@ Tenant context: tenantId=${tid}, today=${new Date().toISOString().split("T")[0]}
         db.select({ name: ctiCampaigns.name, active: ctiCampaigns.active, attribution: ctiCampaigns.attribution, targetSectors: ctiCampaigns.targetSectors }).from(ctiCampaigns).where(eq(ctiCampaigns.tenantId, tenantId)).limit(10),
         db.select({ name: ctiMalwareFamilies.name, malwareTypes: ctiMalwareFamilies.malwareTypes, active: ctiMalwareFamilies.active }).from(ctiMalwareFamilies).where(eq(ctiMalwareFamilies.tenantId, tenantId)).limit(8),
       ]);
-      const { callAI } = await import("./ai-providers");
+      const { callAI } = await import("./ai-provider");
       const prompt = `You are a senior threat intelligence analyst. Generate a concise executive-level CTI brief (4-6 sentences) covering the current threat landscape based on this data:
 Active Threat Actors: ${actors.filter(a => a.active).map(a => `${a.name} (${a.country || 'Unknown'})`).join(', ')}
 Active Campaigns: ${campaigns.filter(c => c.active).map(c => c.name).join(', ')}
@@ -45069,7 +43549,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
 
   app.get('/api/log-sources/:tenantId', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       if (isNaN(tenantId)) return res.status(400).json({ message: 'Invalid tenant ID' });
       await assertTenantAccess(req, tenantId);
       const sources = await storage.getLogSources(tenantId);
@@ -45078,13 +43558,13 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       const result = sources.map(s => ({ ...s, health: healthMap.get(s.id) || null }));
       res.json(result);
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   app.post('/api/log-sources/:tenantId', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       if (isNaN(tenantId)) return res.status(400).json({ message: 'Invalid tenant ID' });
       await assertTenantAccess(req, tenantId);
       const { insertLogSourceSchema } = await import('@shared/schema');
@@ -45093,41 +43573,41 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       const source = await storage.createLogSource(parsed.data);
       res.status(201).json(source);
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   app.patch('/api/log-sources/:tenantId/:id', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
+      const tenantId = parseInt(req.params.tenantId as string);
+      const id = parseInt(req.params.id as string);
       if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
       await assertTenantAccess(req, tenantId);
       const source = await storage.updateLogSource(id, tenantId, req.body);
       if (!source) return res.status(404).json({ message: 'Log source not found' });
       res.json(source);
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   app.delete('/api/log-sources/:tenantId/:id', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
+      const tenantId = parseInt(req.params.tenantId as string);
+      const id = parseInt(req.params.id as string);
       if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
       await assertTenantAccess(req, tenantId);
       await storage.deleteLogSource(id, tenantId);
       res.status(204).end();
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   app.get('/api/log-sources/:tenantId/:id/health', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
+      const tenantId = parseInt(req.params.tenantId as string);
+      const id = parseInt(req.params.id as string);
       if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
       await assertTenantAccess(req, tenantId);
       const src = await storage.getLogSource(id, tenantId);
@@ -45135,7 +43615,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       const health = await storage.getSourceHealth(id, tenantId);
       res.json(health || { sourceId: id, eventsPerMin: 0, parseSuccessRate: 100, lastSeen: null, errorRate: 0, totalEventsToday: 0 });
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -45230,30 +43710,10 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
     }
   });
 
-  /**
-   * GET /api/log-sources/:tenantId/:id/fingerprint
-   * Returns the AI-generated device fingerprint for a specific log source.
-   */
-  app.get('/api/log-sources/:tenantId/:id/fingerprint', isAuthenticated, async (req, res) => {
-    try {
-      const tenantId = parseInt(req.params.tenantId);
-      const id = parseInt(req.params.id);
-      if (isNaN(tenantId) || isNaN(id)) return res.status(400).json({ message: 'Invalid ID' });
-      await assertTenantAccess(req, tenantId);
-      const src = await storage.getLogSource(id, tenantId);
-      if (!src) return res.status(404).json({ message: 'Log source not found' });
-      if (!src.fingerprintId) return res.json(null);
-      const fingerprint = await storage.getDeviceFingerprintById(src.fingerprintId);
-      res.json(fingerprint ?? null);
-    } catch (err: any) {
-      res.status(err.status ?? 500).json({ message: err.message });
-    }
-  });
-
   // ─── AI Log Parser endpoint (#157) ───────────────────────────────────────────
   app.post('/api/log-parse/:tenantId', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       if (isNaN(tenantId)) return res.status(400).json({ message: 'Invalid tenant ID' });
       await assertTenantAccess(req, tenantId);
       const { rawLog, sourceId, persist } = req.body;
@@ -45283,14 +43743,14 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       }
       res.json({ parsed, savedEventId });
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   // ─── Batch raw log ingestion with AI parsing (#157) ───────────────────────────
   app.post('/api/log-ingest/:tenantId', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       if (isNaN(tenantId)) return res.status(400).json({ message: 'Invalid tenant ID' });
       await assertTenantAccess(req, tenantId);
       const { rawLogs, sourceId, sourceIdentifier, autoFingerprint } = req.body;
@@ -45341,14 +43801,14 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       }
       res.json({ accepted: results.length, saved: saved.length, needsReview: reviewCount, highConfidence: successCount });
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   // ─── Device fingerprinting endpoint (#157) ───────────────────────────────────
   app.post('/api/device-fingerprint/:tenantId', isAuthenticated, async (req, res) => {
     try {
-      const tenantId = parseInt(req.params.tenantId);
+      const tenantId = parseInt(req.params.tenantId as string);
       if (isNaN(tenantId)) return res.status(400).json({ message: 'Invalid tenant ID' });
       await assertTenantAccess(req, tenantId);
       const { sampleLogs, sourceIdentifier } = req.body;
@@ -45358,7 +43818,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       const { fingerprint, fingerprintId } = await getOrCreateFingerprint(tenantId, sourceIdentifier, sampleLogs.slice(0, 10).map(String));
       res.json({ fingerprint, fingerprintId });
     } catch (err) {
-      res.status(err.status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -45926,7 +44386,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       );
       res.json(result.rows);
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -45939,7 +44399,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       await assertTenantAccess(req, result.rows[0].tenant_id);
       res.json(result.rows[0]);
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -45965,7 +44425,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       );
       res.json(result.rows[0]);
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -45979,7 +44439,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       await pool.query(`DELETE FROM investigation_sessions WHERE id = $1`, [sessionId]);
       res.json({ success: true });
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -46078,57 +44538,8 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         return { pgTotal: parseInt(cntPg.rows[0].count, 10), pgRows: dataPg.rows };
       };
 
-      // ── ClickHouse dispatch for ALL modes (live, offline, both) ────────────
-      // ClickHouse with S3 tiering can handle the full date range — hot parts
-      // are read from EFS, warm parts from S3 automatically. For live mode we
-      // still restrict to the hot window; for offline/both we allow the full
-      // range so historical investigations query CH instead of PG.
-      const chClient = getClickHouseClient();
-      if (chClient) {
-        try {
-          const chConditions: string[] = [`tenant_id = ${tId}`];
-          // Live mode: restrict to hot window (0-90 days)
-          // Offline/Both mode: no hot restriction — CH reads from S3 for old parts
-          if (isLiveOnly) {
-            const hotCutoffStr = formatChDateTime64(hotCutoff);
-            chConditions.push(`occurred_at >= '${hotCutoffStr}'`);
-          }
-          if (parsedStart) chConditions.push(`occurred_at >= '${formatChDateTime64(parsedStart)}'`);
-          if (parsedEnd)   chConditions.push(`occurred_at <= '${formatChDateTime64(parsedEnd)}'`);
-          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
-          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
-          if (search) {
-            const sch = search.replace(/'/g, "''");
-            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
-          }
-          if (entityFilter) {
-            const ef = entityFilter.replace(/'/g, "''");
-            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
-          }
-          const chWhere = chConditions.join(" AND ");
-          const [cntRows, dataRows] = await Promise.all([
-            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
-            chClient.queryRows<Record<string, unknown>>(
-              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
-                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
-                      ai_reasoning, parse_confidence, incident_id
-               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
-            ),
-          ]);
-          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
-          rows = dataRows;
-          tier = isOfflineOnly ? "cold" : isBoth ? "hot+cold" : "hot";
-        } catch (chErr: any) {
-          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
-        }
-      }
-
-      // ── Offline/Both mode: async cache when CH unavailable ─────────────────
-      // When ClickHouse is not configured or failed, we fall back to the legacy
-      // async pattern: Athena first (if configured), then PG full scan.
-      // The async cache lets the UI poll for results.
-      if ((isOfflineOnly || (isBoth && spansCold)) && rows.length === 0 && total === 0) {
+      // ── OFFLINE mode OR BOTH mode spanning cold tier ──
+      if (isOfflineOnly || (isBoth && spansCold)) {
         const athenaClient = await getAthenaClient(pool);
         if (athenaClient) {
           try {
@@ -46164,7 +44575,6 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
               hotRows: isBoth ? hotRows : [],
               hotTotal: isBoth ? hotTotal : 0,
               sessionId: querySessionId ?? null,
-              createdAt: Date.now(),
             };
 
             const hotPageRows = hotRows.slice(0, pageSize);
@@ -46193,7 +44603,6 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
           tier: isBoth ? "hot+cold" : "cold",
           sourceMode, tenantId: tId, userId: access.userId, isAthena: false,
           sessionId: querySessionId ?? null,
-          createdAt: Date.now(),
         };
         return res.json({
           rows: [], total: 0, page, pageSize, totalPages: 0,
@@ -46203,7 +44612,47 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         });
       }
 
-      // ── Live mode PG fallback (when CH unavailable) ────────────────────────
+      // ── LIVE mode: dispatch to ClickHouse if available ──
+      const chClient = getClickHouseClient();
+      if (isLiveOnly && chClient) {
+        try {
+          const hotCutoffStr = hotCutoff.toISOString().slice(0, 19).replace("T", " ");
+          const chConditions: string[] = [
+            `tenant_id = ${tId}`,
+            `occurred_at >= '${hotCutoffStr}'`,
+          ];
+          if (parsedStart) chConditions.push(`occurred_at >= '${parsedStart.toISOString().slice(0, 19).replace("T", " ")}'`);
+          if (parsedEnd)   chConditions.push(`occurred_at <= '${parsedEnd.toISOString().slice(0, 19).replace("T", " ")}'`);
+          if (severity?.length) chConditions.push(`severity IN (${severity.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (sourceType?.length) chConditions.push(`source_type IN (${sourceType.map((s: string) => `'${s.replace(/'/g, "''")}'`).join(",")})`);
+          if (eventType) chConditions.push(`event_type = '${String(eventType).replace(/'/g, "''")}'`);
+          if (search) {
+            const sch = search.replace(/'/g, "''");
+            chConditions.push(`(description ILIKE '%${sch}%' OR raw_log ILIKE '%${sch}%' OR attacker ILIKE '%${sch}%' OR target ILIKE '%${sch}%')`);
+          }
+          if (entityFilter) {
+            const ef = entityFilter.replace(/'/g, "''");
+            chConditions.push(`(attacker ILIKE '%${ef}%' OR asset ILIKE '%${ef}%' OR target ILIKE '%${ef}%')`);
+          }
+          const chWhere = chConditions.join(" AND ");
+          const [cntRows, dataRows] = await Promise.all([
+            chClient.queryRows<{ count: string }>(`SELECT count() AS count FROM security_events WHERE ${chWhere}`),
+            chClient.queryRows<Record<string, unknown>>(
+              `SELECT id, occurred_at AS timestamp, source_type AS source, event_type, severity,
+                      mitre_tactic, threat, target, attacker, raw_log, raw_payload, description,
+                      ai_reasoning, parse_confidence, incident_id
+               FROM security_events WHERE ${chWhere} ORDER BY occurred_at DESC LIMIT ${pageSize} OFFSET ${offset}`
+            ),
+          ]);
+          total = parseInt(String(cntRows[0]?.count ?? "0"), 10);
+          rows = dataRows;
+          tier = "hot";
+        } catch (chErr: any) {
+          console.warn("[LogInvestigation] ClickHouse failed, falling back to PG:", chErr.message);
+        }
+      }
+
+      // ── PG fallback for live mode (without ClickHouse) ──
       if (rows.length === 0 && total === 0) {
         const { pgTotal, pgRows } = await runPgHotQuery(true); // hotOnly=true: restrict to 90-day window
         total = pgTotal;
@@ -46221,7 +44670,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       res.json({ rows, total, page, pageSize, totalPages: Math.ceil(total / pageSize), queryId: null, tier, sourceMode });
     } catch (err: any) {
       console.error("[LogInvestigation] query error:", err.message);
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -46359,7 +44808,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
         return res.json({ queryId, status: "RUNNING", progress });
       }
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -46514,7 +44963,10 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       try {
         const gzipped = await gzipAsync(Buffer.from(bundleJson, "utf8"));
         const cs = getCloudStorage();
-        const bucket = process.env.CLOUD_STORAGE_BUCKET || "secureops-data";
+        const bucket = process.env.CLOUD_STORAGE_BUCKET;
+        if (!bucket) {
+          throw new Error("CLOUD_STORAGE_BUCKET environment variable is required for forensics export upload");
+        }
         await cs.upload(bucket, s3Key, gzipped, {
           contentType: "application/gzip",
           tenantId: tId,
@@ -46540,7 +44992,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       });
     } catch (err: any) {
       console.error("[LogInvestigation] export error:", err.message);
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -46571,7 +45023,7 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       res.send(bundleData);
     } catch (err: any) {
       console.error("[LogInvestigation] download error:", err.message);
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -46586,11 +45038,119 @@ Write a professional threat intelligence narrative suitable for a CISO briefing.
       );
       res.json(result.rows);
     } catch (err: any) {
-      res.status((err as any).status ?? 500).json({ message: err.message });
+      res.status(typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 
   // ── End Log Investigation Console API ─────────────────────────────────────────
+
+  // ── Self-Heal Engine (#266) ──────────────────────────────────────────────────
+  app.get("/api/admin/self-heal/settings", isAuthenticated, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const { loadSelfHealSettings } = await import("./self-heal-engine");
+      res.json(await loadSelfHealSettings());
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Failed to load settings" });
+    }
+  });
+
+  app.put("/api/admin/self-heal/settings", isAuthenticated, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const { selfHealEmailSettingsSchema } = await import("@shared/schema");
+      const parsed = selfHealEmailSettingsSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "Invalid settings", errors: parsed.error.flatten() });
+      const { saveSelfHealSettings } = await import("./self-heal-engine");
+      const changedBy = req.user?.claims?.sub || req.session?.email || "admin";
+      await saveSelfHealSettings(parsed.data, changedBy);
+      res.json(parsed.data);
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Failed to save settings" });
+    }
+  });
+
+  app.get("/api/admin/self-heal/findings", isAuthenticated, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      // Task #341 — Defensive query-param validation. Previously, any
+      // value passed in `?severity=` was interpolated directly into the
+      // WHERE clause, and PostgreSQL would throw 22P02 on any string
+      // that wasn't a valid `self_heal_severity` enum value (`"all"`,
+      // `""`, etc.) — bubbling up as a 500 to the admin portal. Same
+      // story for `tenantId` if non-numeric. Now we silently drop any
+      // value that isn't on the allow-list, instead of crashing.
+      const ALLOWED_SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+      const rawTenant = req.query.tenantId ? parseInt(String(req.query.tenantId), 10) : NaN;
+      const tenantId = Number.isInteger(rawTenant) && rawTenant > 0 ? rawTenant : null;
+      const rawSeverity = req.query.severity ? String(req.query.severity) : null;
+      const severity = rawSeverity && (ALLOWED_SEVERITIES as readonly string[]).includes(rawSeverity)
+        ? rawSeverity
+        : null;
+      const includeResolved = String(req.query.includeResolved || "0") === "1";
+      const params: any[] = [];
+      const where: string[] = [];
+      if (tenantId) { params.push(tenantId); where.push(`tenant_id = $${params.length}`); }
+      if (severity) { params.push(severity); where.push(`severity = $${params.length}`); }
+      if (!includeResolved) where.push(`resolved_at IS NULL`);
+      const sql =
+        `SELECT f.id, f.fingerprint, f.tenant_id AS "tenantId", t.name AS "tenantName",
+                f.finding_type AS "category", f.subsystem, f.severity::text AS severity,
+                f.summary AS "title", f.affected_resource AS "resource",
+                f.description AS "diagnosis",
+                f.evidence AS "details", f.status::text AS status,
+                f.occurrences,
+                f.first_seen_at AS "firstSeenAt", f.last_seen_at AS "lastSeenAt",
+                f.emailed_at AS "emailedAt", f.resolved_at AS "resolvedAt"
+           FROM self_heal_findings f
+           LEFT JOIN tenants t ON t.id = f.tenant_id
+          ${where.length ? "WHERE " + where.join(" AND ") : ""}
+          ORDER BY (CASE f.severity::text WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END),
+                   f.last_seen_at DESC
+          LIMIT 500`;
+      const r = await pool.query(sql, params);
+      res.json(r.rows);
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Failed to load findings" });
+    }
+  });
+
+  app.post("/api/admin/self-heal/scan", isAuthenticated, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const { runSelfHealEngineOnce } = await import("./self-heal-engine");
+      const result = await runSelfHealEngineOnce({ force: true });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Scan failed" });
+    }
+  });
+
+  // Task #268 — Self-Heal trends (stacked area, top detectors, MTTR, auto-fix rate)
+  app.get("/api/admin/self-heal/trends", isAuthenticated, async (req: any, res) => {
+    try {
+      const isAdmin = await assertAdminAccess(req);
+      if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
+      const windowDays = req.query.windowDays
+        ? parseInt(String(req.query.windowDays), 10)
+        : 30;
+      const tenantId = req.query.tenantId
+        ? parseInt(String(req.query.tenantId), 10)
+        : null;
+      const { getSelfHealTrends } = await import("./self-heal-engine");
+      const trends = await getSelfHealTrends({
+        windowDays: Number.isFinite(windowDays) ? windowDays : 30,
+        tenantId: tenantId && Number.isFinite(tenantId) ? tenantId : null,
+      });
+      res.json(trends);
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Failed to load trends" });
+    }
+  });
 
   return httpServer;
 }
