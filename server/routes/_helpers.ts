@@ -376,13 +376,16 @@ export async function getUserTenantAccess(req: any): Promise<UserTenantAccess> {
 
 /** Asserts the calling user has access to `tenantId`.
  *
- *  Three-tier model (Task #560):
- *   1. platform_admin / superadmin → any tenant (global access).
+ *  Three-tier model (Task #560 / #564):
+ *   1. True superadmin (isPlatformAdmin && tenantId === null) → any tenant (global access).
+ *      platform_admin users WITH a real tenantId are NOT in this tier — they fall
+ *      through to tier 2 or 3 below.
  *   2. User whose OWN tenant.type === 'mssp' (isMSSPTenant) → may access
  *      any tenant in their descendant tree (recursive). Cross-MSSP access is
  *      denied even for users with MSS-like role names.
  *   3. Everyone else (customer-tenant users, regardless of role name) →
- *      own tenant only. A soc_manager at a customer tenant is in group 3.
+ *      own tenant only. A platform_admin or soc_manager at a customer tenant
+ *      is in group 3.
  *
  *  Throws an Error with `.status = 403` on denial. */
 export async function assertTenantAccess(req: any, tenantId: number): Promise<AssertedTenantAccess> {
